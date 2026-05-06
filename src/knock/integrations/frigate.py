@@ -1,0 +1,1 @@
+"""Frigate integration placeholder."""
