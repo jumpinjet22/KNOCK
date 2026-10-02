@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -10,5 +10,5 @@ class SessionState(BaseModel):
     turn_count: int = 0
     last_intent: str = "unknown"
     escalated: bool = False
-    updated_at: datetime
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     history: list[str] = Field(default_factory=list)

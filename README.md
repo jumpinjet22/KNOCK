@@ -106,10 +106,16 @@ pytest
 python -m knock
 ```
 
-Example:
+The CLI holds one session across turns (state persists to disk between
+messages) until you send a blank line or `quit`:
 
-- Visitor: `Hi I have an Amazon package`
-- Response: `Thanks. You can leave the package by the door.`
+```
+KNOCK CLI -- session 3f9c... (blank line or 'quit' to exit)
+Visitor: Hi I have an Amazon package
+Response: Thanks. You can leave the package by the door.
+Visitor: quit
+Session saved: 3f9c... (1 turn(s))
+```
 
 ### 4) Run API locally
 
@@ -117,13 +123,20 @@ Example:
 uvicorn knock.api.app:app --reload
 ```
 
-Test endpoint:
+Test endpoint — the response carries an `X-Session-Id` header; pass it back
+as a `session_id` query param on later calls to continue the same
+conversation (state is persisted to disk between requests):
 
 ```bash
-curl -X POST http://127.0.0.1:8000/respond \
+curl -i -X POST http://127.0.0.1:8000/respond \
   -H "Content-Type: application/json" \
   -d '{"source":"doorbell","text":"Hi I have a package","timestamp":"2026-01-01T12:00:00Z"}'
+
+curl -X GET http://127.0.0.1:8000/sessions/<session-id-from-above>
 ```
+
+Session files live under `~/.local/share/knock/sessions` by default,
+overridable via `KNOCK_SESSION_DIR`.
 
 ### 5) Docker local run
 
@@ -142,7 +155,7 @@ Near-term priorities:
 1. richer safety policy and auditing
 2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
 3. hardware input/output bridges
-4. session persistence and event replay
+4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
 
 ## License
 
