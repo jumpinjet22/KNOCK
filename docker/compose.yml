@@ -7,6 +7,18 @@ services:
     # .github/workflows/docker-publish.yml); a manual/dispatch build only
     # ever gets a `sha-<short-sha>` tag. Bump this deliberately on upgrade.
     image: ghcr.io/jumpinjet22/knock:sha-e89564f
+    env_file:
+      # Same file (and the same KNOCK_<NAME>_<FIELD> vars) documented in
+      # .env.example at the repo root -- copy that to .env and fill in your
+      # real network endpoints. An env var here always wins over whatever's
+      # stored through the web UI (see config.py's from_sources()
+      # precedence), so this is how real deployments pin the connection
+      # settings that matter (Ollama/Whisper/Kokoro/MQTT/Frigate/HA/UniFi)
+      # without relying on the UI alone. Optional, matching .env.example's
+      # own "nothing here is required" promise -- this still starts fine
+      # with no .env present at all.
+      - path: ../.env
+        required: false
     ports:
       - "8080:8000"
     volumes:
