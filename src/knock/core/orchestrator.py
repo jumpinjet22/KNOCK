@@ -18,14 +18,28 @@ def _with_greeting(text: str, *, is_first_turn: bool) -> str:
     return f"{GREETING} {text}" if is_first_turn else text
 
 
-def _unknown_intent_prompt(text: str) -> str:
+# Plain-English framing of each `classify_intent()` bucket, embedded in the
+# LLM prompt below so it understands the classifier's guess without needing
+# to know KNOCK's internal intent names.
+_INTENT_DESCRIPTIONS = {
+    "delivery": "a package delivery",
+    "delivery_signature_required": "a package delivery that requires a signature",
+    "religious_soliciting": "someone doing religious canvassing or solicitation",
+    "political_soliciting": "someone doing political canvassing or collecting signatures/votes",
+    "soliciting": "a door-to-door salesperson or solicitor",
+    "unknown": "something that didn't match any of the system's known categories",
+}
+
+
+def _response_prompt(intent: str, visitor_text: str) -> str:
+    category = _INTENT_DESCRIPTIONS.get(intent, intent)
     return (
-        f'A visitor at the door said: "{text}"\n'
-        "This didn't match any of the system's known request categories "
-        "(package delivery, emergency, asking whether anyone is home). "
-        "Reply with one short, polite sentence a doorbell assistant could "
-        "say back. Never say whether anyone is home, share the household's "
-        "schedule, or offer to unlock/open the door."
+        f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f"The system's keyword classifier guesses this is: {category}.\n"
+        "Reply with one short, natural, polite sentence a doorbell "
+        "assistant could say back, consistent with that situation -- don't "
+        "just recite the category. Never say whether anyone is home, share "
+        "the household's schedule, or offer to unlock/open the door."
     )
 
 
@@ -38,13 +52,18 @@ class Orchestrator:
     ) -> None:
         self.policy = policy or PolicyEngine()
         self.audit_log = audit_log or NullAuditLog()
-        # Optional: visitor speech the keyword classifier can't place at all
-        # falls back to this (see `_unknown_response`) instead of the static
-        # "Sorry, I can't help with that right now." -- every known, safety-
-        # relevant category (delivery, emergency, occupancy/schedule/unlock
-        # probes) is still handled deterministically by `classify_intent`/
-        # `PolicyEngine` before this is ever consulted, so a down or slow
-        # LLM only ever degrades the *unknown* bucket, never the safety path.
+        # Optional: when set, this is the *primary* way every allowed,
+        # non-emergency response gets phrased (see `_text_for_intent`) --
+        # classify_intent()'s category becomes a hint in the prompt rather
+        # than a literal canned string, so a response can actually use what
+        # was transcribed/seen instead of reciting the same fixed sentence
+        # every time. Emergency escalation and blocked requests (occupancy/
+        # schedule/unlock probes) are still handled entirely by the
+        # deterministic PolicyEngine before this is ever consulted -- those
+        # never go through the LLM, so a down or unpredictable LLM only
+        # ever degrades phrasing, never the safety path. A missing
+        # provider, or any failure/blank reply from it, falls back to the
+        # static RESPONSES text.
         self.llm_provider = llm_provider
 
     def respond(
@@ -115,13 +134,13 @@ class Orchestrator:
         return response
 
     def _text_for_intent(self, intent: str, visitor_text: str) -> str:
-        if intent != "unknown" or self.llm_provider is None:
+        if self.llm_provider is None:
             return response_for(intent)
 
         try:
-            generated = self.llm_provider.generate(_unknown_intent_prompt(visitor_text)).strip()
+            generated = self.llm_provider.generate(_response_prompt(intent, visitor_text)).strip()
         except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
-            logger.warning("LLM fallback for an unclassified request failed: %s", exc)
+            logger.warning("LLM response generation failed for intent %r: %s", intent, exc)
             return response_for(intent)
 
         return generated or response_for(intent)

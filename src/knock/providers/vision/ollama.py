@@ -87,6 +87,11 @@ class OllamaVisionProvider:
                 "prompt": prompt or self.config.prompt,
                 "images": [encoded_image],
                 "stream": False,
+                # See OllamaProvider.generate()'s same option -- a
+                # reasoning-capable vision model spends extra time on a
+                # hidden chain-of-thought by default; a doorbell snapshot
+                # description doesn't need it.
+                "think": False,
             },
         )
         response.raise_for_status()

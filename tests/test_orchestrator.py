@@ -35,6 +35,24 @@ def test_delivery_signature_required_intent() -> None:
     assert decision.escalate is False
 
 
+def test_religious_soliciting_intent() -> None:
+    decision = Orchestrator().respond(_event("Do you have a minute to talk about the Bible?"))
+    assert "not interested" in decision.text.lower()
+    assert decision.escalate is False
+
+
+def test_political_soliciting_intent() -> None:
+    decision = Orchestrator().respond(_event("I'm here for the campaign, can I get your vote?"))
+    assert "politics" in decision.text.lower()
+    assert decision.escalate is False
+
+
+def test_general_soliciting_intent() -> None:
+    decision = Orchestrator().respond(_event("I'm selling magazine subscriptions door-to-door"))
+    assert "solicitations" in decision.text.lower()
+    assert decision.escalate is False
+
+
 def test_unknown_visitor_fallback() -> None:
     decision = Orchestrator().respond(_event("Do you like jazz?"))
     assert "can't help" in decision.text.lower()
@@ -68,16 +86,34 @@ def test_unknown_intent_uses_the_llm_fallback_when_configured() -> None:
     assert "Do you like jazz?" in llm.prompts[0]
 
 
-def test_llm_fallback_is_only_consulted_for_unknown_intent() -> None:
-    llm = _FakeLLMProvider()
-    Orchestrator(llm_provider=llm).respond(_event("Hi, I have an Amazon package"))
+def test_llm_is_consulted_for_a_known_intent_too_not_just_unknown() -> None:
+    # The whole point of wiring an LLM in is to phrase responses using what
+    # was actually said/seen instead of reciting the same fixed string for
+    # every delivery -- it must not be limited to the unknown bucket.
+    llm = _FakeLLMProvider("Sure, go ahead and leave it by the door, thanks!")
+    decision = Orchestrator(llm_provider=llm).respond(_event("Hi, I have an Amazon package"))
 
-    assert llm.prompts == []
+    assert decision.text == "Sure, go ahead and leave it by the door, thanks!"
+    assert len(llm.prompts) == 1
+    assert "Hi, I have an Amazon package" in llm.prompts[0]
+    assert "delivery" in llm.prompts[0].lower()
+
+
+def test_known_intent_uses_the_canned_response_without_an_llm_provider() -> None:
+    decision = Orchestrator().respond(_event("Hi, I have an Amazon package"))
+    assert "leave the package" in decision.text.lower()
 
 
 def test_llm_fallback_failure_falls_back_to_the_canned_response() -> None:
     decision = Orchestrator(llm_provider=_FailingLLMProvider()).respond(_event("Do you like jazz?"))
     assert "can't help" in decision.text.lower()
+
+
+def test_llm_failure_on_a_known_intent_falls_back_to_its_own_canned_response() -> None:
+    decision = Orchestrator(llm_provider=_FailingLLMProvider()).respond(
+        _event("Hi, I have an Amazon package")
+    )
+    assert "leave the package" in decision.text.lower()
 
 
 def test_llm_fallback_blank_response_falls_back_to_the_canned_response() -> None:

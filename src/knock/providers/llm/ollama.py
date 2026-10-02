@@ -27,6 +27,13 @@ class OllamaProvider:
                 "system": SYSTEM_PROMPT,
                 "prompt": prompt,
                 "stream": False,
+                # A reasoning-capable model (e.g. qwen3.5) spends many
+                # seconds on a hidden chain-of-thought before answering by
+                # default -- measured 24.6s vs. 0.6s for the same prompt
+                # with this off, no loss in response quality for KNOCK's
+                # short-reply use case. Ignored by models that don't
+                # support thinking at all.
+                "think": False,
             },
         )
         response.raise_for_status()

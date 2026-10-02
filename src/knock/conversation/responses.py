@@ -4,6 +4,11 @@ RESPONSES = {
         "Sorry, no one is available to sign for it right now. Please try again later."
     ),
     "emergency": "If this is an emergency, call local emergency services now.",
+    "religious_soliciting": "Thanks, but we're not interested in religious materials today.",
+    "political_soliciting": (
+        "Thanks, but we don't discuss politics or take campaign materials at the door."
+    ),
+    "soliciting": "Sorry, we don't accept solicitations here. Please don't leave anything.",
     "unknown": "Sorry, I can't help with that right now.",
     "blocked_request": "Sorry, I can't share that information.",
 }

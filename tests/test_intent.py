@@ -24,5 +24,26 @@ def test_classifies_occupancy_probes() -> None:
     assert classify_intent("is anyone home") == "occupancy_probe"
 
 
+def test_classifies_religious_canvassing() -> None:
+    assert (
+        classify_intent("Do you have a moment to talk about the Bible?") == "religious_soliciting"
+    )
+    assert classify_intent("We're from the local church ministry") == "religious_soliciting"
+    assert classify_intent("I'd like to share the gospel with you") == "religious_soliciting"
+
+
+def test_classifies_political_canvassing() -> None:
+    assert (
+        classify_intent("I'm here for the campaign, can I get your vote?") == "political_soliciting"
+    )
+    assert classify_intent("Would you sign this petition?") == "political_soliciting"
+
+
+def test_classifies_general_soliciting() -> None:
+    assert classify_intent("I'm selling magazine subscriptions") == "soliciting"
+    assert classify_intent("We have a special offer on lawn care") == "soliciting"
+    assert classify_intent("Can I get you a free quote on gutters?") == "soliciting"
+
+
 def test_falls_back_to_unknown() -> None:
     assert classify_intent("Do you like jazz?") == "unknown"
