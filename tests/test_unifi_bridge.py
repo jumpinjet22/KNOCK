@@ -202,7 +202,7 @@ def test_unifi_config_from_env(monkeypatch) -> None:
     config = UnifiConfig.from_env()
 
     assert config.host == "protect.local"
-    assert config.api_key == "abc123"
+    assert config.api_key.get_secret_value() == "abc123"
     assert config.trigger_on == ["ring", "person"]
     assert config.verify_ssl is True
 

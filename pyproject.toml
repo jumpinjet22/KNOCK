@@ -69,6 +69,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.mypy]
+plugins = ["pydantic.mypy"]
 python_version = "3.12"
 mypy_path = "src"
 explicit_package_bases = true

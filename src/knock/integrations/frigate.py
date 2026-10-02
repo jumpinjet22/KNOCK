@@ -81,7 +81,8 @@ class FrigateBridge:
             client_id=self.config.client_id,
         )
         if self.config.username:
-            self.client.username_pw_set(self.config.username, self.config.password)
+            password = self.config.password.get_secret_value() if self.config.password else None
+            self.client.username_pw_set(self.config.username, password)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
 

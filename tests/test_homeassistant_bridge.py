@@ -254,7 +254,7 @@ def test_home_assistant_config_from_env(monkeypatch) -> None:
     config = HomeAssistantConfig.from_env()
 
     assert config.base_url == "http://ha.local:8123"
-    assert config.token == "abc123"
+    assert config.token.get_secret_value() == "abc123"
     assert config.trigger_entity_id == "event.doorbell"
     assert config.notify_service == "notify.mobile_app_test"
     assert config.verify_ssl is False

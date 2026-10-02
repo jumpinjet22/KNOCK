@@ -154,7 +154,7 @@ class UnifiBridge:
         self.client = client or ProtectApiClient(
             host=self.config.host,
             port=self.config.port,
-            api_key=self.config.api_key,
+            api_key=self.config.api_key.get_secret_value(),
             verify_ssl=self.config.verify_ssl,
         )
         self._talkback_stream_factory = talkback_stream_factory

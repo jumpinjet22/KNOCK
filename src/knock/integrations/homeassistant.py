@@ -88,7 +88,7 @@ class HomeAssistantBridge:
         self._http_client = http_client or httpx.Client(
             timeout=10.0,
             verify=self.config.verify_ssl,
-            headers={"Authorization": f"Bearer {self.config.token}"},
+            headers={"Authorization": f"Bearer {self.config.token.get_secret_value()}"},
         )
         self._request_ids = itertools.count(1)
 
@@ -165,7 +165,9 @@ class HomeAssistantBridge:
         if hello.get("type") != "auth_required":
             raise ConnectionError(f"Unexpected Home Assistant handshake message: {hello}")
 
-        await ws.send(json.dumps({"type": "auth", "access_token": self.config.token}))
+        await ws.send(
+            json.dumps({"type": "auth", "access_token": self.config.token.get_secret_value()})
+        )
         response = json.loads(await ws.recv())
         if response.get("type") != "auth_ok":
             raise PermissionError(f"Home Assistant authentication failed: {response}")
