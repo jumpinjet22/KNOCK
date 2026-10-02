@@ -223,13 +223,13 @@ Build locally:
 docker compose -f docker/compose.local.yml up --build
 ```
 
-Or skip building it yourself entirely -- CI (`.github/workflows/docker-publish.yml`) builds and pushes the image to GitHub Container Registry whenever you push a version tag (`v*.*.*`), or on a manual run (`workflow_dispatch`), tagging it both with that version and `latest`:
+Or skip building it yourself entirely -- CI (`.github/workflows/docker-publish.yml`) builds and pushes the image to GitHub Container Registry whenever you push a version tag (`v*.*.*`), or on a manual run (`workflow_dispatch`). A **stable** tag (e.g. `v0.1.0`) is also tagged `latest`; a **prerelease** tag (e.g. `v0.1.0-alpha`) is not, so an alpha/beta/rc build can never silently become what `:latest` resolves to -- pull it by its exact version instead:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.0-alpha && git push origin v0.1.0-alpha
 # once that run finishes:
-docker pull ghcr.io/jumpinjet22/knock:latest
-docker run --rm -p 8000:8000 ghcr.io/jumpinjet22/knock:latest
+docker pull ghcr.io/jumpinjet22/knock:0.1.0-alpha
+docker run --rm -p 8000:8000 ghcr.io/jumpinjet22/knock:0.1.0-alpha
 ```
 
 Pull requests still build the image on every PR (to catch a broken `Dockerfile` or a missing packaged file immediately) but never push it -- only a tag push or a manual run does, since those are the only contexts with a usable registry-write token anyway.

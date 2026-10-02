@@ -35,6 +35,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # flavor's default `latest=auto` only tags `latest` for a stable
+      # (non-prerelease) semver tag -- an alpha/beta/rc push (e.g.
+      # v0.1.0-alpha) gets its own version tag only, so it can never
+      # silently become what `docker pull ...:latest` resolves to.
       - name: Compute image tags/labels
         id: meta
         uses: docker/metadata-action@v5
@@ -43,7 +47,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
 
       - name: Build image (push on a version tag or manual run only)
         uses: docker/build-push-action@v6
