@@ -195,7 +195,7 @@ class UnifiBridge:
 
         if self.vision_provider is not None:
             try:
-                snapshot = await self.client.get_camera_snapshot(event.device_id)
+                snapshot = await self.client.get_public_api_camera_snapshot(event.device_id)
                 if snapshot is not None:
                     description = await asyncio.to_thread(self.vision_provider.describe, snapshot)
                     visitor_event = visitor_event.model_copy(
@@ -227,8 +227,14 @@ class UnifiBridge:
             return ""
 
         try:
-            camera = await self.client.get_camera(device_id)
-            streams = await camera.get_rtsps_streams()
+            # `UnifiConfig` carries only an api_key (no username/password), so
+            # `self.client` is a public-only `ProtectApiClient` -- the private
+            # `get_camera()`/`Camera.get_rtsps_streams()` calls raise
+            # `PublicOnlyModeError` on it. `public_bootstrap.cameras` is kept
+            # primed by `update_public()` (called once in `run()`, before any
+            # event can fire), including each camera's `rtsps_streams`.
+            camera = self.client.public_bootstrap.cameras.get(device_id)
+            streams = camera.rtsps_streams if camera is not None else None
             url = streams.get_stream_url(self.config.rtsp_quality) if streams else None
             if not url:
                 logger.info("No RTSPS stream available for %s; skipping speech capture", device_id)
@@ -259,8 +265,11 @@ class UnifiBridge:
 
         try:
             audio = await self.tts_provider.synthesize(text)
-            camera = await self.client.get_camera(device_id)
-            if not camera.feature_flags.has_speaker:
+            # Same public-only-client constraint as `listen_to_visitor` --
+            # read the already-primed camera from `public_bootstrap` rather
+            # than the private `get_camera()`.
+            camera = self.client.public_bootstrap.cameras.get(device_id)
+            if camera is None or not camera.feature_flags.has_speaker:
                 logger.info("Camera %s has no speaker; skipping talkback", device_id)
                 return
 

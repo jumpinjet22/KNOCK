@@ -13,13 +13,18 @@ from knock.core.config_store import ConfigStore
 
 
 class _FakeCamera:
-    def __init__(self, camera_id: str, name: str, is_connected: bool = True) -> None:
+    def __init__(self, camera_id: str, name: str, is_reachable: bool = True) -> None:
         self.id = camera_id
         self.name = name
-        self.is_connected = is_connected
+        self.is_reachable = is_reachable
 
 
 class _FakeProtectClient:
+    """Stands in for `ProtectApiClient`'s *public* API surface -- the only
+    surface available to a client constructed with just an `api_key` (no
+    username/password), which is all `UnifiConfig` has.
+    """
+
     def __init__(
         self,
         cameras: list[_FakeCamera] | None = None,
@@ -32,12 +37,12 @@ class _FakeProtectClient:
         self.closed = False
         self.snapshot_calls = 0
 
-    async def get_cameras(self) -> list[_FakeCamera]:
+    async def get_cameras_public(self) -> list[_FakeCamera]:
         if self.raise_on_list:
             raise ConnectionError("no route to host")
         return self.cameras
 
-    async def get_camera_snapshot(self, device_id: str) -> bytes | None:
+    async def get_public_api_camera_snapshot(self, device_id: str) -> bytes | None:
         self.snapshot_calls += 1
         return self.snapshots.get(device_id)
 

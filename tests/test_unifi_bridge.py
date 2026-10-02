@@ -117,7 +117,7 @@ def test_handle_event_returns_none_for_non_triggering_event(tmp_path) -> None:
 
 def test_handle_event_enriches_with_vision_description(tmp_path) -> None:
     mock_client = MagicMock()
-    mock_client.get_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
+    mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
     bridge = _bridge(tmp_path, mock_client=mock_client)
     vision_provider = MagicMock()
     vision_provider.describe.return_value = "a person at the door"
@@ -125,13 +125,13 @@ def test_handle_event_enriches_with_vision_description(tmp_path) -> None:
 
     asyncio.run(bridge.handle_event(_event()))
 
-    mock_client.get_camera_snapshot.assert_awaited_once_with("cam1")
+    mock_client.get_public_api_camera_snapshot.assert_awaited_once_with("cam1")
     vision_provider.describe.assert_called_once_with(b"fake-jpeg-bytes")
 
 
 def test_handle_event_skips_vision_when_snapshot_is_none(tmp_path) -> None:
     mock_client = MagicMock()
-    mock_client.get_camera_snapshot = AsyncMock(return_value=None)
+    mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=None)
     bridge = _bridge(tmp_path, mock_client=mock_client)
     vision_provider = MagicMock()
     bridge.vision_provider = vision_provider
@@ -144,7 +144,7 @@ def test_handle_event_skips_vision_when_snapshot_is_none(tmp_path) -> None:
 
 def test_handle_event_survives_vision_failure(tmp_path) -> None:
     mock_client = MagicMock()
-    mock_client.get_camera_snapshot = AsyncMock(side_effect=RuntimeError("boom"))
+    mock_client.get_public_api_camera_snapshot = AsyncMock(side_effect=RuntimeError("boom"))
     bridge = _bridge(tmp_path, mock_client=mock_client)
     vision_provider = MagicMock()
     bridge.vision_provider = vision_provider
@@ -210,6 +210,16 @@ def test_unifi_config_from_env(monkeypatch) -> None:
 # -- speak_to_visitor (talkback) --------------------------------------------------
 
 
+def _with_bootstrap_camera(mock_client: MagicMock, device_id: str, camera: MagicMock) -> None:
+    """`UnifiConfig` is api_key-only, so `self.client` is a public-only
+    `ProtectApiClient` -- `listen_to_visitor`/`speak_to_visitor` read a
+    camera from `public_bootstrap.cameras` (kept primed by `update_public()`)
+    rather than the private `get_camera()`, which these tests' `mock_client`
+    otherwise has no stubbed behavior for.
+    """
+    mock_client.public_bootstrap.cameras = {device_id: camera}
+
+
 def _recording_stream_factory(captured: dict):
     """Reads the WAV file while its temp dir is still alive, records args."""
 
@@ -247,7 +257,7 @@ def test_speak_to_visitor_streams_synthesized_audio(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
     mock_client.create_talkback_session_public = AsyncMock(return_value="fake-session")
 
     tts_provider = MagicMock()
@@ -265,7 +275,6 @@ def test_speak_to_visitor_streams_synthesized_audio(tmp_path) -> None:
     asyncio.run(bridge.speak_to_visitor("cam1", "Thanks, you can leave the package."))
 
     tts_provider.synthesize.assert_awaited_once_with("Thanks, you can leave the package.")
-    mock_client.get_camera.assert_awaited_once_with("cam1")
     assert captured["camera"] is fake_camera
     assert captured["session"] == "fake-session"
     assert captured["channels"] == 1
@@ -279,7 +288,7 @@ def test_speak_to_visitor_skips_cameras_without_a_speaker(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = False
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
 
     tts_provider = MagicMock()
     tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
@@ -302,7 +311,7 @@ def test_speak_to_visitor_falls_back_when_public_session_unavailable(tmp_path) -
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
     mock_client.create_talkback_session_public = AsyncMock(
         side_effect=RuntimeError("no public api")
     )
@@ -348,7 +357,7 @@ def test_speak_to_visitor_survives_stream_failure(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
     mock_client.create_talkback_session_public = AsyncMock(return_value=None)
 
     tts_provider = MagicMock()
@@ -373,7 +382,7 @@ def test_handle_event_triggers_talkback_when_tts_provider_configured(tmp_path) -
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
     mock_client.create_talkback_session_public = AsyncMock(return_value=None)
 
     tts_provider = MagicMock()
@@ -452,10 +461,8 @@ def test_listen_to_visitor_is_a_no_op_without_stt_provider(tmp_path) -> None:
 def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
-    fake_camera.get_rtsps_streams = AsyncMock(
-        return_value=_fake_rtsp_streams("rtsps://console/high?enableSrtp")
-    )
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high?enableSrtp")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
 
     stt_provider = MagicMock()
     stt_provider.transcribe = AsyncMock(return_value="Hi, I have an Amazon package")
@@ -481,8 +488,8 @@ def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
 def test_listen_to_visitor_returns_empty_without_an_rtsp_stream(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
-    fake_camera.get_rtsps_streams = AsyncMock(return_value=_fake_rtsp_streams(None))
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    fake_camera.rtsps_streams = _fake_rtsp_streams(None)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
 
     stt_provider = MagicMock()
     stt_provider.transcribe = AsyncMock()
@@ -504,10 +511,8 @@ def test_listen_to_visitor_returns_empty_without_an_rtsp_stream(tmp_path) -> Non
 def test_listen_to_visitor_survives_capture_failure(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
-    fake_camera.get_rtsps_streams = AsyncMock(
-        return_value=_fake_rtsp_streams("rtsps://console/high")
-    )
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
 
     stt_provider = MagicMock()
     stt_provider.transcribe = AsyncMock()
@@ -528,10 +533,8 @@ def test_listen_to_visitor_survives_capture_failure(tmp_path) -> None:
 def test_handle_event_uses_transcript_as_event_text_when_available(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
-    fake_camera.get_rtsps_streams = AsyncMock(
-        return_value=_fake_rtsp_streams("rtsps://console/high")
-    )
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
 
     stt_provider = MagicMock()
     stt_provider.transcribe = AsyncMock(return_value="Hi, I have an Amazon package")
@@ -554,8 +557,8 @@ def test_handle_event_uses_transcript_as_event_text_when_available(tmp_path) -> 
 def test_handle_event_falls_back_to_generic_text_when_transcript_is_empty(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
-    fake_camera.get_rtsps_streams = AsyncMock(return_value=_fake_rtsp_streams(None))
-    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+    fake_camera.rtsps_streams = _fake_rtsp_streams(None)
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
 
     stt_provider = MagicMock()
     stt_provider.transcribe = AsyncMock(return_value="")

@@ -1,13 +1,20 @@
 """Live video preview routes.
 
 UniFi has no equivalent of Frigate's own live-view web UI, so its preview
-is server-side snapshot polling: reuses the same `get_camera_snapshot()`
-the UniFi bridge already calls on a real ring/detection event, just fired
+is server-side snapshot polling: reuses the same public-API snapshot call
+the UniFi bridge already makes on a real ring/detection event, just fired
 on a timer instead. Frigate already runs its own web UI (which itself runs
 go2rtc for real live streams) -- rather than guess at and re-implement its
 internal stream URLs, this proxies Frigate's own `latest.jpg` snapshot
 endpoint the same way, and the frontend separately links out to Frigate's
 own UI for a true live view.
+
+`UnifiConfig` carries only an `api_key` (no username/password), which
+`uiprotect`'s `ProtectApiClient` treats as a "public-only" client -- the
+private API (`get_cameras()`, `get_camera_snapshot()`) raises
+`PublicOnlyModeError` on it. This uses the public API surface
+(`get_cameras_public()`, `get_public_api_camera_snapshot()`) instead, which
+is exactly what api_key-only auth is meant to grant.
 
 Both snapshot endpoints sit behind a small per-camera cache with a minimum
 refetch interval, so multiple open browser tabs (or an eager poll loop)
@@ -96,7 +103,7 @@ async def list_unifi_cameras(
     config = UnifiConfig.from_sources(store)
     client = client_factory(config)
     try:
-        cameras = await client.get_cameras()
+        cameras = await client.get_cameras_public()
     except Exception as exc:  # noqa: BLE001 - surfaced as a 502, not a crash
         raise HTTPException(status_code=502, detail=f"failed to list UniFi cameras: {exc}") from exc
     finally:
@@ -104,7 +111,7 @@ async def list_unifi_cameras(
 
     return [
         UnifiCameraInfo(
-            device_id=camera.id, name=camera.name or camera.id, is_connected=camera.is_connected
+            device_id=camera.id, name=camera.name or camera.id, is_connected=camera.is_reachable
         )
         for camera in cameras
     ]
@@ -124,7 +131,7 @@ async def get_unifi_snapshot(
     async def fetch() -> bytes:
         client = client_factory(config)
         try:
-            snapshot = await client.get_camera_snapshot(device_id)
+            snapshot = await client.get_public_api_camera_snapshot(device_id)
         except Exception as exc:  # noqa: BLE001 - surfaced as a 502, not a crash
             raise HTTPException(
                 status_code=502, detail=f"failed to fetch UniFi snapshot: {exc}"
