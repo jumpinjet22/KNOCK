@@ -39,9 +39,38 @@ Key modules:
 
 ## Local-First / Privacy-First Notes
 
-- No external AI API calls in the current implementation.
-- Mock provider behavior is deterministic and offline.
-- No audio/video model pipelines are included yet.
+- No *cloud* AI API calls — real providers only talk to services on your own network.
+- Mock provider behavior remains deterministic and fully offline (no network calls at all).
+- Real providers are opt-in: the orchestrator still uses the mock/canned-response path by default, and nothing in `knock.core`/`knock.conversation` requires a provider to be configured.
+- No vision model pipeline is included yet.
+
+## Real Providers (LLM / STT / TTS)
+
+Beyond the mocks, `knock.providers` now includes adapters for locally-hosted services:
+
+| Capability | Provider | Protocol | Module |
+|---|---|---|---|
+| LLM | [Ollama](https://ollama.com) | HTTP REST | `knock.providers.llm.ollama.OllamaProvider` |
+| STT | Whisper (e.g. `wyoming-faster-whisper`) | [Wyoming](https://github.com/OHF-Voice/wyoming) | `knock.providers.stt.whisper.WhisperSTTProvider` |
+| TTS | Kokoro (Wyoming-wrapped) | [Wyoming](https://github.com/OHF-Voice/wyoming) | `knock.providers.tts.kokoro.KokoroTTSProvider` |
+
+Whisper and TTS run over the Wyoming protocol (the same one used by Home Assistant's local voice pipeline), so these adapters assume a Wyoming TCP server is already running — they don't start one.
+
+Each adapter takes a small config object with localhost defaults, overridable via env vars:
+
+| Var | Default | Notes |
+|---|---|---|
+| `KNOCK_OLLAMA_HOST` / `_PORT` / `_MODEL` / `_TIMEOUT` | `127.0.0.1` / `11434` / `llama3.2` / `30.0` | Ollama REST API |
+| `KNOCK_WHISPER_HOST` / `_PORT` / `_TIMEOUT` | `127.0.0.1` / `10300` / `10.0` | Wyoming STT server |
+| `KNOCK_KOKORO_HOST` / `_PORT` / `_VOICE` / `_TIMEOUT` | `127.0.0.1` / `10200` / unset / `10.0` | Wyoming TTS server |
+
+With those services running locally, sanity-check connectivity by hand (this script isn't part of CI, since it needs real services up):
+
+```bash
+python scripts/smoke_test_providers.py
+# or test a subset:
+python scripts/smoke_test_providers.py --skip stt,tts
+```
 
 ## ⚠ Hardware & Integration Status
 
@@ -53,7 +82,7 @@ Files under `knock.integrations` are placeholders only for future work:
 - Home Assistant
 - MQTT bridge behavior
 
-Likewise, no real STT/TTS/vision engines are active yet.
+Vision provider is mock-only for now, same as the integrations above.
 
 ## Quickstart
 
@@ -111,7 +140,7 @@ See:
 
 Near-term priorities:
 1. richer safety policy and auditing
-2. real provider adapters behind existing interfaces
+2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
 3. hardware input/output bridges
 4. session persistence and event replay
 
