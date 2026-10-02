@@ -62,6 +62,22 @@ def _wav_base64_to_pcm(audio_wav_base64: str) -> tuple[bytes, int, int, int]:
     return pcm, rate, width, channels
 
 
+def _httpx_error_detail(exc: httpx.HTTPError) -> str:
+    """`str(exc)` on an `HTTPStatusError` is just "Client error '400 Bad
+    Request' for url '...'" -- it drops the response body, which is where a
+    model server (Ollama, an OpenAI-compatible proxy, ...) actually explains
+    *why* (e.g. a request exceeding the model's context window). Surface
+    that body here instead of making the debug panel's whole point --
+    seeing what actually went wrong -- useless for exactly the errors it
+    exists to catch.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = exc.response.text.strip()
+        if body:
+            return f"{exc} | response body: {body[:2000]}"
+    return str(exc)
+
+
 # -- vision -------------------------------------------------------------------
 
 
@@ -92,7 +108,9 @@ def debug_vision_describe(
     try:
         raw = provider.describe_raw(image, body.prompt)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"vision request failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"vision request failed: {_httpx_error_detail(exc)}"
+        ) from exc
     finally:
         provider.close()
     latency_ms = (time.perf_counter() - start) * 1000
@@ -127,7 +145,9 @@ def debug_llm_generate(
     try:
         text = provider.generate(body.prompt)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"LLM request failed: {_httpx_error_detail(exc)}"
+        ) from exc
     finally:
         provider.close()
     latency_ms = (time.perf_counter() - start) * 1000

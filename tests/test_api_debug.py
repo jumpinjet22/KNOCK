@@ -192,6 +192,26 @@ def test_debug_vision_describe_reports_upstream_failure_as_502(client, config_st
     assert resp.status_code == 502
 
 
+@respx.mock
+def test_debug_vision_describe_surfaces_the_server_error_body(client, config_store) -> None:
+    _login(client)
+    config = VisionConfig.from_sources(config_store)
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(
+            400, json={"error": "request exceeds the available context size"}
+        )
+    )
+
+    resp = _post(
+        client,
+        "/api/debug/vision/describe",
+        {"image_base64": base64.b64encode(b"img").decode("ascii")},
+    )
+
+    assert resp.status_code == 502
+    assert "exceeds the available context size" in resp.json()["detail"]
+
+
 # -- llm ----------------------------------------------------------------------------
 
 

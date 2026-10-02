@@ -1,12 +1,21 @@
 import base64
+import io
+import json
 
 import httpx
 import pytest
 import respx
+from PIL import Image
 
 from knock.config import VisionConfig
 from knock.providers.vision.ollama import OllamaVisionProvider
 from knock.providers.vision.safety import SAFE_FALLBACK_DESCRIPTION
+
+
+def _jpeg_bytes(width: int, height: int) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color=(100, 120, 140)).save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 @respx.mock
@@ -84,3 +93,49 @@ def test_describe_raw_does_not_sanitize_alarming_model_output() -> None:
     result = OllamaVisionProvider(config=config).describe_raw(b"img")
 
     assert result == "A person holding what might be a bomb"
+
+
+@respx.mock
+def test_describe_downscales_a_large_image_before_sending() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "ok"})
+    )
+
+    large = _jpeg_bytes(4032, 3024)
+    OllamaVisionProvider(config=config).describe(large)
+
+    sent_body = json.loads(route.calls.last.request.content)
+    sent_image = base64.b64decode(sent_body["images"][0])
+    with Image.open(io.BytesIO(sent_image)) as resized:
+        assert max(resized.size) <= 1024
+    assert len(sent_image) < len(large)
+
+
+@respx.mock
+def test_describe_leaves_a_small_image_unchanged() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "ok"})
+    )
+
+    small = _jpeg_bytes(400, 300)
+    OllamaVisionProvider(config=config).describe(small)
+
+    sent_body = json.loads(route.calls.last.request.content)
+    sent_image = base64.b64decode(sent_body["images"][0])
+    assert sent_image == small
+
+
+@respx.mock
+def test_describe_sends_unparseable_image_bytes_unchanged() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "ok"})
+    )
+
+    garbage = b"\x00\x01\x02not-a-real-image" * 100
+    OllamaVisionProvider(config=config).describe(garbage)
+
+    sent_body = json.loads(route.calls.last.request.content)
+    assert base64.b64decode(sent_body["images"][0]) == garbage

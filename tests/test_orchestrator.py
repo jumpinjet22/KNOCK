@@ -28,6 +28,13 @@ def test_delivery_intent() -> None:
     assert decision.escalate is False
 
 
+def test_delivery_signature_required_intent() -> None:
+    decision = Orchestrator().respond(_event("I have a package that needs a signature"))
+    assert "sign" in decision.text.lower()
+    assert "leave the package" not in decision.text.lower()
+    assert decision.escalate is False
+
+
 def test_unknown_visitor_fallback() -> None:
     decision = Orchestrator().respond(_event("Do you like jazz?"))
     assert "can't help" in decision.text.lower()
