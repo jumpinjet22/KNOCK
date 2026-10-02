@@ -5,6 +5,7 @@ import { Dashboard } from "./pages/Dashboard"
 import { Debug } from "./pages/Debug"
 import { FirstRunSetup } from "./pages/FirstRunSetup"
 import { Login } from "./pages/Login"
+import { Processes } from "./pages/Processes"
 import { Settings } from "./pages/Settings"
 
 function SetupRoute() {
@@ -63,6 +64,16 @@ export default function App() {
             <ProtectedRoute>
               <AppShell>
                 <Debug />
+              </AppShell>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/processes"
+          element={
+            <ProtectedRoute>
+              <AppShell>
+                <Processes />
               </AppShell>
             </ProtectedRoute>
           }

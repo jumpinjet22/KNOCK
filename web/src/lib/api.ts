@@ -172,6 +172,36 @@ export interface ConversationSimulateResult {
   matched_rule_ids: string[]
 }
 
+export interface BridgeState {
+  name: string
+  status: "stopped" | "starting" | "running" | "crashed"
+  restart_count: number
+  pid: number | null
+}
+
+export interface BridgeLogsResponse {
+  lines: string[]
+  next_after: number
+}
+
+export const BRIDGE_LABELS: Record<string, string> = {
+  mqtt: "MQTT",
+  frigate: "Frigate",
+  homeassistant: "Home Assistant",
+  unifi: "UniFi Protect",
+}
+
+export const supervisorApi = {
+  list: () => apiFetch<BridgeState[]>("/api/supervisor"),
+  get: (name: string) => apiFetch<BridgeState>(`/api/supervisor/${name}`),
+  start: (name: string) => apiFetch<BridgeState>(`/api/supervisor/${name}/start`, { method: "POST" }),
+  stop: (name: string) => apiFetch<BridgeState>(`/api/supervisor/${name}/stop`, { method: "POST" }),
+  restart: (name: string) =>
+    apiFetch<BridgeState>(`/api/supervisor/${name}/restart`, { method: "POST" }),
+  logs: (name: string, after = 0) =>
+    apiFetch<BridgeLogsResponse>(`/api/supervisor/${name}/logs?after=${after}`),
+}
+
 export const debugApi = {
   describeVision: (imageBase64: string, prompt?: string) =>
     apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {

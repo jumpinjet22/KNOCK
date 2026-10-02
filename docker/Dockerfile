@@ -13,6 +13,12 @@ RUN npm run build
 # Runtime image.
 FROM python:3.12-slim
 
+# The API process spawns bridge subprocesses of its own (see
+# knock.core.supervisor) -- without a real init process as PID 1, `docker
+# stop` would only ever signal uvicorn itself and leave those orphaned.
+RUN apt-get update && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml README.md /app/
@@ -26,4 +32,5 @@ COPY --from=web-build /web/dist /app/web/dist
 
 EXPOSE 8000
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uvicorn", "knock.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

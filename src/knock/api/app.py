@@ -2,6 +2,8 @@ import os
 import secrets
 import stat
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -13,6 +15,8 @@ from starlette_csrf import CSRFMiddleware
 from knock.api.auth_routes import router as auth_router
 from knock.api.debug_routes import router as debug_router
 from knock.api.settings_routes import router as settings_router
+from knock.api.supervisor_routes import get_bridge_supervisor
+from knock.api.supervisor_routes import router as supervisor_router
 from knock.core.audit import JSONLAuditLog
 from knock.core.auth import SESSION_COOKIE_NAME
 from knock.core.events import VisitorEvent
@@ -45,7 +49,17 @@ def _get_or_create_csrf_secret() -> str:
     return value
 
 
-app = FastAPI(title="KNOCK API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    yield
+    # Terminate every bridge subprocess on API shutdown -- paired with the
+    # Dockerfile's `tini` entrypoint, since without an init process as PID 1,
+    # `docker stop` only ever signals this process and these would be
+    # orphaned rather than stopped.
+    get_bridge_supervisor().shutdown_all()
+
+
+app = FastAPI(title="KNOCK API", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CSRFMiddleware,
     secret=_get_or_create_csrf_secret(),
@@ -58,6 +72,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(settings_router)
 app.include_router(debug_router)
+app.include_router(supervisor_router)
 orchestrator = Orchestrator()
 
 
