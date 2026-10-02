@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Self-hosted (no runtime Google Fonts CDN call -- fits a local/offline-capable
+   LAN appliance). Only the weights actually used. */
+@import "@fontsource/big-shoulders-display/700";
+@import "@fontsource/big-shoulders-display/900";
+@import "@fontsource/ibm-plex-sans/400";
+@import "@fontsource/ibm-plex-sans/500";
+@import "@fontsource/ibm-plex-sans/600";
+@import "@fontsource/ibm-plex-mono/400";
+@import "@fontsource/ibm-plex-mono/500";
+
+/* KNOCK brand tokens (from docs/assets/logo/ -- the Peephole K identity
+   sheet). Named for Tailwind's @theme so e.g. `bg-ink`/`text-porch`/
+   `font-display` utilities are generated automatically. */
+@theme {
+  --color-ink: #10161d;
+  --color-dusk: #1e2d3d;
+  --color-steel: #5b6b7d;
+  --color-porch: #e8a33d;
+  --color-mist: #f2f4f7;
+  --color-paper: #fbfcfd;
+
+  --font-display: "Big Shoulders Display", "Arial Narrow", sans-serif;
+  --font-sans: "IBM Plex Sans", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  @apply bg-mist text-ink font-sans antialiased dark:bg-ink dark:text-mist;
+}

@@ -252,12 +252,13 @@ Near-term priorities:
 
 ## Web UI (in progress)
 
-A web UI is being built (React + TypeScript + Vite frontend, FastAPI backend) to configure every setting -- including API keys/tokens -- from the browser, debug/test each provider (especially vision, to directly verify it's working), and supervise the bridge processes. Foundation landed so far, backend-only (no frontend yet):
+A web UI is being built (`web/`: React + TypeScript + Vite + Tailwind CSS, served by the existing FastAPI backend) to configure every setting -- including API keys/tokens -- from the browser, debug/test each provider (especially vision, to directly verify it's working), and supervise the bridge processes. Landed so far:
 
 - `knock.core.config_store.ConfigStore` -- a persisted, UI-editable settings file (`~/.local/share/knock/config.json`, `0600`). Every `*Config` class now has a `from_sources(store)` alongside its existing `from_env()`: precedence is **env var > stored setting > hardcoded default**, so nothing already deployed via `.env`/systemd/compose needs to change. Secrets (`MqttConfig.password`, `FrigateConfig.password`, `HomeAssistantConfig.token`, `UnifiConfig.api_key`) are `pydantic.SecretStr`, masked in any `repr()`/log line.
 - `knock.core.auth` + `POST /api/auth/{setup,login,logout}`, `GET /api/auth/{status,me}` -- password auth (Argon2id hashing, never hand-rolled), server-side sessions (httpOnly cookie, `secrets.token_urlsafe` tokens, server-revocable unlike a stateless JWT), and CSRF protection (`starlette-csrf`, double-submit cookie) on any request that already carries a login session. `POST /respond` and `GET /sessions/{id}` stay exactly as they are -- open, unauthenticated -- since no secrets flow through them; the new auth only gates the new surface (settings, process supervision, debug tools -- as those land).
+- The frontend itself (`web/`): a branded shell, first-run admin setup, and login, built on the brand identity under `docs/assets/logo/` (same wordmark, same `ink`/`dusk`/`steel`/`porch`/`mist` palette, self-hosted Big Shoulders Display/IBM Plex fonts -- no runtime Google Fonts CDN call). FastAPI serves the built `web/dist` directly (`GET /{full_path}` in `api/app.py`) with a real SPA fallback -- a direct request to a client-side route like `/login` or `/settings` serves `index.html` rather than 404ing, with a path-traversal guard on the file-serving side. `docker/Dockerfile` now builds the frontend in a Node stage and copies the output into the Python runtime image; CI builds and lints it on every push/PR (`frontend` job in `test.yml`).
 
-Still to come: the React frontend itself, settings pages, the vision/LLM/STT/TTS debug/test panels, bridge process supervision (start/stop/restart from the UI), live video preview, and WebAuthn/OAuth sign-in.
+Still to come: settings pages, the vision/LLM/STT/TTS debug/test panels, bridge process supervision (start/stop/restart from the UI), live video preview, and WebAuthn/OAuth sign-in.
 
 ## Brand Assets
 

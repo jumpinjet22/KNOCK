@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse
 from starlette_csrf import CSRFMiddleware
 
 from knock.api.auth_routes import router as auth_router
@@ -108,3 +109,36 @@ def get_session(session_id: str, *, store: SessionStoreDep) -> SessionState:
     if state is None:
         raise HTTPException(status_code=404, detail="session not found")
     return state
+
+
+def _web_dist_dir() -> Path:
+    configured = os.environ.get("KNOCK_WEB_DIST")
+    if configured:
+        return Path(configured)
+    # Relative to the process's cwd -- matches the existing convention of
+    # running uvicorn from the repo root locally, or from the Docker image's
+    # WORKDIR (where `web/dist` is copied alongside `src/`).
+    return Path("web/dist")
+
+
+_web_dist = _web_dist_dir()
+
+if _web_dist.is_dir():
+    # A true SPA catch-all, not `StaticFiles(html=True)` (which only serves
+    # index.html at "/" itself, not for client-side routes -- a direct
+    # request to e.g. /login or /settings would 404 rather than loading the
+    # app and letting React Router take over). Registered last, after every
+    # real API route above, so this only ever catches what nothing else
+    # matched. Skipped entirely if the frontend hasn't been built (e.g. in
+    # CI, or a backend-only checkout) rather than crashing the whole app.
+    _web_dist_resolved = _web_dist.resolve()
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_web(full_path: str) -> FileResponse:
+        # full_path is raw, attacker-controlled URL input -- resolve and
+        # confirm it's still inside the dist dir before ever serving it, or
+        # a path like "../../../../etc/passwd" would escape it.
+        candidate = (_web_dist_resolved / full_path).resolve()
+        if full_path and candidate.is_relative_to(_web_dist_resolved) and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_web_dist_resolved / "index.html")
