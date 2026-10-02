@@ -44,7 +44,7 @@ import tempfile
 import time
 import wave
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -73,6 +73,15 @@ logger = logging.getLogger(__name__)
 _UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _SMART_DETECT_EVENT_TYPES = {"smartDetectZone", "smartDetectLine", "smartDetectLoiterZone"}
 _CAPTURE_SAMPLE_RATE = 16000
+
+# A per-camera session has no expiry on its own -- without this, a greeting
+# meant to play once per *visit* would instead play exactly once ever for a
+# given camera, never again for any later, unrelated visitor. Two distinct
+# triggers for a fresh visit: an explicit `ring` (a visitor pressing the
+# button is as clear a "this is a new visit" signal as exists -- always
+# restarts), or enough idle time since the session's last turn that whatever
+# was happening before is almost certainly over.
+_SESSION_IDLE_TIMEOUT = timedelta(minutes=5)
 
 
 def _default_session_id(device_id: str) -> str:
@@ -187,15 +196,32 @@ class UnifiBridge:
             source=f"unifi-{event.device_id}", text=text, timestamp=datetime.now(UTC)
         )
 
+    def _start_or_resume_session(
+        self, session_id: str, event: _ProtectEventLike, timestamp: datetime
+    ) -> SessionState:
+        """A fresh `SessionState` for a new visit, or the persisted one if
+        this still looks like the same ongoing visit.
+
+        See `_SESSION_IDLE_TIMEOUT`'s docstring for why a per-camera session
+        can't just persist forever.
+        """
+        existing = self.session_store.load(session_id)
+        is_ring = str(event.type) == "ring"
+        is_stale = (
+            existing is not None and (timestamp - existing.updated_at) > _SESSION_IDLE_TIMEOUT
+        )
+
+        if existing is None or is_ring or is_stale:
+            return SessionState(session_id=session_id, updated_at=timestamp)
+        return existing
+
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if not self.should_trigger(event):
             return None
 
         visitor_event = self.build_event(event)
         session_id = _default_session_id(event.device_id)
-        state = self.session_store.load(session_id) or SessionState(
-            session_id=session_id, updated_at=visitor_event.timestamp
-        )
+        state = self._start_or_resume_session(session_id, event, visitor_event.timestamp)
         is_first_turn = state.turn_count == 0
         # Only true once the greeting was actually spoken aloud below -- a
         # text-only deployment (no tts_provider) still needs the orchestrator

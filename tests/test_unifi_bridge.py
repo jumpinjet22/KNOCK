@@ -1,5 +1,6 @@
 import asyncio
 import wave
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,6 +10,7 @@ from uiprotect import EventChange
 from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
 from knock.core.session_store import JSONFileSessionStore
+from knock.core.state import SessionState
 from knock.integrations.unifi import UnifiBridge, _default_session_id
 from knock.providers.tts.base import SynthesizedAudio
 
@@ -415,7 +417,11 @@ def test_handle_event_greets_before_speaking_the_response_on_first_turn(tmp_path
     assert GREETING not in decision.text
 
 
-def test_handle_event_only_greets_on_the_sessions_first_turn(tmp_path) -> None:
+def test_handle_event_always_regreets_on_a_fresh_ring(tmp_path) -> None:
+    # A ring is as clear a "this is a new visit" signal as exists, so it
+    # always restarts the session and re-greets -- even if the same
+    # camera's session already has turns on it from an earlier, unrelated
+    # visit.
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
@@ -438,11 +444,93 @@ def test_handle_event_only_greets_on_the_sessions_first_turn(tmp_path) -> None:
         talkback_stream_factory=stream_factory,
     )
 
-    asyncio.run(bridge.handle_event(_event()))
+    asyncio.run(bridge.handle_event(_event(event_type="ring")))
     tts_provider.synthesize.reset_mock()
-    asyncio.run(bridge.handle_event(_event()))
+    asyncio.run(bridge.handle_event(_event(event_type="ring")))
+
+    # Greeting + response, both turns -- the ring reset the session instead
+    # of continuing turn 2 without a greeting.
+    assert tts_provider.synthesize.await_count == 2
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 1
+
+
+def test_handle_event_does_not_regreet_for_a_repeated_non_ring_trigger(tmp_path) -> None:
+    # A lingering smart-detect trigger (e.g. "person") can fire repeatedly
+    # during the *same* visit -- unlike a ring, it shouldn't restart the
+    # session or re-greet each time.
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+
+    tts_provider = MagicMock()
+    tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
+
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", trigger_on=["ring", "person"]),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        tts_provider=tts_provider,
+        talkback_stream_factory=stream_factory,
+    )
+    event = _event(event_type="smartDetectZone", smart_detect_types=("person",))
+
+    asyncio.run(bridge.handle_event(event))
+    tts_provider.synthesize.reset_mock()
+    asyncio.run(bridge.handle_event(event))
 
     assert tts_provider.synthesize.await_count == 1
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 2
+
+
+def test_handle_event_restarts_a_stale_session_even_without_a_ring(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+
+    tts_provider = MagicMock()
+    tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
+
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
+    session_store = JSONFileSessionStore(tmp_path)
+    stale = SessionState(
+        session_id="unifi-cam1",
+        turn_count=3,
+        updated_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    session_store.save(stale)
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", trigger_on=["ring", "person"]),
+        session_store=session_store,
+        client=mock_client,
+        tts_provider=tts_provider,
+        talkback_stream_factory=stream_factory,
+    )
+    event = _event(event_type="smartDetectZone", smart_detect_types=("person",))
+
+    asyncio.run(bridge.handle_event(event))
+
+    assert tts_provider.synthesize.await_count == 2
+    final_state = session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 1
 
 
 def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -> None:
