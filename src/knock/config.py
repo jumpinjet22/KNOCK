@@ -159,3 +159,26 @@ class FrigateConfig(BaseModel):
             trigger_labels=trigger_labels if trigger_labels is not None else ["person"],
             zones=zones if zones is not None else [],
         )
+
+
+class HomeAssistantConfig(BaseModel):
+    """Connection settings for the Home Assistant bridge."""
+
+    base_url: str = "http://homeassistant.local:8123"
+    token: str = ""
+    trigger_entity_id: str = "binary_sensor.front_doorbell"
+    notify_service: str | None = None
+    verify_ssl: bool = True
+
+    @classmethod
+    def from_env(cls) -> "HomeAssistantConfig":
+        verify_ssl_raw = os.environ.get("KNOCK_HA_VERIFY_SSL", "true").strip().lower()
+        return cls(
+            base_url=os.environ.get("KNOCK_HA_BASE_URL", "http://homeassistant.local:8123"),
+            token=os.environ.get("KNOCK_HA_TOKEN", ""),
+            trigger_entity_id=os.environ.get(
+                "KNOCK_HA_TRIGGER_ENTITY_ID", "binary_sensor.front_doorbell"
+            ),
+            notify_service=os.environ.get("KNOCK_HA_NOTIFY_SERVICE"),
+            verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
+        )

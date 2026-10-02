@@ -1,1 +1,200 @@
-"""Home Assistant integration placeholder."""
+"""Home Assistant bridge: feeds entity state changes into the orchestrator.
+
+Authenticates with a Long-Lived Access Token (create one in your HA user
+profile), subscribes to `state_changed` events over HA's WebSocket API
+(`/api/websocket`) -- which has no server-side entity filter for this event
+type, so KNOCK filters client-side to one `trigger_entity_id` -- and treats
+any genuine state transition on that entity as a visitor event. Checking
+for "any change" rather than specifically "became on" is deliberate: a
+`binary_sensor` doorbell goes off->on, but a growing number of HA doorbell
+buttons are modeled as an `event` entity whose state is just a timestamp
+that changes on every press, not an on/off value. "unknown"/"unavailable"
+placeholder states (entity not yet initialized, or the device dropped
+offline) are never treated as a trigger.
+
+If `notify_service` is configured, the resulting response text is sent
+through that Home Assistant service afterward (REST `POST
+/api/services/<domain>/<service>`).
+
+**Safety note:** this bridge only ever calls whatever service *you*
+configure via `notify_service` -- it ships with no default that unlocks,
+arms, or disarms anything. That's entirely your own Home Assistant
+configuration choice.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import itertools
+import json
+import logging
+import re
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any, Protocol
+
+import httpx
+import websockets
+
+from knock.config import HomeAssistantConfig
+from knock.core.audit import AuditLog, NullAuditLog
+from knock.core.events import VisitorEvent
+from knock.core.orchestrator import Orchestrator
+from knock.core.responses import ResponseDecision
+from knock.core.session_store import JSONFileSessionStore, SessionStore
+from knock.core.state import SessionState
+
+logger = logging.getLogger(__name__)
+
+_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+_IGNORED_STATES = {None, "unknown", "unavailable"}
+
+
+def _default_session_id(entity_id: str) -> str:
+    safe = _UNSAFE_SESSION_CHARS.sub("_", entity_id) or "unknown"
+    return f"ha-{safe}"[:128]
+
+
+def websocket_url(base_url: str) -> str:
+    """Convert an HA base URL (http(s)://...) into its websocket equivalent."""
+    if base_url.startswith("https://"):
+        return "wss://" + base_url[len("https://") :].rstrip("/") + "/api/websocket"
+    if base_url.startswith("http://"):
+        return "ws://" + base_url[len("http://") :].rstrip("/") + "/api/websocket"
+    raise ValueError(f"base_url must start with http:// or https://: {base_url!r}")
+
+
+class _WebSocketLike(Protocol):
+    async def send(self, message: str) -> None: ...
+    async def recv(self) -> str | bytes: ...
+    def __aiter__(self) -> AsyncIterator[str | bytes]: ...
+
+
+class HomeAssistantBridge:
+    """Subscribes to one entity's `state_changed` events, answers each one."""
+
+    def __init__(
+        self,
+        config: HomeAssistantConfig | None = None,
+        orchestrator: Orchestrator | None = None,
+        session_store: SessionStore | None = None,
+        audit_log: AuditLog | None = None,
+        http_client: httpx.Client | None = None,
+    ) -> None:
+        self.config = config or HomeAssistantConfig()
+        self.orchestrator = orchestrator or Orchestrator()
+        self.session_store = session_store or JSONFileSessionStore()
+        self.audit_log = audit_log or NullAuditLog()
+        self._http_client = http_client or httpx.Client(
+            timeout=10.0,
+            verify=self.config.verify_ssl,
+            headers={"Authorization": f"Bearer {self.config.token}"},
+        )
+        self._request_ids = itertools.count(1)
+
+    # -- pure logic: directly testable without a real websocket -----------------
+
+    def should_trigger(self, event_data: dict[str, Any]) -> bool:
+        if event_data.get("entity_id") != self.config.trigger_entity_id:
+            return False
+
+        new_state = event_data.get("new_state") or {}
+        new_value = new_state.get("state")
+        if new_value in _IGNORED_STATES:
+            return False
+
+        old_state = event_data.get("old_state") or {}
+        return new_value != old_state.get("state")
+
+    def build_event(self, event_data: dict[str, Any]) -> VisitorEvent:
+        entity_id = event_data["entity_id"]
+        return VisitorEvent(
+            source=f"ha-{entity_id}",
+            text=f"{entity_id} triggered",
+            timestamp=datetime.now(UTC),
+        )
+
+    def handle_state_changed(self, event_data: dict[str, Any]) -> ResponseDecision | None:
+        if not self.should_trigger(event_data):
+            return None
+
+        event = self.build_event(event_data)
+        session_id = _default_session_id(event_data["entity_id"])
+        state = self.session_store.load(session_id) or SessionState(
+            session_id=session_id, updated_at=event.timestamp
+        )
+        decision = self.orchestrator.respond(event, state=state, audit_log=self.audit_log)
+        self.session_store.save(state)
+
+        if self.config.notify_service:
+            try:
+                self._call_service(self.config.notify_service, {"message": decision.text})
+            except Exception as exc:  # noqa: BLE001 - the notify call is best-effort
+                logger.warning("Home Assistant notify service call failed: %s", exc)
+
+        return decision
+
+    def _call_service(self, service: str, service_data: dict[str, Any]) -> None:
+        domain, _, name = service.partition(".")
+        response = self._http_client.post(
+            f"{self.config.base_url}/api/services/{domain}/{name}",
+            json=service_data,
+        )
+        response.raise_for_status()
+
+    async def handle_message(self, raw_message: str | bytes) -> ResponseDecision | None:
+        message = json.loads(raw_message)
+        if message.get("type") != "event":
+            return None
+        event = message.get("event") or {}
+        if event.get("event_type") != "state_changed":
+            return None
+        return self.handle_state_changed(event.get("data") or {})
+
+    # -- websocket lifecycle -------------------------------------------------
+
+    async def run(self) -> None:
+        async with websockets.connect(websocket_url(self.config.base_url)) as ws:
+            await self._authenticate(ws)
+            await self._subscribe(ws)
+            async for raw_message in ws:
+                await self.handle_message(raw_message)
+
+    async def _authenticate(self, ws: _WebSocketLike) -> None:
+        hello = json.loads(await ws.recv())
+        if hello.get("type") != "auth_required":
+            raise ConnectionError(f"Unexpected Home Assistant handshake message: {hello}")
+
+        await ws.send(json.dumps({"type": "auth", "access_token": self.config.token}))
+        response = json.loads(await ws.recv())
+        if response.get("type") != "auth_ok":
+            raise PermissionError(f"Home Assistant authentication failed: {response}")
+
+    async def _subscribe(self, ws: _WebSocketLike) -> None:
+        await ws.send(
+            json.dumps(
+                {
+                    "id": next(self._request_ids),
+                    "type": "subscribe_events",
+                    "event_type": "state_changed",
+                }
+            )
+        )
+        ack = json.loads(await ws.recv())
+        if not ack.get("success", False):
+            raise ConnectionError(f"Failed to subscribe to state_changed events: {ack}")
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    bridge = HomeAssistantBridge(config=HomeAssistantConfig.from_env())
+    logger.info(
+        "Starting KNOCK Home Assistant bridge: %s (entity=%s)",
+        bridge.config.base_url,
+        bridge.config.trigger_entity_id,
+    )
+    asyncio.run(bridge.run())
+
+
+if __name__ == "__main__":
+    main()

@@ -17,6 +17,7 @@ dependencies = [
   "httpx>=0.27.0,<1.0.0",
   "wyoming>=1.5.0,<2.0.0",
   "paho-mqtt>=2.0.0,<3.0.0",
+  "websockets>=13.0,<18.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ dev = [
 knock = "knock.cli.main:main"
 knock-mqtt-bridge = "knock.integrations.mqtt:main"
 knock-frigate-bridge = "knock.integrations.frigate:main"
+knock-ha-bridge = "knock.integrations.homeassistant:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

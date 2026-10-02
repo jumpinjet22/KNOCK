@@ -87,11 +87,10 @@ python scripts/smoke_test_providers.py --skip stt,tts
 
 ## ⚠ Hardware & Integration Status
 
-Still placeholders:
+Still a placeholder:
 - UniFi Protect (direct integration)
-- Home Assistant (direct integration)
 
-**MQTT and Frigate are both real.**
+**MQTT, Frigate, and Home Assistant are all real.**
 
 ### MQTT
 
@@ -118,6 +117,18 @@ knock-frigate-bridge
 ```
 
 It subscribes to `<KNOCK_FRIGATE_TOPIC_PREFIX>/events` (default `frigate/events`) and only reacts when a tracked object of a configured label (`KNOCK_FRIGATE_TRIGGER_LABELS`, default `person`) **actually enters a defined zone** (Frigate's `entered_zones`, optionally narrowed further via `KNOCK_FRIGATE_ZONES`) -- not just anything visible in frame, so someone passing by on the sidewalk doesn't trigger a response. Pass a `vision_provider` (e.g. `OllamaVisionProvider`) when constructing `FrigateBridge` yourself to have it fetch the event's snapshot from Frigate's HTTP API and fold a short description into the response; this is optional enrichment -- a vision failure is logged and the plain detection still goes through. Connection settings (`KNOCK_FRIGATE_MQTT_HOST`/`_PORT`/`_TOPIC_PREFIX`/`_TOPIC_OUT`/`_HTTP_HOST`/`_HTTP_PORT`/`_TRIGGER_LABELS`/`_ZONES`/`_CLIENT_ID`/`_USERNAME`/`_PASSWORD`/`_KEEPALIVE`) follow the same env-var pattern as everything else.
+
+### Home Assistant
+
+`knock.integrations.homeassistant.HomeAssistantBridge` connects directly to Home Assistant's WebSocket API (not just MQTT), so it can both react to a trigger entity and call a service back afterward. Authenticate with a [Long-Lived Access Token](https://www.home-assistant.io/docs/authentication/) created in your HA user profile. Run it standalone:
+
+```bash
+knock-ha-bridge
+```
+
+It subscribes to `state_changed` events and reacts whenever `KNOCK_HA_TRIGGER_ENTITY_ID` (default `binary_sensor.front_doorbell`) genuinely changes state -- any transition, not specifically "became on", since a growing number of HA doorbell buttons are modeled as an `event` entity whose state is a changing timestamp rather than an on/off value. `unknown`/`unavailable` placeholder states (not yet initialized, or the device dropped offline) are never treated as a trigger. If `KNOCK_HA_NOTIFY_SERVICE` is set (e.g. `notify.mobile_app_pixel`), the response text is sent through that HA service afterward via `POST /api/services/<domain>/<service>`.
+
+**Safety note:** this bridge only ever calls whatever service *you* configure via `KNOCK_HA_NOTIFY_SERVICE` -- it ships with no default that unlocks, arms, or disarms anything. That's entirely your own Home Assistant configuration choice. Connection settings (`KNOCK_HA_BASE_URL`/`_TOKEN`/`_TRIGGER_ENTITY_ID`/`_NOTIFY_SERVICE`/`_VERIFY_SSL`) follow the same env-var pattern as everything else; keep HA on plain `http://` on your LAN unless you've got a real (non-self-signed) cert, to avoid TLS verification headaches.
 
 ## Quickstart
 
@@ -194,7 +205,7 @@ See:
 Near-term priorities:
 1. ~~richer safety policy and auditing~~ — done: data-driven rule set with confidence scoring + a local audit trail, see [Safety Policy & Audit Trail](#safety-policy--audit-trail) above
 2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro) / Vision (Ollama), see [Real Providers](#real-providers-llm--stt--tts--vision) above. `knock.integrations` adapters (UniFi/Frigate/Home Assistant) are still pending.
-3. ~~hardware input/output bridges~~ — done for MQTT and Frigate (`knock-mqtt-bridge`, `knock-frigate-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above); UniFi Protect and Home Assistant direct integrations are still pending
+3. ~~hardware input/output bridges~~ — done for MQTT, Frigate, and Home Assistant (`knock-mqtt-bridge`, `knock-frigate-bridge`, `knock-ha-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above); UniFi Protect direct integration is still pending
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
 5. ~~test/tooling hardening~~ — done: FastAPI/CLI test coverage, mypy, an 80% coverage floor, and a CI job that builds the Docker image, all enforced in CI
 
