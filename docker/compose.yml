@@ -12,7 +12,7 @@ services:
     # publishes `latest`/semver tags on an actual `vX.Y.Z` release tag (see
     # .github/workflows/docker-publish.yml); a manual/dispatch build only
     # ever gets a `sha-<short-sha>` tag. Bump this deliberately on upgrade.
-    image: ghcr.io/jumpinjet22/knock:sha-b893301
+    image: ghcr.io/jumpinjet22/knock:sha-8d31676
     env_file:
       # Same file (and the same KNOCK_<NAME>_<FIELD> vars) documented in
       # .env.example at the repo root -- copy that to .env and fill in your
