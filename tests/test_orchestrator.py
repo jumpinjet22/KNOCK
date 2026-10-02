@@ -153,6 +153,15 @@ def test_respond_greets_on_a_sessions_first_normal_turn() -> None:
     assert "leave the package" in decision.text.lower()
 
 
+def test_respond_suppresses_greeting_when_caller_already_said_it_aloud() -> None:
+    state = _new_state()
+    decision = Orchestrator().respond(
+        _event("Hi, I have an Amazon package"), state=state, suppress_greeting=True
+    )
+    assert "my name is knock" not in decision.text.lower()
+    assert "leave the package" in decision.text.lower()
+
+
 def test_respond_does_not_greet_on_later_turns() -> None:
     state = _new_state()
     orchestrator = Orchestrator()

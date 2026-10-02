@@ -7,6 +7,7 @@ import pytest
 from uiprotect import EventChange
 
 from knock.config import UnifiConfig
+from knock.conversation.prompts import GREETING
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.unifi import UnifiBridge, _default_session_id
 from knock.providers.tts.base import SynthesizedAudio
@@ -378,7 +379,7 @@ def test_speak_to_visitor_survives_stream_failure(tmp_path) -> None:
     asyncio.run(bridge.speak_to_visitor("cam1", "hello"))  # should not raise
 
 
-def test_handle_event_triggers_talkback_when_tts_provider_configured(tmp_path) -> None:
+def test_handle_event_greets_before_speaking_the_response_on_first_turn(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
@@ -388,20 +389,106 @@ def test_handle_event_triggers_talkback_when_tts_provider_configured(tmp_path) -
     tts_provider = MagicMock()
     tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
 
-    captured: dict = {}
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
     bridge = UnifiBridge(
         config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
-        talkback_stream_factory=_recording_stream_factory(captured),
+        talkback_stream_factory=stream_factory,
     )
 
     decision = asyncio.run(bridge.handle_event(_event()))
 
     assert decision is not None
-    tts_provider.synthesize.assert_awaited_once_with(decision.text)
-    captured["stream"].run_until_complete.assert_awaited_once()
+    assert tts_provider.synthesize.await_count == 2
+    first_text = tts_provider.synthesize.await_args_list[0].args[0]
+    second_text = tts_provider.synthesize.await_args_list[1].args[0]
+    assert first_text == GREETING
+    assert second_text == decision.text
+    # The orchestrator must not *also* prepend the greeting to the spoken
+    # response -- it was already said aloud above.
+    assert GREETING not in decision.text
+
+
+def test_handle_event_only_greets_on_the_sessions_first_turn(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+
+    tts_provider = MagicMock()
+    tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
+
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        tts_provider=tts_provider,
+        talkback_stream_factory=stream_factory,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+    tts_provider.synthesize.reset_mock()
+    asyncio.run(bridge.handle_event(_event()))
+
+    assert tts_provider.synthesize.await_count == 1
+
+
+def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -> None:
+    events: list[str] = []
+
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+
+    tts_provider = MagicMock()
+
+    async def synthesize(text: str) -> SynthesizedAudio:
+        events.append(f"spoke:{text}")
+        return _synthesized_audio()
+
+    tts_provider.synthesize = synthesize
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(return_value="hello")
+
+    def capture(url: str, duration: float, rate: int) -> bytes:
+        events.append("listened")
+        return b"\x01\x02"
+
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        tts_provider=tts_provider,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+        talkback_stream_factory=stream_factory,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    assert events[0] == f"spoke:{GREETING}"
+    assert events[1] == "listened"
 
 
 # -- _capture_rtsp_audio (real PyAV decode, no network) --------------------------

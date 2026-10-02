@@ -53,6 +53,7 @@ from uiprotect import EventChange, ProtectApiClient
 from uiprotect.stream import TalkbackStream
 
 from knock.config import KokoroConfig, OllamaConfig, UnifiConfig, VisionConfig, WhisperConfig
+from knock.conversation.prompts import GREETING
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
@@ -191,6 +192,24 @@ class UnifiBridge:
             return None
 
         visitor_event = self.build_event(event)
+        session_id = _default_session_id(event.device_id)
+        state = self.session_store.load(session_id) or SessionState(
+            session_id=session_id, updated_at=visitor_event.timestamp
+        )
+        is_first_turn = state.turn_count == 0
+        # Only true once the greeting was actually spoken aloud below -- a
+        # text-only deployment (no tts_provider) still needs the orchestrator
+        # to put it in the returned text, since nothing else ever said it.
+        greeted_aloud = is_first_turn and self.tts_provider is not None
+
+        # A real doorbell intercom answers before waiting for the visitor to
+        # speak into silence -- greet first (once per session), *then*
+        # listen, rather than blindly capturing audio with nothing said to
+        # prompt a reply. `suppress_greeting` below tells the orchestrator
+        # not to also prepend it to the spoken response, since it was
+        # already said out loud here.
+        if greeted_aloud:
+            await self.speak_to_visitor(event.device_id, GREETING)
 
         if self.stt_provider is not None:
             transcript = await self.listen_to_visitor(event.device_id)
@@ -208,11 +227,9 @@ class UnifiBridge:
             except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
                 logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
 
-        session_id = _default_session_id(event.device_id)
-        state = self.session_store.load(session_id) or SessionState(
-            session_id=session_id, updated_at=visitor_event.timestamp
+        decision = self.orchestrator.respond(
+            visitor_event, state=state, audit_log=self.audit_log, suppress_greeting=greeted_aloud
         )
-        decision = self.orchestrator.respond(visitor_event, state=state, audit_log=self.audit_log)
         self.session_store.save(state)
 
         if self.tts_provider is not None:

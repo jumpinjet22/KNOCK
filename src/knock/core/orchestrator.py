@@ -52,13 +52,17 @@ class Orchestrator:
         event: VisitorEvent,
         state: SessionState | None = None,
         audit_log: AuditLog | None = None,
+        *,
+        suppress_greeting: bool = False,
     ) -> ResponseDecision:
         decision = self.policy.evaluate(event.text)
         intent: str | None = None
         # Read before any state mutation below -- true only for a session's
         # very first call. No state at all (stateless/library use) never
-        # greets, matching prior behavior exactly.
-        is_first_turn = state is not None and state.turn_count == 0
+        # greets, matching prior behavior exactly. `suppress_greeting` is for
+        # a caller (e.g. UnifiBridge) that already spoke the greeting out
+        # loud itself before this ever ran, so it isn't said twice.
+        is_first_turn = state is not None and state.turn_count == 0 and not suppress_greeting
 
         if decision.reason == "emergency":
             # No greeting here on purpose -- an emergency escalation should
