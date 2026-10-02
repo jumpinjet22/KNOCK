@@ -3,7 +3,12 @@ layout: default
 title: KNOCK
 ---
 
-# KNOCK
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/knock-wordmark-dark.svg">
+    <img src="assets/logo/knock-wordmark-light.svg" alt="KNOCK" width="280">
+  </picture>
+</p>
 
 **Local-first, privacy-focused door answering for safer visitor conversations.**
 

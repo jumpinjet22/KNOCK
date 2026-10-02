@@ -1,4 +1,9 @@
-# KNOCK
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/knock-wordmark-dark.svg">
+    <img src="docs/assets/logo/knock-wordmark-light.svg" alt="KNOCK" width="280">
+  </picture>
+</p>
 
 KNOCK is a **local-first, privacy-focused door answering platform** for safe visitor conversations.
 
@@ -156,6 +161,13 @@ Near-term priorities:
 2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
 3. hardware input/output bridges
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
+
+## Brand Assets
+
+The mark and wordmark live under `docs/assets/logo/` as plain SVG (light/dark
+variants, plus a self-contained favicon tile tuned for 16px tab icons). The
+GitHub Pages favicon (`docs/favicon.ico`) is generated from
+`docs/assets/logo/favicon.svg`.
 
 ## License
 
