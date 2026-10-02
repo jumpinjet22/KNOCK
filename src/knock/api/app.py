@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 
+from knock.core.audit import JSONLAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
@@ -18,7 +19,12 @@ def get_session_store() -> JSONFileSessionStore:
     return JSONFileSessionStore()
 
 
+def get_audit_log() -> JSONLAuditLog:
+    return JSONLAuditLog()
+
+
 SessionStoreDep = Annotated[JSONFileSessionStore, Depends(get_session_store)]
+AuditLogDep = Annotated[JSONLAuditLog, Depends(get_audit_log)]
 
 
 @app.post("/respond", response_model=ResponseDecision)
@@ -28,6 +34,7 @@ def respond(
     *,
     session_id: str | None = None,
     store: SessionStoreDep,
+    audit_log: AuditLogDep,
 ) -> ResponseDecision:
     """Answer a visitor event, persisting conversation state across calls.
 
@@ -43,7 +50,7 @@ def respond(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    decision = orchestrator.respond(event, state=state)
+    decision = orchestrator.respond(event, state=state, audit_log=audit_log)
     store.save(state)
 
     response.headers["X-Session-Id"] = resolved_session_id

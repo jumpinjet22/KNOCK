@@ -36,11 +36,17 @@ Current flow:
 `VisitorEvent -> policy check -> intent classification -> canned response -> ResponseDecision`
 
 Key modules:
-- `knock.core`: events, state, orchestrator, response models
-- `knock.conversation`: policy, intent, response templates
-- `knock.providers`: provider interfaces and mock implementations
-- `knock.api`: FastAPI surface (`POST /respond`)
+- `knock.core`: events, state, orchestrator, response models, session store, audit log
+- `knock.conversation`: policy (data-driven rule set), intent, response templates
+- `knock.providers`: provider interfaces, mock implementations, and real adapters
+- `knock.api`: FastAPI surface (`POST /respond`, `GET /sessions/{id}`)
 - `knock.cli`: local CLI harness (`python -m knock`)
+
+## Safety Policy & Audit Trail
+
+`PolicyEngine` no longer hardcodes keyword lists in Python -- it loads a data-defined rule set (`knock.conversation.rules.json` by default) and scores each matching rule's `weight` into a confidence total per flag (`occupancy`, `schedule`, `unlock`, `emergency`). A flag only becomes actionable once its confidence crosses the rule set's `threshold`, so multiple weak, related signals can combine into a real block/escalate decision instead of every rule needing to fire alone. Point `PolicyEngine` at your own rules with `PolicyEngine(rule_set=RuleSet.load("path/to/rules.json"))`.
+
+Every `Orchestrator.respond()` call now also records an `AuditEntry` (timestamp, visitor text, matched flags/confidence, matched rule ids, allowed/reason/intent) to a local-only, append-only JSON-lines file -- nothing in KNOCK transmits this anywhere. The API and CLI both write to `~/.local/share/knock/audit.jsonl` by default, overridable via `KNOCK_AUDIT_LOG`; direct/library use of `Orchestrator()` stays audit-free by default (`NullAuditLog`) unless you pass `audit_log=JSONLAuditLog(...)` explicitly.
 
 ## Local-First / Privacy-First Notes
 
@@ -157,7 +163,7 @@ See:
 - `docs/hardware.md`
 
 Near-term priorities:
-1. richer safety policy and auditing
+1. ~~richer safety policy and auditing~~ — done: data-driven rule set with confidence scoring + a local audit trail, see [Safety Policy & Audit Trail](#safety-policy--audit-trail) above
 2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
 3. hardware input/output bridges
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending

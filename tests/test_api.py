@@ -1,13 +1,22 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
-from knock.api.app import app, get_session_store
+from knock.api.app import app, get_audit_log, get_session_store
+from knock.core.audit import JSONLAuditLog
 from knock.core.session_store import JSONFileSessionStore
 
 
 @pytest.fixture
-def client(tmp_path):
+def audit_log_path(tmp_path):
+    return tmp_path / "audit.jsonl"
+
+
+@pytest.fixture
+def client(tmp_path, audit_log_path):
     app.dependency_overrides[get_session_store] = lambda: JSONFileSessionStore(tmp_path)
+    app.dependency_overrides[get_audit_log] = lambda: JSONLAuditLog(audit_log_path)
     try:
         yield TestClient(app)
     finally:
@@ -47,3 +56,13 @@ def test_get_unknown_session_returns_404(client) -> None:
 def test_get_session_with_unsafe_id_returns_400(client) -> None:
     resp = client.get("/sessions/bad id!")
     assert resp.status_code == 400
+
+
+def test_respond_appends_an_audit_entry(client, audit_log_path) -> None:
+    client.post("/respond", json=_payload("Hi I have a package"))
+
+    lines = audit_log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["text"] == "Hi I have a package"
+    assert entry["intent"] == "delivery"

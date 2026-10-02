@@ -1,27 +1,63 @@
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+from knock.conversation.rules import RuleSet
 from knock.core.session import ConversationContext
+
+ESCALATE_REASON = "emergency"
+BLOCK_REASON = "blocked_request"
+NORMAL_REASON = "normal"
+
+
+class PolicyDecision(BaseModel):
+    """Result of evaluating a visitor's text against the active rule set."""
+
+    allowed: bool
+    reason: str
+    flags: list[str] = Field(default_factory=list)
+    confidence: dict[str, float] = Field(default_factory=dict)
+    matched_rule_ids: list[str] = Field(default_factory=list)
 
 
 class PolicyEngine:
-    """Safety-first policy checks."""
+    """Safety-first policy checks, driven by a data-defined rule set (see `rules.json`)."""
 
-    def evaluate(self, text: str) -> tuple[bool, str, list[str]]:
+    def __init__(self, rule_set: RuleSet | None = None) -> None:
+        self.rule_set = rule_set or RuleSet.default()
+
+    def evaluate(self, text: str) -> PolicyDecision:
         lowered = text.lower()
-        flags: list[str] = []
+        confidence: dict[str, float] = {}
+        matched_rule_ids: list[str] = []
 
-        if any(k in lowered for k in ["are you home", "is anyone home", "home right now"]):
-            flags.append("occupancy")
-        if any(k in lowered for k in ["schedule", "when do you leave", "what time are you away"]):
-            flags.append("schedule")
-        if any(k in lowered for k in ["unlock", "open the door", "let me in"]):
-            flags.append("unlock")
-        if any(k in lowered for k in ["help", "emergency", "fire", "medical", "police"]):
-            flags.append("emergency")
+        for rule in self.rule_set.rules:
+            if any(phrase in lowered for phrase in rule.phrases):
+                confidence[rule.flag] = min(1.0, confidence.get(rule.flag, 0.0) + rule.weight)
+                matched_rule_ids.append(rule.id)
 
-        if "emergency" in flags:
-            return True, "emergency", flags
-        if flags:
-            return False, "blocked_request", flags
-        return True, "normal", flags
+        flags = sorted(
+            flag for flag, score in confidence.items() if score >= self.rule_set.threshold
+        )
+
+        escalate_flags = {rule.flag for rule in self.rule_set.rules if rule.action == "escalate"}
+        if any(flag in escalate_flags for flag in flags):
+            reason = ESCALATE_REASON
+            allowed = True
+        elif flags:
+            reason = BLOCK_REASON
+            allowed = False
+        else:
+            reason = NORMAL_REASON
+            allowed = True
+
+        return PolicyDecision(
+            allowed=allowed,
+            reason=reason,
+            flags=flags,
+            confidence=confidence,
+            matched_rule_ids=matched_rule_ids,
+        )
 
     def apply_style(self, response: str) -> str:
         return response.strip()[:140]

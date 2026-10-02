@@ -1,0 +1,33 @@
+{
+  "threshold": 1.0,
+  "rules": [
+    {
+      "id": "occupancy-direct",
+      "flag": "occupancy",
+      "action": "block",
+      "weight": 1.0,
+      "phrases": ["are you home", "is anyone home", "home right now"]
+    },
+    {
+      "id": "schedule-direct",
+      "flag": "schedule",
+      "action": "block",
+      "weight": 1.0,
+      "phrases": ["schedule", "when do you leave", "what time are you away"]
+    },
+    {
+      "id": "unlock-direct",
+      "flag": "unlock",
+      "action": "block",
+      "weight": 1.0,
+      "phrases": ["unlock", "open the door", "let me in"]
+    },
+    {
+      "id": "emergency-direct",
+      "flag": "emergency",
+      "action": "escalate",
+      "weight": 1.0,
+      "phrases": ["help", "emergency", "fire", "medical", "police"]
+    }
+  ]
+}

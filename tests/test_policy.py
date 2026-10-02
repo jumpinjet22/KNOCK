@@ -2,13 +2,24 @@ from knock.conversation.policy import PolicyEngine
 
 
 def test_emergency_escalation() -> None:
-    allowed, reason, flags = PolicyEngine().evaluate("Help, medical emergency")
-    assert allowed is True
-    assert reason == "emergency"
-    assert "emergency" in flags
+    decision = PolicyEngine().evaluate("Help, medical emergency")
+    assert decision.allowed is True
+    assert decision.reason == "emergency"
+    assert "emergency" in decision.flags
+    assert decision.confidence["emergency"] >= 1.0
+    assert decision.matched_rule_ids
 
 
 def test_occupancy_blocking() -> None:
-    allowed, reason, _ = PolicyEngine().evaluate("Are you home right now?")
-    assert allowed is False
-    assert reason == "blocked_request"
+    decision = PolicyEngine().evaluate("Are you home right now?")
+    assert decision.allowed is False
+    assert decision.reason == "blocked_request"
+    assert decision.flags == ["occupancy"]
+
+
+def test_normal_text_is_allowed_with_no_flags() -> None:
+    decision = PolicyEngine().evaluate("Hi, I have a package for you")
+    assert decision.allowed is True
+    assert decision.reason == "normal"
+    assert decision.flags == []
+    assert decision.matched_rule_ids == []

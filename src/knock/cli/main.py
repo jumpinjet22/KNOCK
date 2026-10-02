@@ -2,6 +2,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from knock.core.audit import JSONLAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
@@ -13,6 +14,7 @@ _EXIT_WORDS = {"quit", "exit"}
 def main(get_input: Callable[[str], str] = input) -> None:
     session_id = uuid.uuid4().hex
     store = JSONFileSessionStore()
+    audit_log = JSONLAuditLog()
     state = SessionState(session_id=session_id, updated_at=datetime.now(UTC))
     orchestrator = Orchestrator()
 
@@ -28,7 +30,7 @@ def main(get_input: Callable[[str], str] = input) -> None:
             break
 
         event = VisitorEvent(source="cli", text=visitor_text, timestamp=datetime.now(UTC))
-        decision = orchestrator.respond(event, state=state)
+        decision = orchestrator.respond(event, state=state, audit_log=audit_log)
         store.save(state)
         print(f"Response: {decision.text}")
 
