@@ -393,3 +393,197 @@ def test_handle_event_triggers_talkback_when_tts_provider_configured(tmp_path) -
     assert decision is not None
     tts_provider.synthesize.assert_awaited_once_with(decision.text)
     captured["stream"].run_until_complete.assert_awaited_once()
+
+
+# -- _capture_rtsp_audio (real PyAV decode, no network) --------------------------
+
+
+def test_capture_rtsp_audio_resamples_to_mono_16bit_16khz(tmp_path) -> None:
+    import math
+    import struct
+
+    from knock.integrations.unifi import _capture_rtsp_audio
+
+    rate_in = 8000
+    n = rate_in  # 1 second
+    samples = [int(3000 * math.sin(2 * math.pi * 440 * i / rate_in)) for i in range(n)]
+    pcm_in = struct.pack(f"<{n}h", *samples)
+    wav_path = tmp_path / "tone.wav"
+    with wave.open(str(wav_path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate_in)
+        f.writeframes(pcm_in)
+
+    pcm_out = _capture_rtsp_audio(str(wav_path), duration=5.0, sample_rate=16000)
+
+    assert isinstance(pcm_out, bytes)
+    # 1s of 8kHz input resampled to 16kHz 16-bit mono -> ~32000 bytes
+    assert 30000 < len(pcm_out) < 36000
+
+
+def test_capture_rtsp_audio_raises_for_a_missing_source(tmp_path) -> None:
+    import av
+
+    from knock.integrations.unifi import _capture_rtsp_audio
+
+    with pytest.raises(av.FFmpegError):
+        _capture_rtsp_audio(str(tmp_path / "does-not-exist.wav"), duration=1.0, sample_rate=16000)
+
+
+# -- listen_to_visitor (STT capture) ----------------------------------------------
+
+
+def _fake_rtsp_streams(url: str | None):
+    streams = MagicMock()
+    streams.get_stream_url.return_value = url
+    return streams
+
+
+def test_listen_to_visitor_is_a_no_op_without_stt_provider(tmp_path) -> None:
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=MagicMock(),
+    )
+    assert asyncio.run(bridge.listen_to_visitor("cam1")) == ""
+
+
+def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.get_rtsps_streams = AsyncMock(
+        return_value=_fake_rtsp_streams("rtsps://console/high?enableSrtp")
+    )
+    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(return_value="Hi, I have an Amazon package")
+
+    capture = MagicMock(return_value=b"\x01\x02\x03\x04")
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", listen_seconds=4.0),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+
+    transcript = asyncio.run(bridge.listen_to_visitor("cam1"))
+
+    assert transcript == "Hi, I have an Amazon package"
+    capture.assert_called_once_with("rtsps://console/high?enableSrtp", 4.0, 16000)
+    stt_provider.transcribe.assert_awaited_once_with(
+        b"\x01\x02\x03\x04", rate=16000, width=2, channels=1
+    )
+
+
+def test_listen_to_visitor_returns_empty_without_an_rtsp_stream(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.get_rtsps_streams = AsyncMock(return_value=_fake_rtsp_streams(None))
+    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock()
+    capture = MagicMock()
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+
+    assert asyncio.run(bridge.listen_to_visitor("cam1")) == ""
+    capture.assert_not_called()
+    stt_provider.transcribe.assert_not_awaited()
+
+
+def test_listen_to_visitor_survives_capture_failure(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.get_rtsps_streams = AsyncMock(
+        return_value=_fake_rtsp_streams("rtsps://console/high")
+    )
+    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock()
+    capture = MagicMock(side_effect=RuntimeError("stream unavailable"))
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+
+    assert asyncio.run(bridge.listen_to_visitor("cam1")) == ""
+    stt_provider.transcribe.assert_not_awaited()
+
+
+def test_handle_event_uses_transcript_as_event_text_when_available(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.get_rtsps_streams = AsyncMock(
+        return_value=_fake_rtsp_streams("rtsps://console/high")
+    )
+    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(return_value="Hi, I have an Amazon package")
+    capture = MagicMock(return_value=b"\x01\x02")
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    assert "leave the package" in decision.text.lower()
+
+
+def test_handle_event_falls_back_to_generic_text_when_transcript_is_empty(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.get_rtsps_streams = AsyncMock(return_value=_fake_rtsp_streams(None))
+    mock_client.get_camera = AsyncMock(return_value=fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(return_value="")
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    assert "can't help" in decision.text.lower()
+
+
+def test_unifi_config_rtsp_defaults() -> None:
+    config = UnifiConfig()
+    assert config.rtsp_quality == "high"
+    assert config.listen_seconds == 6.0
+
+
+def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("KNOCK_UNIFI_RTSP_QUALITY", "package")
+    monkeypatch.setenv("KNOCK_UNIFI_LISTEN_SECONDS", "8.5")
+
+    config = UnifiConfig.from_env()
+
+    assert config.rtsp_quality == "package"
+    assert config.listen_seconds == 8.5

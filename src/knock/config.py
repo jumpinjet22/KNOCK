@@ -192,6 +192,8 @@ class UnifiConfig(BaseModel):
     api_key: str = ""
     verify_ssl: bool = False
     trigger_on: list[str] = Field(default_factory=lambda: ["ring"])
+    rtsp_quality: str = "high"
+    listen_seconds: float = 6.0
 
     @classmethod
     def from_env(cls) -> "UnifiConfig":
@@ -209,4 +211,6 @@ class UnifiConfig(BaseModel):
             api_key=os.environ.get("KNOCK_UNIFI_API_KEY", ""),
             verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
             trigger_on=trigger_on,
+            rtsp_quality=os.environ.get("KNOCK_UNIFI_RTSP_QUALITY", "high"),
+            listen_seconds=float(os.environ.get("KNOCK_UNIFI_LISTEN_SECONDS", "6.0")),
         )
