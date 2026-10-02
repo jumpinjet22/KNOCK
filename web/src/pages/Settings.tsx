@@ -1,3 +1,4 @@
+import { startRegistration } from "@simplewebauthn/browser"
 import { useCallback, useEffect, useState } from "react"
 import { Navigate, useNavigate, useParams } from "react-router-dom"
 import { SettingsFieldInput } from "../components/SettingsFieldInput"
@@ -6,13 +7,16 @@ import {
   oauthApi,
   SETTINGS_SECTIONS,
   settingsApi,
+  webauthnApi,
+  type PasskeyInfo,
   type SectionSettings,
 } from "../lib/api"
 
 const ACRONYMS = new Set(["api", "url", "ssl", "mqtt", "id", "http", "rtsp"])
 
 const OAUTH_SECTION = { key: "oauth_google", label: "Google Sign-In" }
-const NAV_SECTIONS = [...SETTINGS_SECTIONS, OAUTH_SECTION]
+const PASSKEYS_SECTION = { key: "passkeys", label: "Passkeys" }
+const NAV_SECTIONS = [...SETTINGS_SECTIONS, OAUTH_SECTION, PASSKEYS_SECTION]
 
 function humanizeFieldName(name: string): string {
   return name
@@ -47,6 +51,8 @@ export function Settings() {
       <div className="min-w-0 flex-1">
         {section === OAUTH_SECTION.key ? (
           <GoogleOAuthSettingsForm />
+        ) : section === PASSKEYS_SECTION.key ? (
+          <PasskeysSettingsForm />
         ) : (
           <SettingsSectionForm key={section} section={section} />
         )}
@@ -332,5 +338,120 @@ function GoogleOAuthSettingsForm() {
         </button>
       </div>
     </form>
+  )
+}
+
+function PasskeysSettingsForm() {
+  const [passkeys, setPasskeys] = useState<PasskeyInfo[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [registering, setRegistering] = useState(false)
+  const supported = window.isSecureContext
+
+  const load = useCallback(() => {
+    webauthnApi
+      .list()
+      .then(setPasskeys)
+      .catch(() => setError("Failed to load passkeys."))
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function handleRegister(event: React.FormEvent) {
+    event.preventDefault()
+    const form = event.target as HTMLFormElement
+    const nickname = (new FormData(form).get("nickname") as string) || ""
+    setRegistering(true)
+    setError(null)
+    try {
+      const optionsJSON = await webauthnApi.registerOptions()
+      const credential = await startRegistration({ optionsJSON: optionsJSON as never })
+      await webauthnApi.registerVerify(credential, nickname)
+      form.reset()
+      load()
+    } catch {
+      setError("Failed to register passkey. The browser may have cancelled the prompt.")
+    } finally {
+      setRegistering(false)
+    }
+  }
+
+  async function handleDelete(credentialId: string) {
+    try {
+      await webauthnApi.remove(credentialId)
+      load()
+    } catch {
+      setError("Failed to remove passkey.")
+    }
+  }
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-black text-ink dark:text-mist">Passkeys</h1>
+      <p className="mt-1 text-sm text-steel">
+        Sign in with a fingerprint, face, or security key instead of a password. Requires HTTPS,
+        or exactly <code>localhost</code>/<code>127.0.0.1</code> -- not a bare LAN IP.
+      </p>
+
+      {!supported && (
+        <p className="mt-4 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+          This page isn't loaded in a secure context, so passkeys aren't available here. Use
+          HTTPS, or open this via <code>localhost</code>.
+        </p>
+      )}
+      {error && (
+        <p className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">
+          {error}
+        </p>
+      )}
+
+      <div className="mt-6 space-y-2">
+        {passkeys === null && <p className="text-sm text-steel">Loading…</p>}
+        {passkeys?.length === 0 && (
+          <p className="text-sm text-steel">No passkeys registered yet.</p>
+        )}
+        {passkeys?.map((passkey) => (
+          <div
+            key={passkey.credential_id}
+            className="flex items-center justify-between rounded-lg border border-steel/20 bg-paper px-4 py-3 dark:bg-dusk"
+          >
+            <div>
+              <p className="text-sm font-medium text-ink dark:text-mist">
+                {passkey.nickname || "Unnamed passkey"}
+              </p>
+              <p className="text-xs text-steel">
+                Added {new Date(passkey.created_at).toLocaleDateString()}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleDelete(passkey.credential_id)}
+              className="text-xs font-medium text-steel transition hover:text-red-600 dark:hover:text-red-400"
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {supported && (
+        <form onSubmit={(event) => void handleRegister(event)} className="mt-6 flex gap-2">
+          <input
+            name="nickname"
+            type="text"
+            placeholder="Nickname (e.g. MacBook Touch ID)"
+            className="flex-1 rounded-md border border-steel/30 bg-white px-3 py-2 text-sm text-ink outline-none focus:border-porch focus:ring-1 focus:ring-porch dark:border-steel/40 dark:bg-ink dark:text-mist"
+          />
+          <button
+            type="submit"
+            disabled={registering}
+            className="rounded-md bg-porch px-4 py-2 text-sm font-semibold text-ink transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {registering ? "Adding…" : "Add a passkey"}
+          </button>
+        </form>
+      )}
+    </div>
   )
 }

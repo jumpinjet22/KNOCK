@@ -29,6 +29,7 @@ _hasher = PasswordHasher()
 
 DEFAULT_AUTH_PATH_ENV_VAR = "KNOCK_AUTH_PATH"
 DEFAULT_WEB_SESSION_PATH_ENV_VAR = "KNOCK_WEB_SESSION_PATH"
+DEFAULT_PASSKEY_PATH_ENV_VAR = "KNOCK_PASSKEY_PATH"
 SESSION_COOKIE_NAME = "knock_session"
 SESSION_LIFETIME = timedelta(days=30)
 
@@ -201,3 +202,74 @@ class WebSessionStore:
         now = datetime.now(UTC)
         for token in [t for t, s in sessions.items() if s.expires_at < now]:
             del sessions[token]
+
+
+class PasskeyCredential(BaseModel):
+    """One registered WebAuthn credential.
+
+    `credential_id`/`public_key` are stored base64url-encoded (plain `str`,
+    not `bytes`) purely so this round-trips through the same JSON
+    persistence helpers as everything else here -- `py_webauthn` itself
+    works in raw bytes, decoded/encoded at the store boundary.
+    """
+
+    credential_id: str
+    public_key: str
+    sign_count: int
+    username: str
+    nickname: str = ""
+    created_at: datetime
+
+
+class PasskeyStore:
+    """WebAuthn credential storage, same JSON-file/`0600` pattern as `AuthStore`."""
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = (
+            Path(path)
+            if path is not None
+            else _default_path(DEFAULT_PASSKEY_PATH_ENV_VAR, "passkeys.json")
+        )
+
+    def _load(self) -> dict[str, PasskeyCredential]:
+        raw = _read_json(self.path)
+        creds = raw.get("credentials", {})
+        return {cred_id: PasskeyCredential.model_validate(data) for cred_id, data in creds.items()}
+
+    def _save(self, creds: dict[str, PasskeyCredential]) -> None:
+        _write_json_private(
+            self.path,
+            {
+                "credentials": {
+                    cred_id: cred.model_dump(mode="json") for cred_id, cred in creds.items()
+                }
+            },
+        )
+
+    def add(self, credential: PasskeyCredential) -> None:
+        creds = self._load()
+        creds[credential.credential_id] = credential
+        self._save(creds)
+
+    def get(self, credential_id: str) -> PasskeyCredential | None:
+        return self._load().get(credential_id)
+
+    def list_all(self) -> list[PasskeyCredential]:
+        return list(self._load().values())
+
+    def list_for_user(self, username: str) -> list[PasskeyCredential]:
+        return [cred for cred in self.list_all() if cred.username == username]
+
+    def update_sign_count(self, credential_id: str, sign_count: int) -> None:
+        creds = self._load()
+        existing = creds.get(credential_id)
+        if existing is None:
+            raise ValueError(f"no such credential: {credential_id!r}")
+        creds[credential_id] = existing.model_copy(update={"sign_count": sign_count})
+        self._save(creds)
+
+    def delete(self, credential_id: str) -> None:
+        creds = self._load()
+        if credential_id in creds:
+            del creds[credential_id]
+            self._save(creds)

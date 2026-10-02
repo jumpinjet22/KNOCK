@@ -266,6 +266,32 @@ export const oauthApi = {
   googleLoginUrl: "/api/oauth/google/login",
 }
 
+export interface PasskeyInfo {
+  credential_id: string
+  nickname: string
+  created_at: string
+}
+
+export const webauthnApi = {
+  registerOptions: () =>
+    apiFetch<Record<string, unknown>>("/api/webauthn/register/options", { method: "POST" }),
+  registerVerify: (credential: unknown, nickname: string) =>
+    apiFetch<PasskeyInfo>("/api/webauthn/register/verify", {
+      method: "POST",
+      body: { credential, nickname },
+    }),
+  list: () => apiFetch<PasskeyInfo[]>("/api/webauthn"),
+  remove: (credentialId: string) =>
+    apiFetch<void>(`/api/webauthn/${encodeURIComponent(credentialId)}`, { method: "DELETE" }),
+  loginOptions: () =>
+    apiFetch<Record<string, unknown>>("/api/webauthn/login/options", { method: "POST" }),
+  loginVerify: (credential: unknown) =>
+    apiFetch<{ username: string }>("/api/webauthn/login/verify", {
+      method: "POST",
+      body: { credential },
+    }),
+}
+
 export const debugApi = {
   describeVision: (imageBase64: string, prompt?: string) =>
     apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {

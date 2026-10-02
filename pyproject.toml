@@ -23,6 +23,7 @@ dependencies = [
   "starlette-csrf>=3.0.0,<4.0.0",
   "authlib>=1.3.0,<2.0.0",
   "itsdangerous>=2.1.0,<3.0.0",
+  "webauthn>=2.5.0,<4.0.0",
 ]
 
 [project.optional-dependencies]

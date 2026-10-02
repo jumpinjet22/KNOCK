@@ -21,6 +21,7 @@ from knock.api.settings_routes import router as settings_router
 from knock.api.supervisor_routes import get_bridge_supervisor
 from knock.api.supervisor_routes import router as supervisor_router
 from knock.api.video_routes import router as video_router
+from knock.api.webauthn_routes import router as webauthn_router
 from knock.core.audit import JSONLAuditLog
 from knock.core.auth import SESSION_COOKIE_NAME
 from knock.core.events import VisitorEvent
@@ -91,6 +92,7 @@ app.include_router(supervisor_router)
 app.include_router(oauth_router)
 app.include_router(video_router)
 app.include_router(history_router)
+app.include_router(webauthn_router)
 orchestrator = Orchestrator()
 
 
