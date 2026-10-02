@@ -85,15 +85,26 @@ python scripts/smoke_test_providers.py --skip stt,tts
 
 ## ⚠ Hardware & Integration Status
 
-Hardware and third-party integrations are **not implemented yet**.
-
-Files under `knock.integrations` are placeholders only for future work:
+Most hardware and third-party integrations are **still placeholders**:
 - UniFi
-- Frigate
-- Home Assistant
-- MQTT bridge behavior
+- Frigate (direct integration -- see the MQTT bridge below for an indirect path)
+- Home Assistant (direct integration -- same caveat)
 
-Vision provider is mock-only for now, same as the integrations above.
+**MQTT is real**, via `knock.integrations.mqtt.MqttBridge` -- it's the one bridge that doesn't need a vendor-specific client, since Home Assistant, Frigate, and most doorbell/camera hardware already speak MQTT. Run it standalone:
+
+```bash
+knock-mqtt-bridge
+```
+
+It subscribes to `KNOCK_MQTT_TOPIC_IN` (default `knock/events`) for JSON payloads:
+
+```json
+{"text": "Hi I have a package", "source": "front-doorbell"}
+```
+
+`text` is the only required field; `source`, `timestamp`, and `session_id` all have sensible defaults (repeated messages from the same `source` continue one session automatically). The resulting response is published as JSON to `KNOCK_MQTT_TOPIC_OUT` (default `knock/responses`). Connection settings (`KNOCK_MQTT_HOST`/`_PORT`/`_CLIENT_ID`/`_USERNAME`/`_PASSWORD`/`_KEEPALIVE`) follow the same env-var pattern as the LLM/STT/TTS providers above.
+
+Vision provider is mock-only for now, same as the UniFi/Frigate/Home Assistant integrations.
 
 ## Quickstart
 
@@ -165,7 +176,7 @@ See:
 Near-term priorities:
 1. ~~richer safety policy and auditing~~ — done: data-driven rule set with confidence scoring + a local audit trail, see [Safety Policy & Audit Trail](#safety-policy--audit-trail) above
 2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
-3. hardware input/output bridges
+3. ~~hardware input/output bridges~~ — done for MQTT (`knock-mqtt-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above); UniFi/Frigate/Home Assistant direct integrations are still pending
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
 
 ## Brand Assets

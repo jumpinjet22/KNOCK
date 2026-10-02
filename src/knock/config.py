@@ -64,3 +64,29 @@ class KokoroConfig(BaseModel):
             voice=os.environ.get("KNOCK_KOKORO_VOICE"),
             timeout=float(os.environ.get("KNOCK_KOKORO_TIMEOUT", "10.0")),
         )
+
+
+class MqttConfig(BaseModel):
+    """Connection settings for the MQTT visitor-event bridge."""
+
+    host: str = "127.0.0.1"
+    port: int = 1883
+    client_id: str = "knock"
+    topic_in: str = "knock/events"
+    topic_out: str = "knock/responses"
+    username: str | None = None
+    password: str | None = None
+    keepalive: int = 60
+
+    @classmethod
+    def from_env(cls) -> "MqttConfig":
+        return cls(
+            host=os.environ.get("KNOCK_MQTT_HOST", "127.0.0.1"),
+            port=int(os.environ.get("KNOCK_MQTT_PORT", "1883")),
+            client_id=os.environ.get("KNOCK_MQTT_CLIENT_ID", "knock"),
+            topic_in=os.environ.get("KNOCK_MQTT_TOPIC_IN", "knock/events"),
+            topic_out=os.environ.get("KNOCK_MQTT_TOPIC_OUT", "knock/responses"),
+            username=os.environ.get("KNOCK_MQTT_USERNAME"),
+            password=os.environ.get("KNOCK_MQTT_PASSWORD"),
+            keepalive=int(os.environ.get("KNOCK_MQTT_KEEPALIVE", "60")),
+        )
