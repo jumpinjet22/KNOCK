@@ -10,11 +10,13 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
+from starlette.middleware.sessions import SessionMiddleware
 from starlette_csrf import CSRFMiddleware
 
 from knock.api.auth_routes import router as auth_router
 from knock.api.debug_routes import router as debug_router
 from knock.api.history_routes import router as history_router
+from knock.api.oauth_routes import router as oauth_router
 from knock.api.settings_routes import router as settings_router
 from knock.api.supervisor_routes import get_bridge_supervisor
 from knock.api.supervisor_routes import router as supervisor_router
@@ -28,19 +30,19 @@ from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 
 
-def _get_or_create_csrf_secret() -> str:
-    """A stable secret for signing CSRF tokens, persisted across restarts.
+def _get_or_create_secret(env_var: str, filename: str) -> str:
+    """A stable secret, persisted across restarts.
 
     An env var always wins (lets a multi-process/container deployment pin
     one value); otherwise a random secret is generated once and reused from
     disk, rather than a fresh one each process start invalidating every
-    outstanding CSRF cookie on every restart.
+    outstanding cookie signed with the previous one.
     """
-    env_value = os.environ.get("KNOCK_CSRF_SECRET")
+    env_value = os.environ.get(env_var)
     if env_value:
         return env_value
 
-    path = Path.home() / ".local" / "share" / "knock" / "csrf_secret"
+    path = Path.home() / ".local" / "share" / "knock" / filename
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
 
@@ -64,17 +66,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="KNOCK API", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CSRFMiddleware,
-    secret=_get_or_create_csrf_secret(),
+    secret=_get_or_create_secret("KNOCK_CSRF_SECRET", "csrf_secret"),
     # Only enforced once a request already carries a login session cookie --
     # the pre-existing open API (/respond, /sessions/{id}) and the login/
     # setup routes themselves (no session cookie yet at that point) are
     # unaffected.
     sensitive_cookies={SESSION_COOKIE_NAME},
 )
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_get_or_create_secret("KNOCK_OAUTH_SESSION_SECRET", "oauth_session_secret"),
+    # Only ever holds the OAuth `state`/`nonce` for the few seconds of a
+    # Google sign-in redirect round-trip, not real session auth (that's
+    # `knock_session`, set separately by `_issue_session`) -- so, unlike
+    # that cookie, this one isn't worth making dynamically `Secure` per
+    # request scheme.
+    https_only=False,
+    same_site="lax",
+)
 app.include_router(auth_router)
 app.include_router(settings_router)
 app.include_router(debug_router)
 app.include_router(supervisor_router)
+app.include_router(oauth_router)
 app.include_router(video_router)
 app.include_router(history_router)
 orchestrator = Orchestrator()

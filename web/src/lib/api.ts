@@ -243,6 +243,29 @@ export const historyApi = {
   sessions: (limit = 200) => apiFetch<SessionState[]>(`/api/sessions?limit=${limit}`),
 }
 
+export interface GoogleOAuthStatus {
+  configured: boolean
+}
+
+export interface GoogleOAuthConfig {
+  client_id: string
+  has_client_secret: boolean
+  allowed_email: string
+  configured: boolean
+}
+
+export const oauthApi = {
+  googleStatus: () => apiFetch<GoogleOAuthStatus>("/api/oauth/google/status"),
+  googleConfig: () => apiFetch<GoogleOAuthConfig>("/api/oauth/google/config"),
+  updateGoogleConfig: (values: {
+    client_id?: string
+    client_secret?: string
+    allowed_email?: string
+  }) =>
+    apiFetch<GoogleOAuthConfig>("/api/oauth/google/config", { method: "PUT", body: values }),
+  googleLoginUrl: "/api/oauth/google/login",
+}
+
 export const debugApi = {
   describeVision: (imageBase64: string, prompt?: string) =>
     apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {

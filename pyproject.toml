@@ -21,6 +21,8 @@ dependencies = [
   "uiprotect>=17.0.0,<18.0.0",
   "argon2-cffi>=23.1.0,<26.0.0",
   "starlette-csrf>=3.0.0,<4.0.0",
+  "authlib>=1.3.0,<2.0.0",
+  "itsdangerous>=2.1.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -81,5 +83,5 @@ warn_unused_ignores = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["wyoming.*", "paho.*"]
+module = ["wyoming.*", "paho.*", "authlib.*"]
 ignore_missing_imports = true
