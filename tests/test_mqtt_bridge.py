@@ -66,10 +66,15 @@ def test_handle_event_persists_session_across_calls(tmp_path) -> None:
     second = bridge.handle_event(event, session_id)
 
     assert "leave the package" in first.text.lower()
+    assert "leave the package" in second.text.lower()
     state = bridge.session_store.load("visit-1")
     assert state is not None
     assert state.turn_count == 2
-    assert second.text == first.text
+    # Only the session's first response introduces KNOCK; repeating it every
+    # turn would be annoying, so later turns should be the plain canned text.
+    assert first.text != second.text
+    assert "my name is knock" in first.text.lower()
+    assert "my name is knock" not in second.text.lower()
 
 
 def test_on_connect_subscribes_to_configured_topic(tmp_path) -> None:

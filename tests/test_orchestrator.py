@@ -3,10 +3,15 @@ from datetime import UTC, datetime
 from knock.core.audit import AuditEntry
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
+from knock.core.state import SessionState
 
 
 def _event(text: str) -> VisitorEvent:
     return VisitorEvent(source="test", text=text, timestamp=datetime.now(UTC))
+
+
+def _new_state(session_id: str = "s1") -> SessionState:
+    return SessionState(session_id=session_id, updated_at=datetime.now(UTC))
 
 
 class _FakeAuditLog:
@@ -62,3 +67,39 @@ def test_respond_accepts_a_per_call_audit_log_override() -> None:
     assert len(override_log.entries) == 1
     assert len(default_log.entries) == 0
     assert override_log.entries[0].reason == "emergency"
+
+
+def test_respond_without_a_session_never_greets() -> None:
+    decision = Orchestrator().respond(_event("Hi, I have an Amazon package"))
+    assert "my name is knock" not in decision.text.lower()
+
+
+def test_respond_greets_on_a_sessions_first_normal_turn() -> None:
+    state = _new_state()
+    decision = Orchestrator().respond(_event("Hi, I have an Amazon package"), state=state)
+    assert "my name is knock" in decision.text.lower()
+    assert "leave the package" in decision.text.lower()
+
+
+def test_respond_does_not_greet_on_later_turns() -> None:
+    state = _new_state()
+    orchestrator = Orchestrator()
+
+    first = orchestrator.respond(_event("Hi, I have an Amazon package"), state=state)
+    second = orchestrator.respond(_event("Hi, I have an Amazon package"), state=state)
+
+    assert "my name is knock" in first.text.lower()
+    assert "my name is knock" not in second.text.lower()
+
+
+def test_respond_greets_on_a_sessions_first_blocked_turn() -> None:
+    state = _new_state()
+    decision = Orchestrator().respond(_event("Is anyone home right now?"), state=state)
+    assert "my name is knock" in decision.text.lower()
+    assert "can't share" in decision.text.lower()
+
+
+def test_respond_never_greets_on_emergency() -> None:
+    state = _new_state()
+    decision = Orchestrator().respond(_event("Fire emergency, help!"), state=state)
+    assert "my name is knock" not in decision.text.lower()

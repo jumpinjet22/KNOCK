@@ -48,6 +48,8 @@ Key modules:
 
 Every `Orchestrator.respond()` call now also records an `AuditEntry` (timestamp, visitor text, matched flags/confidence, matched rule ids, allowed/reason/intent) to a local-only, append-only JSON-lines file -- nothing in KNOCK transmits this anywhere. The API and CLI both write to `~/.local/share/knock/audit.jsonl` by default, overridable via `KNOCK_AUDIT_LOG`; direct/library use of `Orchestrator()` stays audit-free by default (`NullAuditLog`) unless you pass `audit_log=JSONLAuditLog(...)` explicitly.
 
+**Self-introduction:** the first response of a new session (`SessionState.turn_count == 0`) is prefixed with a one-time greeting (`knock.conversation.prompts.GREETING`) that identifies KNOCK as an AI system and flags that it can get details wrong -- so a visitor knows what they're talking to before anything else is said. Later turns in the same session skip it. Emergency escalations never get it (immediacy matters more there than a self-introduction); calling `Orchestrator()` with no session state (stateless/library use) never greets either, since there's no session to track a "first turn" against.
+
 ## Local-First / Privacy-First Notes
 
 - No *cloud* AI API calls — real providers only talk to services on your own network.
