@@ -5,6 +5,7 @@ import { Mark } from "./Wordmark"
 
 const NAV_LINKS = [
   { to: "/", label: "Dashboard", end: true },
+  { to: "/cameras", label: "Cameras", end: false },
   { to: "/processes", label: "Processes", end: false },
   { to: "/debug", label: "Debug", end: false },
   { to: "/settings", label: "Settings", end: false },

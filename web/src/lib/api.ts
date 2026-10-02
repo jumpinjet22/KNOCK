@@ -202,6 +202,23 @@ export const supervisorApi = {
     apiFetch<BridgeLogsResponse>(`/api/supervisor/${name}/logs?after=${after}`),
 }
 
+export interface UnifiCameraInfo {
+  device_id: string
+  name: string
+  is_connected: boolean
+}
+
+export interface FrigateCameraInfo {
+  name: string
+}
+
+export const videoApi = {
+  unifiCameras: () => apiFetch<UnifiCameraInfo[]>("/api/video/unifi/cameras"),
+  unifiSnapshotUrl: (deviceId: string) => `/api/video/unifi/${deviceId}/snapshot`,
+  frigateCameras: () => apiFetch<FrigateCameraInfo[]>("/api/video/frigate/cameras"),
+  frigateSnapshotUrl: (cameraName: string) => `/api/video/frigate/${cameraName}/snapshot`,
+}
+
 export const debugApi = {
   describeVision: (imageBase64: string, prompt?: string) =>
     apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {

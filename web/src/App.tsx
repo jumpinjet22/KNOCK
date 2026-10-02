@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom"
 import { AppShell } from "./components/AppShell"
 import { AuthProvider, ProtectedRoute, useAuth } from "./lib/auth"
+import { Cameras } from "./pages/Cameras"
 import { Dashboard } from "./pages/Dashboard"
 import { Debug } from "./pages/Debug"
 import { FirstRunSetup } from "./pages/FirstRunSetup"
@@ -74,6 +75,16 @@ export default function App() {
             <ProtectedRoute>
               <AppShell>
                 <Processes />
+              </AppShell>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cameras"
+          element={
+            <ProtectedRoute>
+              <AppShell>
+                <Cameras />
               </AppShell>
             </ProtectedRoute>
           }
