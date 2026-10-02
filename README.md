@@ -137,6 +137,15 @@ knock-unifi-bridge
 
 It reacts to a doorbell `ring` by default (`KNOCK_UNIFI_TRIGGER_ON`); add smart-detect object types (e.g. `person`, `package`) to also react to those. UniFi itself has no speech-to-text, so the event text is a generic trigger description -- real visitor speech is a future audio-pipeline concern. Pass a `vision_provider` when constructing `UnifiBridge` yourself to have it fetch the triggering camera's snapshot and fold a short description into the response, same best-effort enrichment pattern as the Frigate bridge. Connection settings (`KNOCK_UNIFI_HOST`/`_PORT`/`_API_KEY`/`_VERIFY_SSL`/`_TRIGGER_ON`) follow the same env-var pattern as everything else.
 
+**Talkback (two-way audio):** pass a `tts_provider` (e.g. `KokoroTTSProvider`) when constructing `UnifiBridge` to have it synthesize the response and stream it out to the triggering camera's speaker, using `uiprotect`'s own `TalkbackStream` (PyAV-based UDP streaming -- already a transitive dependency via `uiprotect`, nothing extra to install). A camera with no speaker, or any streaming failure, is logged and skipped -- talkback is an enhancement on top of the text response, never a requirement for it:
+
+```python
+from knock.integrations.unifi import UnifiBridge
+from knock.providers.tts.kokoro import KokoroTTSProvider
+
+bridge = UnifiBridge(tts_provider=KokoroTTSProvider())
+```
+
 ## Quickstart
 
 ### 1) Install

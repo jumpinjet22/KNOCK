@@ -16,8 +16,17 @@ camera's snapshot is fetched and described, folded into the event text;
 this is optional enrichment -- a failure there is logged and the plain
 trigger still goes through.
 
+If a `TTSProvider` is supplied, the orchestrator's response text is
+synthesized and streamed out to the triggering camera's speaker (UniFi's
+"talkback" feature -- many Protect doorbells can play audio back at the
+visitor) via `uiprotect.stream.TalkbackStream`. This is the genuinely
+two-way part: KNOCK can both hear/see the visitor (via vision) and speak
+back to them. Like vision, talkback is optional and best-effort -- a
+camera with no speaker, or any streaming failure, is logged and does not
+affect the rest of the response.
+
 The `uiprotect` event callback is synchronous (it's called directly by the
-library's websocket handler), but snapshot/vision enrichment needs async
+library's websocket handler), but snapshot/vision/talkback all need async
 I/O, so the sync callback (`_on_event`) just schedules the real async
 handling (`handle_event`) onto the running event loop rather than blocking
 it.
@@ -28,11 +37,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tempfile
+import wave
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from uiprotect import EventChange, ProtectApiClient
+from uiprotect.stream import TalkbackStream
 
 from knock.config import UnifiConfig
 from knock.core.audit import AuditLog, NullAuditLog
@@ -41,6 +54,7 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
+from knock.providers.tts.base import SynthesizedAudio, TTSProvider
 from knock.providers.vision.base import VisionProvider
 
 logger = logging.getLogger(__name__)
@@ -52,6 +66,15 @@ _SMART_DETECT_EVENT_TYPES = {"smartDetectZone", "smartDetectLine", "smartDetectL
 def _default_session_id(device_id: str) -> str:
     safe = _UNSAFE_SESSION_CHARS.sub("_", device_id) or "unknown"
     return f"unifi-{safe}"[:128]
+
+
+def _write_wav(path: Path, audio: SynthesizedAudio) -> None:
+    """Wrap raw PCM in a WAV header so PyAV (via `TalkbackStream`) can read it."""
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(audio.channels)
+        wav_file.setsampwidth(audio.width)
+        wav_file.setframerate(audio.rate)
+        wav_file.writeframes(audio.audio)
 
 
 class _ProtectEventLike(Protocol):
@@ -82,19 +105,23 @@ class UnifiBridge:
         session_store: SessionStore | None = None,
         audit_log: AuditLog | None = None,
         vision_provider: VisionProvider | None = None,
+        tts_provider: TTSProvider | None = None,
         client: ProtectApiClient | None = None,
+        talkback_stream_factory: Any = TalkbackStream,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
         self.session_store = session_store or JSONFileSessionStore()
         self.audit_log = audit_log or NullAuditLog()
         self.vision_provider = vision_provider
+        self.tts_provider = tts_provider
         self.client = client or ProtectApiClient(
             host=self.config.host,
             port=self.config.port,
             api_key=self.config.api_key,
             verify_ssl=self.config.verify_ssl,
         )
+        self._talkback_stream_factory = talkback_stream_factory
 
     # -- pure logic: directly testable without a real console -----------------
 
@@ -141,7 +168,47 @@ class UnifiBridge:
         )
         decision = self.orchestrator.respond(visitor_event, state=state, audit_log=self.audit_log)
         self.session_store.save(state)
+
+        if self.tts_provider is not None:
+            await self.speak_to_visitor(event.device_id, decision.text)
+
         return decision
+
+    async def speak_to_visitor(self, device_id: str, text: str) -> None:
+        """Synthesize `text` and stream it to `device_id`'s speaker, best-effort.
+
+        Any failure here (no speaker on this camera, synthesis error,
+        streaming error) is logged and swallowed -- talkback is an
+        enhancement on top of the text response, never a requirement for it.
+        """
+        if self.tts_provider is None:
+            return
+
+        try:
+            audio = await self.tts_provider.synthesize(text)
+            camera = await self.client.get_camera(device_id)
+            if not camera.feature_flags.has_speaker:
+                logger.info("Camera %s has no speaker; skipping talkback", device_id)
+                return
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                audio_path = Path(tmp_dir) / "response.wav"
+                _write_wav(audio_path, audio)
+
+                session = None
+                try:
+                    session = await self.client.create_talkback_session_public(device_id)
+                except Exception as exc:  # noqa: BLE001 - fall back to local talkback settings
+                    logger.debug(
+                        "No public talkback session for %s (%s); using local settings",
+                        device_id,
+                        exc,
+                    )
+
+                stream = self._talkback_stream_factory(camera, str(audio_path), session)
+                await stream.run_until_complete()
+        except Exception as exc:  # noqa: BLE001 - talkback is best-effort
+            logger.warning("Talkback to device %s failed: %s", device_id, exc)
 
     # -- uiprotect callback ----------------------------------------------------
 
