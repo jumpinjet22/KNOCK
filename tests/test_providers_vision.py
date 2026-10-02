@@ -6,6 +6,7 @@ import respx
 
 from knock.config import VisionConfig
 from knock.providers.vision.ollama import OllamaVisionProvider
+from knock.providers.vision.safety import SAFE_FALLBACK_DESCRIPTION
 
 
 @respx.mock
@@ -59,3 +60,15 @@ def test_describe_raises_on_http_error() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         OllamaVisionProvider(config=config).describe(b"img")
+
+
+@respx.mock
+def test_describe_sanitizes_alarming_model_output() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "A person holding what might be a bomb"})
+    )
+
+    result = OllamaVisionProvider(config=config).describe(b"img")
+
+    assert result == SAFE_FALLBACK_DESCRIPTION

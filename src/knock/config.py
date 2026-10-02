@@ -100,8 +100,13 @@ class VisionConfig(BaseModel):
     model: str = "moondream"
     timeout: float = 30.0
     prompt: str = (
-        "Describe what is happening at the front door in one short sentence. "
-        "If a package, box, or delivery is visible, mention it explicitly."
+        "Describe only the literal, visible objects and people in this image "
+        "in one short, neutral sentence (for example: a person, a package, a "
+        "box, a vehicle). Do not guess what any object contains, and do not "
+        "speculate about danger, intent, or identity. Do not mention "
+        "weapons, explosives, or threats unless unambiguously and clearly "
+        "visible. If uncertain, describe only the general shape or type of "
+        "object you can plainly see."
     )
 
     @property

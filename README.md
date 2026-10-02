@@ -68,6 +68,8 @@ Beyond the mocks, `knock.providers` now includes adapters for locally-hosted ser
 
 Whisper and TTS run over the Wyoming protocol (the same one used by Home Assistant's local voice pipeline), so these adapters assume a Wyoming TCP server is already running — they don't start one. Vision reuses the same Ollama server as the LLM (just point it at a vision-capable model pulled into Ollama, e.g. `ollama pull moondream`, `llava`, or `qwen2.5vl` for better accuracy at the cost of latency); it's not wired into the orchestrator's decision flow by default -- the Frigate/UniFi integrations call it directly to enrich a detected event with a short description.
 
+**Vision safety:** the default prompt explicitly asks the model to describe only what's literally visible and never speculate about danger, intent, or weapons -- but that's an instruction a model can ignore, not a guarantee. Every description from `OllamaVisionProvider` also passes through `knock.providers.vision.safety.sanitize_description`, a deterministic keyword backstop that swaps anything mentioning weapons/explosives/threats for a generic, safe fallback sentence before it can reach a response. It's deliberately over-inclusive (false positives suppress benign descriptions sometimes) -- per the project's safety-first stance, a boring fallback beats a speculative, alarming one. This does not replace real threat detection; it only keeps a vision model's unreliable self-generated language from being spoken or displayed verbatim.
+
 Each adapter takes a small config object with localhost defaults, overridable via env vars:
 
 | Var | Default | Notes |
