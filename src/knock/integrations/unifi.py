@@ -83,6 +83,19 @@ _CAPTURE_SAMPLE_RATE = 16000
 # was happening before is almost certainly over.
 _SESSION_IDLE_TIMEOUT = timedelta(minutes=5)
 
+# Safety cap on how many listen/respond round-trips one visit can run,
+# regardless of how talkative the visitor is -- end-of-conversation
+# detection (see `handle_event`) is "the visitor went quiet," which is a
+# good default but not a guarantee against e.g. background noise keeping
+# Whisper returning short junk transcripts forever.
+_MAX_CONVERSATION_TURNS = 5
+
+# Spoken right after listening ends and before the (sometimes slow --
+# vision description, an LLM fallback call) processing that decides the
+# actual reply, so the visitor gets some acknowledgement instead of dead
+# air while that runs.
+_THINKING_PHRASE = "Let me think about that for a moment."
+
 
 def _default_session_id(device_id: str) -> str:
     safe = _UNSAFE_SESSION_CHARS.sub("_", device_id) or "unknown"
@@ -254,6 +267,8 @@ class UnifiBridge:
             transcript = await self.listen_to_visitor(event.device_id)
             if transcript:
                 visitor_event = visitor_event.model_copy(update={"text": transcript})
+            if self.tts_provider is not None:
+                await self.speak_to_visitor(event.device_id, _THINKING_PHRASE)
 
         if self.vision_provider is not None:
             try:
@@ -266,13 +281,39 @@ class UnifiBridge:
             except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
                 logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
 
-        decision = self.orchestrator.respond(
-            visitor_event, state=state, audit_log=self.audit_log, suppress_greeting=greeted_aloud
-        )
-        self.session_store.save(state)
+        # The conversation itself: respond, speak it, then listen for a
+        # reply and keep going as long as the visitor keeps talking. Ends
+        # when they go quiet (an empty transcript -- they've said what they
+        # came to say, or left), an emergency escalates (nothing more to
+        # resolve automatically), there's no STT to listen with or no TTS
+        # to have said anything worth replying to in the first place
+        # (always one-shot), or the turn cap is hit.
+        can_converse = self.stt_provider is not None and self.tts_provider is not None
+        decision: ResponseDecision | None = None
+        for turn_index in range(_MAX_CONVERSATION_TURNS):
+            decision = self.orchestrator.respond(
+                visitor_event,
+                state=state,
+                audit_log=self.audit_log,
+                suppress_greeting=greeted_aloud,
+            )
+            self.session_store.save(state)
 
-        if self.tts_provider is not None:
-            await self.speak_to_visitor(event.device_id, decision.text)
+            if self.tts_provider is not None:
+                await self.speak_to_visitor(event.device_id, decision.text)
+
+            is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
+            if decision.escalate or not can_converse or is_last_possible_turn:
+                break
+
+            reply = await self.listen_to_visitor(event.device_id)
+            if not reply:
+                break
+            if self.tts_provider is not None:
+                await self.speak_to_visitor(event.device_id, _THINKING_PHRASE)
+            visitor_event = visitor_event.model_copy(
+                update={"text": reply, "timestamp": datetime.now(UTC)}
+            )
 
         return decision
 

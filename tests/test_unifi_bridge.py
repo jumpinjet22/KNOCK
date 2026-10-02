@@ -11,7 +11,7 @@ from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
-from knock.integrations.unifi import UnifiBridge, _default_session_id
+from knock.integrations.unifi import _THINKING_PHRASE, UnifiBridge, _default_session_id
 from knock.providers.tts.base import SynthesizedAudio
 
 
@@ -552,7 +552,10 @@ def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -
     tts_provider.synthesize = synthesize
 
     stt_provider = MagicMock()
-    stt_provider.transcribe = AsyncMock(return_value="hello")
+    # "hello" once (the visitor's actual reply), then silence -- ends the
+    # conversation after one round trip. This test is about *ordering*
+    # (greet before listen), not conversation length.
+    stt_provider.transcribe = AsyncMock(side_effect=["hello", ""])
 
     def capture(url: str, duration: float, rate: int, verify_ssl: bool) -> bytes:
         events.append("listened")
@@ -577,6 +580,108 @@ def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -
 
     assert events[0] == f"spoke:{GREETING}"
     assert events[1] == "listened"
+
+
+def _conversational_bridge(tmp_path, *, transcripts: list[str], tts_text_log: list[str]):
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+
+    tts_provider = MagicMock()
+
+    async def synthesize(text: str) -> SynthesizedAudio:
+        tts_text_log.append(text)
+        return _synthesized_audio()
+
+    tts_provider.synthesize = synthesize
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(side_effect=transcripts)
+
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
+    return UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        tts_provider=tts_provider,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=lambda url, duration, rate, verify_ssl: b"\x01\x02",
+        talkback_stream_factory=stream_factory,
+    )
+
+
+def test_handle_event_continues_the_conversation_while_the_visitor_keeps_talking(
+    tmp_path,
+) -> None:
+    tts_text_log: list[str] = []
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=[
+            "I have a package for you",
+            "this package needs a signature",
+            "",
+        ],
+        tts_text_log=tts_text_log,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    # Greeting, then one spoken response per turn (delivery, then
+    # signature-required) -- the empty third transcript ends it there.
+    assert tts_text_log[0] == GREETING
+    assert tts_text_log.count(_THINKING_PHRASE) == 2
+    responses = [text for text in tts_text_log if text not in (GREETING, _THINKING_PHRASE)]
+    assert len(responses) == 2
+    assert "leave the package" in responses[0].lower()
+    assert "sign" in responses[1].lower()
+
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 2
+
+
+def test_handle_event_stops_at_the_conversation_turn_cap(tmp_path) -> None:
+    tts_text_log: list[str] = []
+    # Always has something to say -- without a cap this would loop forever.
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["are we still talking"] * 10,
+        tts_text_log=tts_text_log,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 5
+
+
+def test_handle_event_stops_the_conversation_on_escalation(tmp_path) -> None:
+    tts_text_log: list[str] = []
+    # If the loop didn't stop here, the next (unused) transcript would
+    # prove it kept going.
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["there's a fire, help!", "should never be heard"],
+        tts_text_log=tts_text_log,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    assert decision.escalate is True
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 1
 
 
 # -- _capture_rtsp_audio (real PyAV decode, no network) --------------------------
@@ -811,7 +916,7 @@ def test_handle_event_falls_back_to_generic_text_when_transcript_is_empty(tmp_pa
 def test_unifi_config_rtsp_defaults() -> None:
     config = UnifiConfig()
     assert config.rtsp_quality == "high"
-    assert config.listen_seconds == 6.0
+    assert config.listen_seconds == 10.0
 
 
 def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
