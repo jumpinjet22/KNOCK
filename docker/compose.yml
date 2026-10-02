@@ -1,0 +1,21 @@
+services:
+  knock:
+    container_name: knock
+    restart: unless-stopped
+    # Pinned to a specific build, not a floating tag -- this repo only
+    # publishes `latest`/semver tags on an actual `vX.Y.Z` release tag (see
+    # .github/workflows/docker-publish.yml); a manual/dispatch build only
+    # ever gets a `sha-<short-sha>` tag. Bump this deliberately on upgrade.
+    image: ghcr.io/jumpinjet22/knock:sha-e89564f
+    ports:
+      - "8080:8000"
+    volumes:
+      # Everything the web UI persists (config.json, auth.json,
+      # web_sessions.json, passkeys.json, audit.jsonl, sessions/) lives here.
+      # Without this volume, replacing the container (not just restarting
+      # it) wipes all of it -- settings, the admin account, registered
+      # passkeys, everything.
+      - knock-data:/root/.local/share/knock
+
+volumes:
+  knock-data:
