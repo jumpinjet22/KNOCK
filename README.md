@@ -119,7 +119,10 @@ pip install -e .[dev]
 ### 2) Run tests
 
 ```bash
-pytest
+pytest                                        # tests only
+pytest --cov=knock --cov-report=term-missing  # with coverage (CI enforces 80% minimum)
+ruff check . && ruff format --check .         # lint + format
+mypy src tests                                # type checking
 ```
 
 ### 3) Run CLI
@@ -166,6 +169,8 @@ overridable via `KNOCK_SESSION_DIR`.
 docker compose -f docker/compose.local.yml up --build
 ```
 
+CI builds this image on every push/PR (separately from the lint/type/test job) so a broken `Dockerfile` or missing packaged file surfaces immediately.
+
 ## Future Roadmap
 
 See:
@@ -178,6 +183,7 @@ Near-term priorities:
 2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
 3. ~~hardware input/output bridges~~ — done for MQTT (`knock-mqtt-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above); UniFi/Frigate/Home Assistant direct integrations are still pending
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
+5. ~~test/tooling hardening~~ — done: FastAPI/CLI test coverage, mypy, an 80% coverage floor, and a CI job that builds the Docker image, all enforced in CI
 
 ## Brand Assets
 

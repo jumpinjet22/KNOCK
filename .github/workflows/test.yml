@@ -18,5 +18,14 @@ jobs:
           pip install -e .[dev]
       - name: Ruff
         run: ruff check . && ruff format --check .
-      - name: Pytest
-        run: pytest
+      - name: Mypy
+        run: mypy src tests
+      - name: Pytest (with coverage)
+        run: pytest --cov=knock --cov-report=term-missing
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t knock:ci .
