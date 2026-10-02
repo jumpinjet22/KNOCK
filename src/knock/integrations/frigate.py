@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 import httpx
 import paho.mqtt.client as mqtt
 
-from knock.config import FrigateConfig, OllamaConfig
+from knock.config import FrigateConfig, OllamaConfig, VisionConfig
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
@@ -36,6 +36,7 @@ from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.vision.base import VisionProvider
+from knock.providers.vision.ollama import OllamaVisionProvider
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,11 @@ class FrigateBridge:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
-    bridge = FrigateBridge(config=FrigateConfig.from_env(), orchestrator=orchestrator)
+    bridge = FrigateBridge(
+        config=FrigateConfig.from_env(),
+        orchestrator=orchestrator,
+        vision_provider=OllamaVisionProvider(config=VisionConfig.from_env()),
+    )
     logger.info(
         "Starting KNOCK Frigate bridge: %s:%s (prefix=%s, labels=%s)",
         bridge.config.mqtt_host,

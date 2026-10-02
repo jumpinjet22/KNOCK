@@ -52,7 +52,7 @@ import av
 from uiprotect import EventChange, ProtectApiClient
 from uiprotect.stream import TalkbackStream
 
-from knock.config import OllamaConfig, UnifiConfig
+from knock.config import KokoroConfig, OllamaConfig, UnifiConfig, VisionConfig, WhisperConfig
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
@@ -61,8 +61,11 @@ from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
+from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.base import SynthesizedAudio, TTSProvider
+from knock.providers.tts.kokoro import KokoroTTSProvider
 from knock.providers.vision.base import VisionProvider
+from knock.providers.vision.ollama import OllamaVisionProvider
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +317,13 @@ class UnifiBridge:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
-    bridge = UnifiBridge(config=UnifiConfig.from_env(), orchestrator=orchestrator)
+    bridge = UnifiBridge(
+        config=UnifiConfig.from_env(),
+        orchestrator=orchestrator,
+        vision_provider=OllamaVisionProvider(config=VisionConfig.from_env()),
+        stt_provider=WhisperSTTProvider(config=WhisperConfig.from_env()),
+        tts_provider=KokoroTTSProvider(config=KokoroConfig.from_env()),
+    )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",
         bridge.config.host,
