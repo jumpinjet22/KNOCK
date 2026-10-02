@@ -1,7 +1,12 @@
 import { type ReactNode } from "react"
-import { useNavigate } from "react-router-dom"
+import { NavLink, useNavigate } from "react-router-dom"
 import { useAuth } from "../lib/auth"
 import { Mark } from "./Wordmark"
+
+const NAV_LINKS = [
+  { to: "/", label: "Dashboard", end: true },
+  { to: "/settings", label: "Settings", end: false },
+]
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { state, logout } = useAuth()
@@ -16,11 +21,31 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-mist dark:bg-ink">
       <header className="flex items-center justify-between border-b border-steel/20 bg-paper px-6 py-3 dark:border-steel/30 dark:bg-dusk">
-        <div className="flex items-center gap-2">
-          <Mark className="h-7 w-7" />
-          <span className="font-display text-lg font-black tracking-wide text-ink dark:text-mist">
-            KNOCK
-          </span>
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2">
+            <Mark className="h-7 w-7" />
+            <span className="font-display text-lg font-black tracking-wide text-ink dark:text-mist">
+              KNOCK
+            </span>
+          </div>
+          <nav className="flex items-center gap-4">
+            {NAV_LINKS.map((link) => (
+              <NavLink
+                key={link.to}
+                to={link.to}
+                end={link.end}
+                className={({ isActive }) =>
+                  `text-sm font-medium transition ${
+                    isActive
+                      ? "text-porch"
+                      : "text-steel hover:text-ink dark:hover:text-mist"
+                  }`
+                }
+              >
+                {link.label}
+              </NavLink>
+            ))}
+          </nav>
         </div>
         {username && (
           <div className="flex items-center gap-3">

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
+from wyoming.info import Describe, Info
 from wyoming.tts import Synthesize, SynthesizeVoice
 
 from knock.config import KokoroConfig
@@ -54,3 +55,29 @@ class KokoroTTSProvider:
             width=audio_format.width,
             channels=audio_format.channels,
         )
+
+    async def list_voices(self) -> list[str]:
+        """Query the server's `Describe`/`Info` handshake for available voice names.
+
+        Lets a settings UI offer a real dropdown instead of a blind text
+        field. Raises `ConnectionError` if the server never responds with
+        `Info` -- callers (e.g. the settings API) should treat that as
+        "voices unavailable right now," not a hard failure.
+        """
+        async with AsyncTcpClient(
+            self.config.host,
+            self.config.port,
+            connect_timeout=self.config.timeout,
+            read_timeout=self.config.timeout,
+        ) as client:
+            await client.write_event(Describe().event())
+
+            while True:
+                event = await client.read_event()
+                if event is None:
+                    raise ConnectionError(
+                        "Wyoming server closed the connection before sending Info"
+                    )
+                if Info.is_type(event.type):
+                    info = Info.from_event(event)
+                    return [voice.name for program in info.tts for voice in program.voices]

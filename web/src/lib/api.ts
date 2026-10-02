@@ -84,3 +84,48 @@ export const authApi = {
   logout: () => apiFetch<void>("/api/auth/logout", { method: "POST" }),
   me: () => apiFetch<CurrentUser>("/api/auth/me"),
 }
+
+export type SettingsFieldType =
+  | "string"
+  | "text"
+  | "int"
+  | "float"
+  | "bool"
+  | "list_string"
+  | "secret"
+
+export interface SettingsField {
+  name: string
+  type: SettingsFieldType
+  value: unknown
+  has_value: boolean | null
+  shadowed_by_env: boolean
+}
+
+export interface SectionSettings {
+  section: string
+  fields: SettingsField[]
+}
+
+export interface KokoroVoices {
+  voices: string[]
+  error: string | null
+}
+
+export const SETTINGS_SECTIONS: { key: string; label: string }[] = [
+  { key: "ollama", label: "Ollama (LLM)" },
+  { key: "vision", label: "Vision" },
+  { key: "whisper", label: "Whisper (STT)" },
+  { key: "kokoro", label: "Kokoro (TTS)" },
+  { key: "mqtt", label: "MQTT" },
+  { key: "frigate", label: "Frigate" },
+  { key: "homeassistant", label: "Home Assistant" },
+  { key: "unifi", label: "UniFi Protect" },
+]
+
+export const settingsApi = {
+  get: (section: string) => apiFetch<SectionSettings>(`/api/settings/${section}`),
+  update: (section: string, values: Record<string, unknown>) =>
+    apiFetch<SectionSettings>(`/api/settings/${section}`, { method: "PUT", body: { values } }),
+  kokoroVoices: () => apiFetch<KokoroVoices>("/api/settings/kokoro/voices"),
+}

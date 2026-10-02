@@ -4,6 +4,7 @@ import { AuthProvider, ProtectedRoute, useAuth } from "./lib/auth"
 import { Dashboard } from "./pages/Dashboard"
 import { FirstRunSetup } from "./pages/FirstRunSetup"
 import { Login } from "./pages/Login"
+import { Settings } from "./pages/Settings"
 
 function SetupRoute() {
   const { state } = useAuth()
@@ -41,6 +42,16 @@ export default function App() {
             <ProtectedRoute>
               <AppShell>
                 <Dashboard />
+              </AppShell>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings/:section?"
+          element={
+            <ProtectedRoute>
+              <AppShell>
+                <Settings />
               </AppShell>
             </ProtectedRoute>
           }
