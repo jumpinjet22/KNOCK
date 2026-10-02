@@ -52,13 +52,14 @@ import av
 from uiprotect import EventChange, ProtectApiClient
 from uiprotect.stream import TalkbackStream
 
-from knock.config import UnifiConfig
+from knock.config import OllamaConfig, UnifiConfig
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
+from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
 from knock.providers.tts.base import SynthesizedAudio, TTSProvider
 from knock.providers.vision.base import VisionProvider
@@ -312,7 +313,8 @@ class UnifiBridge:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    bridge = UnifiBridge(config=UnifiConfig.from_env())
+    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    bridge = UnifiBridge(config=UnifiConfig.from_env(), orchestrator=orchestrator)
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",
         bridge.config.host,

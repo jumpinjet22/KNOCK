@@ -22,13 +22,14 @@ from datetime import UTC, datetime
 
 import paho.mqtt.client as mqtt
 
-from knock.config import MqttConfig
+from knock.config import MqttConfig, OllamaConfig
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
+from knock.providers.llm.ollama import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,8 @@ class MqttBridge:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    bridge = MqttBridge(config=MqttConfig.from_env())
+    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    bridge = MqttBridge(config=MqttConfig.from_env(), orchestrator=orchestrator)
     logger.info(
         "Starting KNOCK MQTT bridge: %s:%s (in=%s, out=%s)",
         bridge.config.host,

@@ -36,13 +36,14 @@ from typing import Any, Protocol
 import httpx
 import websockets
 
-from knock.config import HomeAssistantConfig
+from knock.config import HomeAssistantConfig, OllamaConfig
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
+from knock.providers.llm.ollama import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +190,8 @@ class HomeAssistantBridge:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    bridge = HomeAssistantBridge(config=HomeAssistantConfig.from_env())
+    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    bridge = HomeAssistantBridge(config=HomeAssistantConfig.from_env(), orchestrator=orchestrator)
     logger.info(
         "Starting KNOCK Home Assistant bridge: %s (entity=%s)",
         bridge.config.base_url,

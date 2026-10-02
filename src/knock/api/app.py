@@ -22,13 +22,16 @@ from knock.api.supervisor_routes import get_bridge_supervisor
 from knock.api.supervisor_routes import router as supervisor_router
 from knock.api.video_routes import router as video_router
 from knock.api.webauthn_routes import router as webauthn_router
+from knock.config import OllamaConfig
 from knock.core.audit import JSONLAuditLog
 from knock.core.auth import SESSION_COOKIE_NAME
+from knock.core.config_store import ConfigStore
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
+from knock.providers.llm.ollama import OllamaProvider
 
 
 def _get_or_create_secret(env_var: str, filename: str) -> str:
@@ -93,7 +96,15 @@ app.include_router(oauth_router)
 app.include_router(video_router)
 app.include_router(history_router)
 app.include_router(webauthn_router)
-orchestrator = Orchestrator()
+# Resolved once at process start (same as the CSRF/OAuth-session secrets
+# above) -- an Ollama setting changed later through the web UI takes effect
+# on the next restart, not live. Construction itself never touches the
+# network (OllamaProvider's httpx.Client is lazy), so a down/misconfigured
+# Ollama server can't fail startup -- only the unknown-intent fallback
+# degrades (see Orchestrator._text_for_intent).
+orchestrator = Orchestrator(
+    llm_provider=OllamaProvider(config=OllamaConfig.from_sources(ConfigStore()))
+)
 
 
 def get_session_store() -> JSONFileSessionStore:

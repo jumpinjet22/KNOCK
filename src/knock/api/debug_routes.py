@@ -241,7 +241,7 @@ class ConversationSimulateResponse(BaseModel):
 
 @router.post("/conversation/simulate", response_model=ConversationSimulateResponse)
 def debug_conversation_simulate(
-    body: ConversationSimulateRequest, current_user: CurrentUserDep
+    body: ConversationSimulateRequest, current_user: CurrentUserDep, *, store: ConfigStoreDep
 ) -> ConversationSimulateResponse:
     """A browser version of the CLI REPL: run one visitor line through the
     real, unmodified policy engine and orchestrator (no session persisted),
@@ -249,7 +249,9 @@ def debug_conversation_simulate(
     its own -- useful for debugging why a rule did or didn't fire without
     needing real hardware.
     """
-    orchestrator = Orchestrator()
+    orchestrator = Orchestrator(
+        llm_provider=OllamaProvider(config=OllamaConfig.from_sources(store))
+    )
     policy_decision = orchestrator.policy.evaluate(body.text)
     event = VisitorEvent(text=body.text, timestamp=datetime.now(UTC))
     decision = orchestrator.respond(event)

@@ -40,6 +40,71 @@ def test_unknown_visitor_fallback() -> None:
     assert "can't help" in decision.text.lower()
 
 
+class _FakeLLMProvider:
+    name = "fake-llm"
+
+    def __init__(self, response: str = "Sorry, I'm not sure how to help with that.") -> None:
+        self.response = response
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.response
+
+
+class _FailingLLMProvider:
+    name = "failing-llm"
+
+    def generate(self, prompt: str) -> str:
+        raise RuntimeError("ollama is down")
+
+
+def test_unknown_intent_uses_the_llm_fallback_when_configured() -> None:
+    llm = _FakeLLMProvider("Sorry, could you repeat that?")
+    decision = Orchestrator(llm_provider=llm).respond(_event("Do you like jazz?"))
+
+    assert decision.text == "Sorry, could you repeat that?"
+    assert len(llm.prompts) == 1
+    assert "Do you like jazz?" in llm.prompts[0]
+
+
+def test_llm_fallback_is_only_consulted_for_unknown_intent() -> None:
+    llm = _FakeLLMProvider()
+    Orchestrator(llm_provider=llm).respond(_event("Hi, I have an Amazon package"))
+
+    assert llm.prompts == []
+
+
+def test_llm_fallback_failure_falls_back_to_the_canned_response() -> None:
+    decision = Orchestrator(llm_provider=_FailingLLMProvider()).respond(_event("Do you like jazz?"))
+    assert "can't help" in decision.text.lower()
+
+
+def test_llm_fallback_blank_response_falls_back_to_the_canned_response() -> None:
+    decision = Orchestrator(llm_provider=_FakeLLMProvider("   ")).respond(
+        _event("Do you like jazz?")
+    )
+    assert "can't help" in decision.text.lower()
+
+
+def test_llm_fallback_response_is_still_style_truncated() -> None:
+    llm = _FakeLLMProvider("x" * 500)
+    decision = Orchestrator(llm_provider=llm).respond(_event("Do you like jazz?"))
+    assert len(decision.text) <= 140
+
+
+def test_llm_fallback_is_never_consulted_for_a_blocked_request() -> None:
+    llm = _FakeLLMProvider()
+    Orchestrator(llm_provider=llm).respond(_event("Is anyone home right now?"))
+    assert llm.prompts == []
+
+
+def test_llm_fallback_is_never_consulted_for_an_emergency() -> None:
+    llm = _FakeLLMProvider()
+    Orchestrator(llm_provider=llm).respond(_event("Fire emergency, help!"))
+    assert llm.prompts == []
+
+
 def test_emergency_escalation() -> None:
     decision = Orchestrator().respond(_event("Fire emergency, help!"))
     assert decision.escalate is True

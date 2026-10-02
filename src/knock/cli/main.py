@@ -2,11 +2,13 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from knock.config import OllamaConfig
 from knock.core.audit import JSONLAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
+from knock.providers.llm.ollama import OllamaProvider
 
 _EXIT_WORDS = {"quit", "exit"}
 
@@ -16,7 +18,7 @@ def main(get_input: Callable[[str], str] = input) -> None:
     store = JSONFileSessionStore()
     audit_log = JSONLAuditLog()
     state = SessionState(session_id=session_id, updated_at=datetime.now(UTC))
-    orchestrator = Orchestrator()
+    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
 
     print(f"KNOCK CLI -- session {session_id} (blank line or 'quit' to exit)")
 

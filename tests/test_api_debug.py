@@ -337,3 +337,31 @@ def test_debug_conversation_simulate_emergency_escalates(client) -> None:
     assert body["decision"]["escalate"] is True
     assert body["decision"]["reason"] == "emergency"
     assert len(body["matched_rule_ids"]) > 0
+
+
+@respx.mock
+def test_debug_conversation_simulate_uses_llm_for_unknown_intent(client, config_store) -> None:
+    _login(client)
+    config = OllamaConfig.from_sources(config_store)
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "Sorry, could you say that again?"})
+    )
+
+    resp = _post(client, "/api/debug/conversation/simulate", {"text": "Do you like jazz?"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "unknown"
+    assert body["decision"]["text"] == "Sorry, could you say that again?"
+
+
+@respx.mock
+def test_debug_conversation_simulate_falls_back_when_llm_fails(client, config_store) -> None:
+    _login(client)
+    config = OllamaConfig.from_sources(config_store)
+    respx.post(f"{config.base_url}/api/generate").mock(return_value=httpx.Response(500))
+
+    resp = _post(client, "/api/debug/conversation/simulate", {"text": "Do you like jazz?"})
+
+    assert resp.status_code == 200
+    assert "can't help" in resp.json()["decision"]["text"].lower()
