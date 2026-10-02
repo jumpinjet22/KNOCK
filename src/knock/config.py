@@ -117,3 +117,45 @@ class VisionConfig(BaseModel):
             timeout=float(os.environ.get("KNOCK_VISION_TIMEOUT", "30.0")),
             prompt=os.environ.get("KNOCK_VISION_PROMPT", cls.model_fields["prompt"].default),
         )
+
+
+class FrigateConfig(BaseModel):
+    """Connection settings for the Frigate NVR bridge."""
+
+    mqtt_host: str = "127.0.0.1"
+    mqtt_port: int = 1883
+    topic_prefix: str = "frigate"
+    topic_out: str = "knock/responses"
+    client_id: str = "knock-frigate"
+    username: str | None = None
+    password: str | None = None
+    keepalive: int = 60
+    http_host: str = "127.0.0.1"
+    http_port: int = 5000
+    trigger_labels: list[str] = Field(default_factory=lambda: ["person"])
+    zones: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_env(cls) -> "FrigateConfig":
+        def _csv(value: str | None) -> list[str] | None:
+            if value is None:
+                return None
+            return [item.strip() for item in value.split(",") if item.strip()]
+
+        trigger_labels = _csv(os.environ.get("KNOCK_FRIGATE_TRIGGER_LABELS"))
+        zones = _csv(os.environ.get("KNOCK_FRIGATE_ZONES"))
+
+        return cls(
+            mqtt_host=os.environ.get("KNOCK_FRIGATE_MQTT_HOST", "127.0.0.1"),
+            mqtt_port=int(os.environ.get("KNOCK_FRIGATE_MQTT_PORT", "1883")),
+            topic_prefix=os.environ.get("KNOCK_FRIGATE_TOPIC_PREFIX", "frigate"),
+            topic_out=os.environ.get("KNOCK_FRIGATE_TOPIC_OUT", "knock/responses"),
+            client_id=os.environ.get("KNOCK_FRIGATE_CLIENT_ID", "knock-frigate"),
+            username=os.environ.get("KNOCK_FRIGATE_USERNAME"),
+            password=os.environ.get("KNOCK_FRIGATE_PASSWORD"),
+            keepalive=int(os.environ.get("KNOCK_FRIGATE_KEEPALIVE", "60")),
+            http_host=os.environ.get("KNOCK_FRIGATE_HTTP_HOST", "127.0.0.1"),
+            http_port=int(os.environ.get("KNOCK_FRIGATE_HTTP_PORT", "5000")),
+            trigger_labels=trigger_labels if trigger_labels is not None else ["person"],
+            zones=zones if zones is not None else [],
+        )
