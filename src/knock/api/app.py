@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from starlette_csrf import CSRFMiddleware
 
 from knock.api.auth_routes import router as auth_router
+from knock.api.debug_routes import router as debug_router
 from knock.api.settings_routes import router as settings_router
 from knock.core.audit import JSONLAuditLog
 from knock.core.auth import SESSION_COOKIE_NAME
@@ -56,6 +57,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(settings_router)
+app.include_router(debug_router)
 orchestrator = Orchestrator()
 
 

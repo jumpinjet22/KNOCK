@@ -35,7 +35,12 @@ class OllamaVisionProvider:
         self.config = config or VisionConfig()
         self._client = client or httpx.Client(timeout=self.config.timeout)
 
-    def describe(self, image: bytes, prompt: str | None = None) -> str:
+    def describe_raw(self, image: bytes, prompt: str | None = None) -> str:
+        """Like `describe()`, but skips the safety filter.
+
+        Only for the debug/test-lab UI's "raw vs. sanitized, side by side"
+        panel -- real response paths must always go through `describe()`.
+        """
         encoded_image = base64.b64encode(image).decode("ascii")
         response = self._client.post(
             f"{self.config.base_url}/api/generate",
@@ -48,8 +53,10 @@ class OllamaVisionProvider:
         )
         response.raise_for_status()
         data = response.json()
-        description = str(data.get("response", "")).strip()
-        return sanitize_description(description)
+        return str(data.get("response", "")).strip()
+
+    def describe(self, image: bytes, prompt: str | None = None) -> str:
+        return sanitize_description(self.describe_raw(image, prompt))
 
     def close(self) -> None:
         self._client.close()

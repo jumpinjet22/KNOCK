@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom"
 import { AppShell } from "./components/AppShell"
 import { AuthProvider, ProtectedRoute, useAuth } from "./lib/auth"
 import { Dashboard } from "./pages/Dashboard"
+import { Debug } from "./pages/Debug"
 import { FirstRunSetup } from "./pages/FirstRunSetup"
 import { Login } from "./pages/Login"
 import { Settings } from "./pages/Settings"
@@ -52,6 +53,16 @@ export default function App() {
             <ProtectedRoute>
               <AppShell>
                 <Settings />
+              </AppShell>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/debug"
+          element={
+            <ProtectedRoute>
+              <AppShell>
+                <Debug />
               </AppShell>
             </ProtectedRoute>
           }

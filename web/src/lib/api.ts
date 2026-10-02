@@ -129,3 +129,70 @@ export const settingsApi = {
     apiFetch<SectionSettings>(`/api/settings/${section}`, { method: "PUT", body: { values } }),
   kokoroVoices: () => apiFetch<KokoroVoices>("/api/settings/kokoro/voices"),
 }
+
+export interface VisionDescribeResult {
+  raw: string
+  sanitized: string
+  alarming_language_detected: boolean
+  latency_ms: number
+}
+
+export interface LLMGenerateResult {
+  response: string
+  latency_ms: number
+}
+
+export interface STTTranscribeResult {
+  transcript: string
+  latency_ms: number
+}
+
+export interface TTSSynthesizeResult {
+  audio_wav_base64: string
+  rate: number
+  width: number
+  channels: number
+  latency_ms: number
+}
+
+export interface ResponseDecision {
+  text: string
+  safe: boolean
+  escalate: boolean
+  reason: string
+}
+
+export interface ConversationSimulateResult {
+  decision: ResponseDecision
+  intent: string
+  policy_allowed: boolean
+  policy_reason: string
+  policy_flags: string[]
+  policy_confidence: Record<string, number>
+  matched_rule_ids: string[]
+}
+
+export const debugApi = {
+  describeVision: (imageBase64: string, prompt?: string) =>
+    apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {
+      method: "POST",
+      body: { image_base64: imageBase64, prompt: prompt || null },
+    }),
+  generateLLM: (prompt: string) =>
+    apiFetch<LLMGenerateResult>("/api/debug/llm/generate", { method: "POST", body: { prompt } }),
+  transcribeSTT: (audioWavBase64: string) =>
+    apiFetch<STTTranscribeResult>("/api/debug/stt/transcribe", {
+      method: "POST",
+      body: { audio_wav_base64: audioWavBase64 },
+    }),
+  synthesizeTTS: (text: string) =>
+    apiFetch<TTSSynthesizeResult>("/api/debug/tts/synthesize", {
+      method: "POST",
+      body: { text },
+    }),
+  simulateConversation: (text: string) =>
+    apiFetch<ConversationSimulateResult>("/api/debug/conversation/simulate", {
+      method: "POST",
+      body: { text },
+    }),
+}
