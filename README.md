@@ -55,7 +55,7 @@ Every `Orchestrator.respond()` call now also records an `AuditEntry` (timestamp,
 - Real providers are opt-in: the orchestrator still uses the mock/canned-response path by default, and nothing in `knock.core`/`knock.conversation` requires a provider to be configured.
 - No vision model pipeline is included yet.
 
-## Real Providers (LLM / STT / TTS)
+## Real Providers (LLM / STT / TTS / Vision)
 
 Beyond the mocks, `knock.providers` now includes adapters for locally-hosted services:
 
@@ -64,8 +64,9 @@ Beyond the mocks, `knock.providers` now includes adapters for locally-hosted ser
 | LLM | [Ollama](https://ollama.com) | HTTP REST | `knock.providers.llm.ollama.OllamaProvider` |
 | STT | Whisper (e.g. `wyoming-faster-whisper`) | [Wyoming](https://github.com/OHF-Voice/wyoming) | `knock.providers.stt.whisper.WhisperSTTProvider` |
 | TTS | Kokoro (Wyoming-wrapped) | [Wyoming](https://github.com/OHF-Voice/wyoming) | `knock.providers.tts.kokoro.KokoroTTSProvider` |
+| Vision | A vision-capable Ollama model (default `moondream`) | HTTP REST | `knock.providers.vision.ollama.OllamaVisionProvider` |
 
-Whisper and TTS run over the Wyoming protocol (the same one used by Home Assistant's local voice pipeline), so these adapters assume a Wyoming TCP server is already running — they don't start one.
+Whisper and TTS run over the Wyoming protocol (the same one used by Home Assistant's local voice pipeline), so these adapters assume a Wyoming TCP server is already running — they don't start one. Vision reuses the same Ollama server as the LLM (just point it at a vision-capable model pulled into Ollama, e.g. `ollama pull moondream`, `llava`, or `qwen2.5vl` for better accuracy at the cost of latency); it's not wired into the orchestrator's decision flow by default -- the Frigate/UniFi integrations call it directly to enrich a detected event with a short description.
 
 Each adapter takes a small config object with localhost defaults, overridable via env vars:
 
@@ -74,6 +75,7 @@ Each adapter takes a small config object with localhost defaults, overridable vi
 | `KNOCK_OLLAMA_HOST` / `_PORT` / `_MODEL` / `_TIMEOUT` | `127.0.0.1` / `11434` / `llama3.2` / `30.0` | Ollama REST API |
 | `KNOCK_WHISPER_HOST` / `_PORT` / `_TIMEOUT` | `127.0.0.1` / `10300` / `10.0` | Wyoming STT server |
 | `KNOCK_KOKORO_HOST` / `_PORT` / `_VOICE` / `_TIMEOUT` | `127.0.0.1` / `10200` / unset / `10.0` | Wyoming TTS server |
+| `KNOCK_VISION_HOST` / `_PORT` / `_MODEL` / `_TIMEOUT` / `_PROMPT` | `127.0.0.1` / `11434` / `moondream` / `30.0` / (see `config.py`) | Vision-capable Ollama model |
 
 With those services running locally, sanity-check connectivity by hand (this script isn't part of CI, since it needs real services up):
 
@@ -104,7 +106,7 @@ It subscribes to `KNOCK_MQTT_TOPIC_IN` (default `knock/events`) for JSON payload
 
 `text` is the only required field; `source`, `timestamp`, and `session_id` all have sensible defaults (repeated messages from the same `source` continue one session automatically). The resulting response is published as JSON to `KNOCK_MQTT_TOPIC_OUT` (default `knock/responses`). Connection settings (`KNOCK_MQTT_HOST`/`_PORT`/`_CLIENT_ID`/`_USERNAME`/`_PASSWORD`/`_KEEPALIVE`) follow the same env-var pattern as the LLM/STT/TTS providers above.
 
-Vision provider is mock-only for now, same as the UniFi/Frigate/Home Assistant integrations.
+Vision now has a real adapter too, see [Real Providers](#real-providers-llm--stt--tts--vision) above -- UniFi/Frigate/Home Assistant integrations are still placeholders.
 
 ## Quickstart
 
@@ -180,7 +182,7 @@ See:
 
 Near-term priorities:
 1. ~~richer safety policy and auditing~~ — done: data-driven rule set with confidence scoring + a local audit trail, see [Safety Policy & Audit Trail](#safety-policy--audit-trail) above
-2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro), see [Real Providers](#real-providers-llm--stt--tts) above. Vision and `knock.integrations` adapters are still pending.
+2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro) / Vision (Ollama), see [Real Providers](#real-providers-llm--stt--tts--vision) above. `knock.integrations` adapters (UniFi/Frigate/Home Assistant) are still pending.
 3. ~~hardware input/output bridges~~ — done for MQTT (`knock-mqtt-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above); UniFi/Frigate/Home Assistant direct integrations are still pending
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
 5. ~~test/tooling hardening~~ — done: FastAPI/CLI test coverage, mypy, an 80% coverage floor, and a CI job that builds the Docker image, all enforced in CI

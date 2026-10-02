@@ -6,25 +6,34 @@ by hand after starting your local Ollama, Wyoming-Whisper, and Wyoming-Kokoro
 services to sanity-check connectivity and the basic request/response shape.
 
 Usage:
-    python scripts/smoke_test_providers.py [--skip llm,stt,tts]
+    python scripts/smoke_test_providers.py [--skip llm,stt,tts,vision]
 
-Configuration is read from the same KNOCK_OLLAMA_*/KNOCK_WHISPER_*/KNOCK_KOKORO_*
-environment variables the real providers use (see knock.config), falling back
-to each provider's localhost defaults.
+Configuration is read from the same
+KNOCK_OLLAMA_*/KNOCK_WHISPER_*/KNOCK_KOKORO_*/KNOCK_VISION_* environment
+variables the real providers use (see knock.config), falling back to each
+provider's localhost defaults.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import math
 import struct
 import sys
 
-from knock.config import KokoroConfig, OllamaConfig, WhisperConfig
+from knock.config import KokoroConfig, OllamaConfig, VisionConfig, WhisperConfig
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.kokoro import KokoroTTSProvider
+from knock.providers.vision.ollama import OllamaVisionProvider
+
+# A 1x1 transparent PNG -- just enough of a real image to exercise the wire
+# format; don't expect a meaningful description back from it.
+_TEST_IMAGE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _silence(seconds: float = 1.0, rate: int = 16000) -> bytes:
@@ -67,17 +76,28 @@ def check_tts() -> None:
     print(f"synthesized {len(result.audio)} bytes @ {result.rate}Hz/{result.width * 8}bit")
 
 
+def check_vision() -> None:
+    config = VisionConfig.from_env()
+    print(f"--- Vision ({config.base_url}, model={config.model}) ---")
+    provider = OllamaVisionProvider(config=config)
+    try:
+        description = provider.describe(_TEST_IMAGE_PNG)
+        print(f"description of a 1x1 test image: {description!r}")
+    finally:
+        provider.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--skip",
         default="",
-        help="comma-separated subset of llm,stt,tts to skip",
+        help="comma-separated subset of llm,stt,tts,vision to skip",
     )
     args = parser.parse_args()
     skip = {name.strip() for name in args.skip.split(",") if name.strip()}
 
-    checks = {"llm": check_llm, "stt": check_stt, "tts": check_tts}
+    checks = {"llm": check_llm, "stt": check_stt, "tts": check_tts, "vision": check_vision}
     failures = []
     for name, check in checks.items():
         if name in skip:

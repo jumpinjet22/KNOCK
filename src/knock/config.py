@@ -90,3 +90,30 @@ class MqttConfig(BaseModel):
             password=os.environ.get("KNOCK_MQTT_PASSWORD"),
             keepalive=int(os.environ.get("KNOCK_MQTT_KEEPALIVE", "60")),
         )
+
+
+class VisionConfig(BaseModel):
+    """Connection settings for the Ollama-backed vision provider."""
+
+    host: str = "127.0.0.1"
+    port: int = 11434
+    model: str = "moondream"
+    timeout: float = 30.0
+    prompt: str = (
+        "Describe what is happening at the front door in one short sentence. "
+        "If a package, box, or delivery is visible, mention it explicitly."
+    )
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    @classmethod
+    def from_env(cls) -> "VisionConfig":
+        return cls(
+            host=os.environ.get("KNOCK_VISION_HOST", "127.0.0.1"),
+            port=int(os.environ.get("KNOCK_VISION_PORT", "11434")),
+            model=os.environ.get("KNOCK_VISION_MODEL", "moondream"),
+            timeout=float(os.environ.get("KNOCK_VISION_TIMEOUT", "30.0")),
+            prompt=os.environ.get("KNOCK_VISION_PROMPT", cls.model_fields["prompt"].default),
+        )
