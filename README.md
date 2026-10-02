@@ -250,6 +250,15 @@ Near-term priorities:
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
 5. ~~test/tooling hardening~~ — done: FastAPI/CLI test coverage, mypy, an 80% coverage floor, and a CI job that builds the Docker image, all enforced in CI
 
+## Web UI (in progress)
+
+A web UI is being built (React + TypeScript + Vite frontend, FastAPI backend) to configure every setting -- including API keys/tokens -- from the browser, debug/test each provider (especially vision, to directly verify it's working), and supervise the bridge processes. Foundation landed so far, backend-only (no frontend yet):
+
+- `knock.core.config_store.ConfigStore` -- a persisted, UI-editable settings file (`~/.local/share/knock/config.json`, `0600`). Every `*Config` class now has a `from_sources(store)` alongside its existing `from_env()`: precedence is **env var > stored setting > hardcoded default**, so nothing already deployed via `.env`/systemd/compose needs to change. Secrets (`MqttConfig.password`, `FrigateConfig.password`, `HomeAssistantConfig.token`, `UnifiConfig.api_key`) are `pydantic.SecretStr`, masked in any `repr()`/log line.
+- `knock.core.auth` + `POST /api/auth/{setup,login,logout}`, `GET /api/auth/{status,me}` -- password auth (Argon2id hashing, never hand-rolled), server-side sessions (httpOnly cookie, `secrets.token_urlsafe` tokens, server-revocable unlike a stateless JWT), and CSRF protection (`starlette-csrf`, double-submit cookie) on any request that already carries a login session. `POST /respond` and `GET /sessions/{id}` stay exactly as they are -- open, unauthenticated -- since no secrets flow through them; the new auth only gates the new surface (settings, process supervision, debug tools -- as those land).
+
+Still to come: the React frontend itself, settings pages, the vision/LLM/STT/TTS debug/test panels, bridge process supervision (start/stop/restart from the UI), live video preview, and WebAuthn/OAuth sign-in.
+
 ## Brand Assets
 
 The mark and wordmark live under `docs/assets/logo/` as plain SVG (light/dark

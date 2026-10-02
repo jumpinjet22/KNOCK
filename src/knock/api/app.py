@@ -1,17 +1,58 @@
+import os
+import secrets
+import stat
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response
+from starlette_csrf import CSRFMiddleware
 
+from knock.api.auth_routes import router as auth_router
 from knock.core.audit import JSONLAuditLog
+from knock.core.auth import SESSION_COOKIE_NAME
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 
+
+def _get_or_create_csrf_secret() -> str:
+    """A stable secret for signing CSRF tokens, persisted across restarts.
+
+    An env var always wins (lets a multi-process/container deployment pin
+    one value); otherwise a random secret is generated once and reused from
+    disk, rather than a fresh one each process start invalidating every
+    outstanding CSRF cookie on every restart.
+    """
+    env_value = os.environ.get("KNOCK_CSRF_SECRET")
+    if env_value:
+        return env_value
+
+    path = Path.home() / ".local" / "share" / "knock" / "csrf_secret"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = secrets.token_urlsafe(32)
+    path.write_text(value, encoding="utf-8")
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return value
+
+
 app = FastAPI(title="KNOCK API", version="0.1.0")
+app.add_middleware(
+    CSRFMiddleware,
+    secret=_get_or_create_csrf_secret(),
+    # Only enforced once a request already carries a login session cookie --
+    # the pre-existing open API (/respond, /sessions/{id}) and the login/
+    # setup routes themselves (no session cookie yet at that point) are
+    # unaffected.
+    sensitive_cookies={SESSION_COOKIE_NAME},
+)
+app.include_router(auth_router)
 orchestrator = Orchestrator()
 
 
