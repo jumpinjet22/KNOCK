@@ -582,7 +582,9 @@ def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -
     assert events[1] == "listened"
 
 
-def _conversational_bridge(tmp_path, *, transcripts: list[str], tts_text_log: list[str]):
+def _conversational_bridge(
+    tmp_path, *, transcripts: list[str], tts_text_log: list[str], ha_notifier=None
+):
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
@@ -614,6 +616,7 @@ def _conversational_bridge(tmp_path, *, transcripts: list[str], tts_text_log: li
         stt_provider=stt_provider,
         rtsp_audio_capture=lambda url, duration, rate, verify_ssl: b"\x01\x02",
         talkback_stream_factory=stream_factory,
+        ha_notifier=ha_notifier,
     )
 
 
@@ -682,6 +685,64 @@ def test_handle_event_stops_the_conversation_on_escalation(tmp_path) -> None:
     final_state = bridge.session_store.load("unifi-cam1")
     assert final_state is not None
     assert final_state.turn_count == 1
+
+
+def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
+    tmp_path,
+) -> None:
+    ha_notifier = MagicMock()
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["this package needs a signature", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert "signature" in ha_notifier.notify.call_args.args[0].lower()
+
+
+def test_handle_event_does_not_notify_home_assistant_for_a_plain_delivery(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I have a package for you", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_not_called()
+
+
+def test_handle_event_survives_a_failing_ha_notifier(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    ha_notifier.notify.side_effect = RuntimeError("home assistant is down")
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["this package needs a signature", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None  # should not raise
+
+
+def test_handle_event_is_fine_without_an_ha_notifier_configured(tmp_path) -> None:
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["this package needs a signature", ""],
+        tts_text_log=[],
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None  # should not raise
 
 
 # -- _capture_rtsp_audio (real PyAV decode, no network) --------------------------

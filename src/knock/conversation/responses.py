@@ -1,7 +1,7 @@
 RESPONSES = {
     "delivery": "Thanks. You can leave the package by the door.",
     "delivery_signature_required": (
-        "Sorry, no one is available to sign for it right now. Please try again later."
+        "Thanks for letting us know. I'll let the homeowner know they'll need to come sign for it."
     ),
     "emergency": "If this is an emergency, call local emergency services now.",
     "religious_soliciting": "Thanks, but we're not interested in religious materials today.",

@@ -52,7 +52,14 @@ import av
 from uiprotect import EventChange, ProtectApiClient
 from uiprotect.stream import TalkbackStream
 
-from knock.config import KokoroConfig, OllamaConfig, UnifiConfig, VisionConfig, WhisperConfig
+from knock.config import (
+    HomeAssistantConfig,
+    KokoroConfig,
+    OllamaConfig,
+    UnifiConfig,
+    VisionConfig,
+    WhisperConfig,
+)
 from knock.conversation.prompts import GREETING
 from knock.core.audit import AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
@@ -60,6 +67,7 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
+from knock.integrations.homeassistant import HomeAssistantNotifier
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
@@ -183,6 +191,7 @@ class UnifiBridge:
         client: ProtectApiClient | None = None,
         talkback_stream_factory: Any = TalkbackStream,
         rtsp_audio_capture: Callable[[str, float, int, bool], bytes] = _capture_rtsp_audio,
+        ha_notifier: HomeAssistantNotifier | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -191,6 +200,13 @@ class UnifiBridge:
         self.vision_provider = vision_provider
         self.tts_provider = tts_provider
         self.stt_provider = stt_provider
+        # Optional: lets the household get an actual phone notification for
+        # situations that need a human, not just a spoken reply at the door
+        # -- today, only a signature-required delivery (see handle_event).
+        # None by default (not every UniFi deployment also runs Home
+        # Assistant); notify() itself is already a no-op without a
+        # configured notify_service, so this stays harmless either way.
+        self.ha_notifier = ha_notifier
         self.client = client or ProtectApiClient(
             host=self.config.host,
             port=self.config.port,
@@ -298,6 +314,17 @@ class UnifiBridge:
                 suppress_greeting=greeted_aloud,
             )
             self.session_store.save(state)
+
+            if decision.intent == "delivery_signature_required" and self.ha_notifier is not None:
+                try:
+                    await asyncio.to_thread(
+                        self.ha_notifier.notify,
+                        f"A delivery at the door needs a signature (camera: {event.device_id}).",
+                    )
+                except Exception as exc:  # noqa: BLE001 - notification is best-effort
+                    logger.warning(
+                        "Home Assistant notify failed for device %s: %s", event.device_id, exc
+                    )
 
             if self.tts_provider is not None:
                 await self.speak_to_visitor(event.device_id, decision.text)
@@ -424,6 +451,9 @@ def main() -> None:
         vision_provider=OllamaVisionProvider(config=VisionConfig.from_env()),
         stt_provider=WhisperSTTProvider(config=WhisperConfig.from_env()),
         tts_provider=KokoroTTSProvider(config=KokoroConfig.from_env()),
+        # A no-op if KNOCK_HA_NOTIFY_SERVICE isn't set -- no need to check
+        # whether Home Assistant is actually configured before wiring it in.
+        ha_notifier=HomeAssistantNotifier(config=HomeAssistantConfig.from_env()),
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",

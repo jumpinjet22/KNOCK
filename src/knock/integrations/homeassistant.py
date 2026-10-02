@@ -56,6 +56,38 @@ def _default_session_id(entity_id: str) -> str:
     return f"ha-{safe}"[:128]
 
 
+class HomeAssistantNotifier:
+    """Thin REST client for calling one Home Assistant service.
+
+    Factored out of `HomeAssistantBridge` so any other bridge can notify the
+    household too (e.g. UnifiBridge, on a signature-required delivery)
+    without each needing its own HA REST/auth plumbing.
+    """
+
+    def __init__(
+        self, config: HomeAssistantConfig, http_client: httpx.Client | None = None
+    ) -> None:
+        self.config = config
+        self._http_client = http_client or httpx.Client(
+            timeout=10.0,
+            verify=config.verify_ssl,
+            headers={"Authorization": f"Bearer {config.token.get_secret_value()}"},
+        )
+
+    def notify(self, message: str) -> None:
+        """No-op if `notify_service` isn't configured -- callers don't need
+        to check that themselves before calling this.
+        """
+        if not self.config.notify_service:
+            return
+        domain, _, name = self.config.notify_service.partition(".")
+        response = self._http_client.post(
+            f"{self.config.base_url}/api/services/{domain}/{name}",
+            json={"message": message},
+        )
+        response.raise_for_status()
+
+
 def websocket_url(base_url: str) -> str:
     """Convert an HA base URL (http(s)://...) into its websocket equivalent."""
     if base_url.startswith("https://"):
@@ -91,6 +123,7 @@ class HomeAssistantBridge:
             verify=self.config.verify_ssl,
             headers={"Authorization": f"Bearer {self.config.token.get_secret_value()}"},
         )
+        self._notifier = HomeAssistantNotifier(self.config, http_client=self._http_client)
         self._request_ids = itertools.count(1)
 
     # -- pure logic: directly testable without a real websocket -----------------
@@ -127,21 +160,12 @@ class HomeAssistantBridge:
         decision = self.orchestrator.respond(event, state=state, audit_log=self.audit_log)
         self.session_store.save(state)
 
-        if self.config.notify_service:
-            try:
-                self._call_service(self.config.notify_service, {"message": decision.text})
-            except Exception as exc:  # noqa: BLE001 - the notify call is best-effort
-                logger.warning("Home Assistant notify service call failed: %s", exc)
+        try:
+            self._notifier.notify(decision.text)
+        except Exception as exc:  # noqa: BLE001 - the notify call is best-effort
+            logger.warning("Home Assistant notify service call failed: %s", exc)
 
         return decision
-
-    def _call_service(self, service: str, service_data: dict[str, Any]) -> None:
-        domain, _, name = service.partition(".")
-        response = self._http_client.post(
-            f"{self.config.base_url}/api/services/{domain}/{name}",
-            json=service_data,
-        )
-        response.raise_for_status()
 
     async def handle_message(self, raw_message: str | bytes) -> ResponseDecision | None:
         message = json.loads(raw_message)

@@ -7,7 +7,11 @@ import respx
 
 from knock.config import HomeAssistantConfig
 from knock.core.session_store import JSONFileSessionStore
-from knock.integrations.homeassistant import HomeAssistantBridge, websocket_url
+from knock.integrations.homeassistant import (
+    HomeAssistantBridge,
+    HomeAssistantNotifier,
+    websocket_url,
+)
 
 
 class _FakeWebSocket:
@@ -258,3 +262,47 @@ def test_home_assistant_config_from_env(monkeypatch) -> None:
     assert config.trigger_entity_id == "event.doorbell"
     assert config.notify_service == "notify.mobile_app_test"
     assert config.verify_ssl is False
+
+
+# -- HomeAssistantNotifier (shared by any bridge, not just this one) ------------------
+
+
+def _notifier_config(**overrides) -> HomeAssistantConfig:
+    defaults = {
+        "base_url": "http://ha.local:8123",
+        "token": "secret-token",
+        "notify_service": "notify.mobile_app_test",
+    }
+    return HomeAssistantConfig(**{**defaults, **overrides})
+
+
+@respx.mock
+def test_notifier_calls_the_configured_service_with_a_bearer_token() -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.notify("A delivery needs a signature.")
+
+    assert route.called
+    assert route.calls.last.request.headers["authorization"] == "Bearer secret-token"
+    assert json.loads(route.calls.last.request.content) == {
+        "message": "A delivery needs a signature."
+    }
+
+
+def test_notifier_is_a_no_op_without_a_configured_service() -> None:
+    notifier = HomeAssistantNotifier(_notifier_config(notify_service=None))
+    notifier.notify("should not be sent anywhere")  # should not raise
+
+
+@respx.mock
+def test_notifier_raises_on_an_http_error_let_the_caller_decide_how_to_handle_it() -> None:
+    respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(500)
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        notifier.notify("hello")

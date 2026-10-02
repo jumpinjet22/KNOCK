@@ -23,7 +23,11 @@ def _with_greeting(text: str, *, is_first_turn: bool) -> str:
 # to know KNOCK's internal intent names.
 _INTENT_DESCRIPTIONS = {
     "delivery": "a package delivery",
-    "delivery_signature_required": "a package delivery that requires a signature",
+    "delivery_signature_required": (
+        "a package delivery that requires a signature -- say you'll let the "
+        "homeowner know they need to come sign for it; don't say the "
+        "delivery can't be accepted or turn the driver away"
+    ),
     "religious_soliciting": "someone doing religious canvassing or solicitation",
     "political_soliciting": "someone doing political canvassing or collecting signatures/votes",
     "soliciting": "a door-to-door salesperson or solicitor",
@@ -88,7 +92,11 @@ class Orchestrator:
             # be immediate, not prefaced with a self-introduction.
             last_intent = "emergency"
             response = ResponseDecision(
-                text=response_for("emergency"), safe=True, escalate=True, reason="emergency"
+                text=response_for("emergency"),
+                safe=True,
+                escalate=True,
+                reason="emergency",
+                intent=last_intent,
             )
         elif not decision.allowed:
             last_intent = decision.reason
@@ -97,6 +105,7 @@ class Orchestrator:
                 safe=True,
                 escalate=False,
                 reason=decision.reason,
+                intent=last_intent,
             )
         else:
             intent = classify_intent(event.text)
@@ -104,7 +113,7 @@ class Orchestrator:
             response_text = self.policy.apply_style(self._text_for_intent(intent, event.text))
             response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
             response = ResponseDecision(
-                text=response_text, safe=True, escalate=False, reason="normal"
+                text=response_text, safe=True, escalate=False, reason="normal", intent=last_intent
             )
 
         # Every turn advances session state the same way, regardless of

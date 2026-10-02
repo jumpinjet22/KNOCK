@@ -28,6 +28,15 @@ def test_delivery_intent() -> None:
     assert decision.escalate is False
 
 
+def test_response_decision_carries_the_classified_intent() -> None:
+    # Lets a caller (e.g. UnifiBridge notifying Home Assistant on a
+    # signature-required delivery) react to a specific situation without
+    # re-deriving the intent itself.
+    assert Orchestrator().respond(_event("Hi, I have an Amazon package")).intent == "delivery"
+    assert Orchestrator().respond(_event("Fire emergency, help!")).intent == "emergency"
+    assert Orchestrator().respond(_event("Is anyone home right now?")).intent == "blocked_request"
+
+
 def test_delivery_signature_required_intent() -> None:
     decision = Orchestrator().respond(_event("I have a package that needs a signature"))
     assert "sign" in decision.text.lower()
