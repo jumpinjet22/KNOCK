@@ -26,6 +26,8 @@ class SessionStore(Protocol):
 
     def save(self, state: SessionState) -> None: ...
 
+    def list_ids(self) -> list[str]: ...
+
 
 class JSONFileSessionStore:
     """One JSON file per session, stored on local disk.
@@ -53,3 +55,15 @@ class JSONFileSessionStore:
     def save(self, state: SessionState) -> None:
         path = self._path(state.session_id)
         path.write_text(state.model_dump_json())
+
+    def list_ids(self) -> list[str]:
+        """Session ids, most recently updated first -- for a session browser.
+
+        Sorts by each file's own mtime rather than parsing every session's
+        `updated_at` (same information, far cheaper at any real volume of
+        stored sessions).
+        """
+        paths = sorted(
+            self.directory.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True
+        )
+        return [path.stem for path in paths]

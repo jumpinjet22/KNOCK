@@ -14,6 +14,7 @@ from starlette_csrf import CSRFMiddleware
 
 from knock.api.auth_routes import router as auth_router
 from knock.api.debug_routes import router as debug_router
+from knock.api.history_routes import router as history_router
 from knock.api.settings_routes import router as settings_router
 from knock.api.supervisor_routes import get_bridge_supervisor
 from knock.api.supervisor_routes import router as supervisor_router
@@ -75,6 +76,7 @@ app.include_router(settings_router)
 app.include_router(debug_router)
 app.include_router(supervisor_router)
 app.include_router(video_router)
+app.include_router(history_router)
 orchestrator = Orchestrator()
 
 

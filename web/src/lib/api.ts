@@ -219,6 +219,30 @@ export const videoApi = {
   frigateSnapshotUrl: (cameraName: string) => `/api/video/frigate/${cameraName}/snapshot`,
 }
 
+export interface AuditEntry {
+  timestamp: string
+  text: string
+  matched_flags: Record<string, number>
+  matched_rule_ids: string[]
+  allowed: boolean
+  reason: string
+  intent: string | null
+}
+
+export interface SessionState {
+  session_id: string
+  turn_count: number
+  last_intent: string
+  escalated: boolean
+  updated_at: string
+  history: string[]
+}
+
+export const historyApi = {
+  audit: (limit = 200) => apiFetch<AuditEntry[]>(`/api/audit?limit=${limit}`),
+  sessions: (limit = 200) => apiFetch<SessionState[]>(`/api/sessions?limit=${limit}`),
+}
+
 export const debugApi = {
   describeVision: (imageBase64: string, prompt?: string) =>
     apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {

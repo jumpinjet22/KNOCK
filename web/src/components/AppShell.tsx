@@ -7,6 +7,7 @@ const NAV_LINKS = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/cameras", label: "Cameras", end: false },
   { to: "/processes", label: "Processes", end: false },
+  { to: "/history", label: "History", end: false },
   { to: "/debug", label: "Debug", end: false },
   { to: "/settings", label: "Settings", end: false },
 ]

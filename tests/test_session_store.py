@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -43,3 +44,17 @@ def test_rejects_unsafe_session_ids(tmp_path, bad_id: str) -> None:
     store = JSONFileSessionStore(tmp_path)
     with pytest.raises(ValueError):
         store.load(bad_id)
+
+
+def test_list_ids_is_empty_for_a_fresh_store(tmp_path) -> None:
+    store = JSONFileSessionStore(tmp_path)
+    assert store.list_ids() == []
+
+
+def test_list_ids_returns_most_recently_updated_first(tmp_path) -> None:
+    store = JSONFileSessionStore(tmp_path)
+    store.save(SessionState(session_id="first"))
+    time.sleep(0.01)  # ensure a distinct mtime from "first"
+    store.save(SessionState(session_id="second"))
+
+    assert store.list_ids() == ["second", "first"]

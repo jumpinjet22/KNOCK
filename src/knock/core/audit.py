@@ -61,3 +61,17 @@ class JSONLAuditLog:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(entry.model_dump_json())
             handle.write("\n")
+
+    def recent(self, limit: int = 200) -> list[AuditEntry]:
+        """The most recent `limit` entries, newest first.
+
+        A plain linear scan of the whole file -- fine at local-first
+        volumes; this isn't meant to scale to a high-traffic, multi-tenant
+        deployment.
+        """
+        if not self.path.exists():
+            return []
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        entries = [AuditEntry.model_validate_json(line) for line in lines if line.strip()]
+        entries.reverse()
+        return entries[:limit]
