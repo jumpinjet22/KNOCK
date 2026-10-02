@@ -215,13 +215,26 @@ curl -X GET http://127.0.0.1:8000/sessions/<session-id-from-above>
 Session files live under `~/.local/share/knock/sessions` by default,
 overridable via `KNOCK_SESSION_DIR`.
 
-### 5) Docker local run
+### 5) Docker
+
+Build locally:
 
 ```bash
 docker compose -f docker/compose.local.yml up --build
 ```
 
-CI builds this image on every push/PR (separately from the lint/type/test job) so a broken `Dockerfile` or missing packaged file surfaces immediately.
+Or skip building it yourself entirely -- CI (`.github/workflows/docker-publish.yml`) builds and pushes the image to GitHub Container Registry whenever you push a version tag (`v*.*.*`), or on a manual run (`workflow_dispatch`), tagging it both with that version and `latest`:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+# once that run finishes:
+docker pull ghcr.io/jumpinjet22/knock:latest
+docker run --rm -p 8000:8000 ghcr.io/jumpinjet22/knock:latest
+```
+
+Pull requests still build the image on every PR (to catch a broken `Dockerfile` or a missing packaged file immediately) but never push it -- only a tag push or a manual run does, since those are the only contexts with a usable registry-write token anyway.
+
+Note: GHCR packages publish as **private** by default on their first push, regardless of the repo's own visibility -- after the workflow runs once, you'll need to flip it to public yourself (package settings on GitHub) if you want `docker pull` to work without authenticating.
 
 ## Future Roadmap
 
