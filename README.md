@@ -87,10 +87,7 @@ python scripts/smoke_test_providers.py --skip stt,tts
 
 ## ⚠ Hardware & Integration Status
 
-Still a placeholder:
-- UniFi Protect (direct integration)
-
-**MQTT, Frigate, and Home Assistant are all real.**
+**All four integrations are real: MQTT, Frigate, Home Assistant, and UniFi Protect.** Vision provider too (see [Real Providers](#real-providers-llm--stt--tts--vision) above). What's left: ONVIF/Reolink/Amcrest/ESPHome and the rest of `docs/roadmap.md`'s long-term integration list.
 
 ### MQTT
 
@@ -129,6 +126,16 @@ knock-ha-bridge
 It subscribes to `state_changed` events and reacts whenever `KNOCK_HA_TRIGGER_ENTITY_ID` (default `binary_sensor.front_doorbell`) genuinely changes state -- any transition, not specifically "became on", since a growing number of HA doorbell buttons are modeled as an `event` entity whose state is a changing timestamp rather than an on/off value. `unknown`/`unavailable` placeholder states (not yet initialized, or the device dropped offline) are never treated as a trigger. If `KNOCK_HA_NOTIFY_SERVICE` is set (e.g. `notify.mobile_app_pixel`), the response text is sent through that HA service afterward via `POST /api/services/<domain>/<service>`.
 
 **Safety note:** this bridge only ever calls whatever service *you* configure via `KNOCK_HA_NOTIFY_SERVICE` -- it ships with no default that unlocks, arms, or disarms anything. That's entirely your own Home Assistant configuration choice. Connection settings (`KNOCK_HA_BASE_URL`/`_TOKEN`/`_TRIGGER_ENTITY_ID`/`_NOTIFY_SERVICE`/`_VERIFY_SSL`) follow the same env-var pattern as everything else; keep HA on plain `http://` on your LAN unless you've got a real (non-self-signed) cert, to avoid TLS verification headaches.
+
+### UniFi Protect
+
+`knock.integrations.unifi.UnifiBridge` connects to a local UniFi OS console via [`uiprotect`](https://github.com/uilibs/uiprotect)'s realtime event websocket. Create an API key for a **local console user** -- cloud SSO/MFA accounts aren't supported by the underlying library, so a local-only account is required (which fits KNOCK's local-first stance anyway). Run it standalone:
+
+```bash
+knock-unifi-bridge
+```
+
+It reacts to a doorbell `ring` by default (`KNOCK_UNIFI_TRIGGER_ON`); add smart-detect object types (e.g. `person`, `package`) to also react to those. UniFi itself has no speech-to-text, so the event text is a generic trigger description -- real visitor speech is a future audio-pipeline concern. Pass a `vision_provider` when constructing `UnifiBridge` yourself to have it fetch the triggering camera's snapshot and fold a short description into the response, same best-effort enrichment pattern as the Frigate bridge. Connection settings (`KNOCK_UNIFI_HOST`/`_PORT`/`_API_KEY`/`_VERIFY_SSL`/`_TRIGGER_ON`) follow the same env-var pattern as everything else.
 
 ## Quickstart
 
@@ -204,8 +211,8 @@ See:
 
 Near-term priorities:
 1. ~~richer safety policy and auditing~~ — done: data-driven rule set with confidence scoring + a local audit trail, see [Safety Policy & Audit Trail](#safety-policy--audit-trail) above
-2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro) / Vision (Ollama), see [Real Providers](#real-providers-llm--stt--tts--vision) above. `knock.integrations` adapters (UniFi/Frigate/Home Assistant) are still pending.
-3. ~~hardware input/output bridges~~ — done for MQTT, Frigate, and Home Assistant (`knock-mqtt-bridge`, `knock-frigate-bridge`, `knock-ha-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above); UniFi Protect direct integration is still pending
+2. ~~real provider adapters behind existing interfaces~~ — done for LLM (Ollama) / STT (Whisper) / TTS (Kokoro) / Vision (Ollama), see [Real Providers](#real-providers-llm--stt--tts--vision) above.
+3. ~~hardware input/output bridges~~ — done for MQTT, Frigate, Home Assistant, and UniFi Protect (`knock-mqtt-bridge`, `knock-frigate-bridge`, `knock-ha-bridge`, `knock-unifi-bridge`, see [Hardware & Integration Status](#-hardware--integration-status) above)
 4. ~~session persistence~~ and event replay — state now persists to disk and is threaded through the API/CLI (see Quickstart above); event replay is still pending
 5. ~~test/tooling hardening~~ — done: FastAPI/CLI test coverage, mypy, an 80% coverage floor, and a CI job that builds the Docker image, all enforced in CI
 

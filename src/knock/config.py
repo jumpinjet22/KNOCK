@@ -182,3 +182,31 @@ class HomeAssistantConfig(BaseModel):
             notify_service=os.environ.get("KNOCK_HA_NOTIFY_SERVICE"),
             verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
         )
+
+
+class UnifiConfig(BaseModel):
+    """Connection settings for the UniFi Protect bridge."""
+
+    host: str = "127.0.0.1"
+    port: int = 443
+    api_key: str = ""
+    verify_ssl: bool = False
+    trigger_on: list[str] = Field(default_factory=lambda: ["ring"])
+
+    @classmethod
+    def from_env(cls) -> "UnifiConfig":
+        trigger_on_raw = os.environ.get("KNOCK_UNIFI_TRIGGER_ON")
+        trigger_on = (
+            [item.strip() for item in trigger_on_raw.split(",") if item.strip()]
+            if trigger_on_raw is not None
+            else ["ring"]
+        )
+        verify_ssl_raw = os.environ.get("KNOCK_UNIFI_VERIFY_SSL", "false").strip().lower()
+
+        return cls(
+            host=os.environ.get("KNOCK_UNIFI_HOST", "127.0.0.1"),
+            port=int(os.environ.get("KNOCK_UNIFI_PORT", "443")),
+            api_key=os.environ.get("KNOCK_UNIFI_API_KEY", ""),
+            verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
+            trigger_on=trigger_on,
+        )
