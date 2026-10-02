@@ -98,7 +98,9 @@ def _write_wav(path: Path, audio: SynthesizedAudio) -> None:
         wav_file.writeframes(audio.audio)
 
 
-def _capture_rtsp_audio(rtsp_url: str, duration: float, sample_rate: int) -> bytes:
+def _capture_rtsp_audio(
+    rtsp_url: str, duration: float, sample_rate: int, verify_ssl: bool = True
+) -> bytes:
     """Blocking: decode up to `duration` seconds of mono 16-bit PCM from an
     RTSP(S) stream's audio track.
 
@@ -110,7 +112,18 @@ def _capture_rtsp_audio(rtsp_url: str, duration: float, sample_rate: int) -> byt
     chunks: list[bytes] = []
     start = time.monotonic()
 
-    with av.open(rtsp_url, timeout=(5.0, 5.0), options={"rtsp_transport": "tcp"}) as container:
+    options = {"rtsp_transport": "tcp"}
+    if not verify_ssl:
+        # UniFi's local console uses a self-signed cert for RTSPS by default
+        # -- same reasoning as `ProtectApiClient(verify_ssl=...)` for the
+        # HTTPS API, just threaded through to FFmpeg's TLS layer instead of
+        # aiohttp's. Without this, `av.open()` fails outright with "[Errno
+        # 5] Input/output error"; FFmpeg only logs the real reason ("Peer
+        # certificate failed verification") at VERBOSE level, which that
+        # exception's message never surfaces.
+        options["tls_verify"] = "0"
+
+    with av.open(rtsp_url, timeout=(5.0, 5.0), options=options) as container:
         if not container.streams.audio:
             raise RuntimeError(f"RTSP stream has no audio track: {rtsp_url}")
         audio_stream = container.streams.audio[0]
@@ -156,7 +169,7 @@ class UnifiBridge:
         stt_provider: STTProvider | None = None,
         client: ProtectApiClient | None = None,
         talkback_stream_factory: Any = TalkbackStream,
-        rtsp_audio_capture: Callable[[str, float, int], bytes] = _capture_rtsp_audio,
+        rtsp_audio_capture: Callable[[str, float, int, bool], bytes] = _capture_rtsp_audio,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -288,7 +301,11 @@ class UnifiBridge:
                 return ""
 
             pcm = await asyncio.to_thread(
-                self._rtsp_audio_capture, url, self.config.listen_seconds, _CAPTURE_SAMPLE_RATE
+                self._rtsp_audio_capture,
+                url,
+                self.config.listen_seconds,
+                _CAPTURE_SAMPLE_RATE,
+                self.config.verify_ssl,
             )
             if not pcm:
                 return ""

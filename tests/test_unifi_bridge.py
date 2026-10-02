@@ -554,7 +554,7 @@ def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -
     stt_provider = MagicMock()
     stt_provider.transcribe = AsyncMock(return_value="hello")
 
-    def capture(url: str, duration: float, rate: int) -> bytes:
+    def capture(url: str, duration: float, rate: int, verify_ssl: bool) -> bytes:
         events.append("listened")
         return b"\x01\x02"
 
@@ -606,6 +606,63 @@ def test_capture_rtsp_audio_resamples_to_mono_16bit_16khz(tmp_path) -> None:
     assert 30000 < len(pcm_out) < 36000
 
 
+def test_capture_rtsp_audio_disables_tls_verification_when_requested(monkeypatch) -> None:
+    # UniFi's local console uses a self-signed cert for RTSPS by default;
+    # without this, PyAV/FFmpeg rejects the connection outright with
+    # "[Errno 5] Input/output error" (confirmed against a real console --
+    # FFmpeg's own verbose log says "Peer certificate failed verification",
+    # which that generic exception message never surfaces).
+    import knock.integrations.unifi as unifi_module
+
+    captured_options: dict = {}
+
+    class _FakeContainer:
+        def __enter__(self):
+            raise RuntimeError("stop before decoding -- only options need checking")
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_open(url, timeout=None, options=None):
+        captured_options.update(options or {})
+        return _FakeContainer()
+
+    monkeypatch.setattr(unifi_module.av, "open", fake_open)
+
+    try:
+        unifi_module._capture_rtsp_audio("rtsps://console/high", 1.0, 16000, verify_ssl=False)
+    except RuntimeError:
+        pass
+
+    assert captured_options.get("tls_verify") == "0"
+
+
+def test_capture_rtsp_audio_leaves_tls_verification_on_by_default(monkeypatch) -> None:
+    import knock.integrations.unifi as unifi_module
+
+    captured_options: dict = {}
+
+    class _FakeContainer:
+        def __enter__(self):
+            raise RuntimeError("stop before decoding -- only options need checking")
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_open(url, timeout=None, options=None):
+        captured_options.update(options or {})
+        return _FakeContainer()
+
+    monkeypatch.setattr(unifi_module.av, "open", fake_open)
+
+    try:
+        unifi_module._capture_rtsp_audio("rtsps://console/high", 1.0, 16000, verify_ssl=True)
+    except RuntimeError:
+        pass
+
+    assert "tls_verify" not in captured_options
+
+
 def test_capture_rtsp_audio_raises_for_a_missing_source(tmp_path) -> None:
     import av
 
@@ -654,7 +711,7 @@ def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
     transcript = asyncio.run(bridge.listen_to_visitor("cam1"))
 
     assert transcript == "Hi, I have an Amazon package"
-    capture.assert_called_once_with("rtsps://console/high?enableSrtp", 4.0, 16000)
+    capture.assert_called_once_with("rtsps://console/high?enableSrtp", 4.0, 16000, False)
     stt_provider.transcribe.assert_awaited_once_with(
         b"\x01\x02\x03\x04", rate=16000, width=2, channels=1
     )
