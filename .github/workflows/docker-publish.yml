@@ -39,6 +39,13 @@ jobs:
       # (non-prerelease) semver tag -- an alpha/beta/rc push (e.g.
       # v0.1.0-alpha) gets its own version tag only, so it can never
       # silently become what `docker pull ...:latest` resolves to.
+      #
+      # The semver rules only produce a tag when the ref is an actual git
+      # tag -- a manual workflow_dispatch run on a branch matches neither,
+      # so it'd otherwise produce zero tags and buildx would refuse to push
+      # at all ("tag is needed when pushing to registry"). type=sha is the
+      # fallback for that case; it's harmless additional noise on a real
+      # tag push (that commit already gets its proper version tag(s) too).
       - name: Compute image tags/labels
         id: meta
         uses: docker/metadata-action@v5
@@ -47,6 +54,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build image (push on a version tag or manual run only)
         uses: docker/build-push-action@v6
