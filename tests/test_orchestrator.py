@@ -103,3 +103,44 @@ def test_respond_never_greets_on_emergency() -> None:
     state = _new_state()
     decision = Orchestrator().respond(_event("Fire emergency, help!"), state=state)
     assert "my name is knock" not in decision.text.lower()
+
+
+def test_respond_does_not_repeat_greeting_across_repeated_blocked_turns() -> None:
+    state = _new_state()
+    orchestrator = Orchestrator()
+
+    first = orchestrator.respond(_event("Is anyone home right now?"), state=state)
+    second = orchestrator.respond(_event("Is anyone home right now?"), state=state)
+
+    assert "my name is knock" in first.text.lower()
+    assert "my name is knock" not in second.text.lower()
+    assert state.turn_count == 2
+    assert state.history == ["Is anyone home right now?", "Is anyone home right now?"]
+
+
+def test_respond_advances_turn_count_and_history_on_a_blocked_turn() -> None:
+    state = _new_state()
+    Orchestrator().respond(_event("Is anyone home right now?"), state=state)
+
+    assert state.turn_count == 1
+    assert state.last_intent == "blocked_request"
+    assert state.history == ["Is anyone home right now?"]
+
+
+def test_respond_advances_turn_count_and_history_on_an_emergency_turn() -> None:
+    state = _new_state()
+    Orchestrator().respond(_event("Fire emergency, help!"), state=state)
+
+    assert state.turn_count == 1
+    assert state.last_intent == "emergency"
+    assert state.history == ["Fire emergency, help!"]
+
+
+def test_respond_does_not_regreet_after_an_emergency_turn_is_followed_by_a_normal_one() -> None:
+    state = _new_state()
+    orchestrator = Orchestrator()
+
+    orchestrator.respond(_event("Fire emergency, help!"), state=state)
+    second = orchestrator.respond(_event("Hi, I have an Amazon package"), state=state)
+
+    assert "my name is knock" not in second.text.lower()
