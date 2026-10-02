@@ -1,3 +1,9 @@
+# Pins the compose project name regardless of the containing directory's
+# name (this file lives under docker/, which would otherwise make the
+# default project name "docker" and every resource it owns -- volumes,
+# networks -- get a "docker_" prefix instead of "knock_").
+name: knock
+
 services:
   knock:
     container_name: knock
