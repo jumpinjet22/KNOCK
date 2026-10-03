@@ -383,6 +383,25 @@ Add real voice interaction.
 - Doorbell talkback
 - Multi-voice support
 - Streaming audio
+- Live intercom mode
+
+## Definitions
+
+### Live intercom mode
+
+A human-operated alternative to KNOCK's AI-mediated conversation: let a
+person talk through the doorbell's speaker and hear its microphone live,
+from the web UI, the way UniFi Protect's own app already does -- without
+needing a separate app. This bypasses the orchestrator/LLM entirely; it's
+raw two-way audio passthrough, not a conversation KNOCK is phrasing.
+
+Technically this is a different problem than the request-response
+talkback already built (`speak_to_visitor`/`_capture_rtsp_audio`): those
+are batch capture-then-respond, not a continuous live stream. Live audio
+in a browser means real-time streaming (WebRTC or similar) in both
+directions, which is the audio counterpart to the live video preview
+already flagged as future work -- true WebRTC/HLS restreaming was
+explicitly called out as out of scope for the first version of that.
 
 ## Notes
 
@@ -453,8 +472,20 @@ just another settings field.
 - Accessibility support
 - Bridge plugin architecture
 - Model distillation / LoRA training workflow
+- Installable web app (PWA / "Chrome app")
 
 ## Definitions
+
+### Installable web app
+
+Let the web UI install like a native app (an icon, its own window, no
+browser chrome) instead of only living in a browser tab. A Progressive
+Web App (a manifest + service worker added to the existing Vite/React
+SPA) is the natural fit here, since KNOCK already has the web app --
+Chrome, and other browsers, can install any PWA directly, no separate
+Chrome-specific extension needed. Mainly valuable paired with live
+intercom mode and push notifications, so answering the door from a phone
+feels like using an app, not a website.
 
 ### Visitor profiles
 
