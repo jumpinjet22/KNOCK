@@ -8,8 +8,11 @@ import respx
 from knock.config import HomeAssistantConfig
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.homeassistant import (
+    ACTION_DEVICE_ID_SEP,
+    HomeAssistantActionListener,
     HomeAssistantBridge,
     HomeAssistantNotifier,
+    parse_action_device_id,
     websocket_url,
 )
 
@@ -317,6 +320,141 @@ def test_notifier_includes_action_buttons_when_given() -> None:
 def test_notifier_is_a_no_op_without_a_configured_service() -> None:
     notifier = HomeAssistantNotifier(_notifier_config(notify_service=None))
     notifier.notify("should not be sent anywhere")  # should not raise
+
+
+# -- parse_action_device_id -------------------------------------------------------
+
+
+def test_parse_action_device_id_splits_on_separator() -> None:
+    raw = f"knock_on_my_way{ACTION_DEVICE_ID_SEP}cam1"
+    assert parse_action_device_id(raw) == ("knock_on_my_way", "cam1")
+
+
+def test_parse_action_device_id_returns_none_without_separator() -> None:
+    assert parse_action_device_id("some_unrelated_action") is None
+
+
+def test_parse_action_device_id_returns_none_with_empty_device_id() -> None:
+    assert parse_action_device_id(f"knock_on_my_way{ACTION_DEVICE_ID_SEP}") is None
+
+
+# -- HomeAssistantActionListener ---------------------------------------------------
+
+
+def _listener_config(**overrides) -> HomeAssistantConfig:
+    defaults = {"base_url": "http://ha.local:8123", "token": "secret-token"}
+    return HomeAssistantConfig(**{**defaults, **overrides})
+
+
+def test_listener_subscribes_to_notification_action_events() -> None:
+    listener = HomeAssistantActionListener(config=_listener_config())
+    ws = _FakeWebSocket([json.dumps({"id": 1, "type": "result", "success": True})])
+
+    asyncio.run(listener._subscribe(ws))
+
+    sent = json.loads(ws.sent[0])
+    assert sent["type"] == "subscribe_events"
+    assert sent["event_type"] == "mobile_app_notification_action"
+
+
+def test_listener_subscribe_raises_if_not_successful() -> None:
+    listener = HomeAssistantActionListener(config=_listener_config())
+    ws = _FakeWebSocket([json.dumps({"id": 1, "type": "result", "success": False})])
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(listener._subscribe(ws))
+
+
+def test_listener_authenticate_sends_token() -> None:
+    listener = HomeAssistantActionListener(config=_listener_config(token="secret-token"))
+    ws = _FakeWebSocket([json.dumps({"type": "auth_required"}), json.dumps({"type": "auth_ok"})])
+
+    asyncio.run(listener._authenticate(ws))
+
+    assert json.loads(ws.sent[0]) == {"type": "auth", "access_token": "secret-token"}
+
+
+def test_listener_authenticate_raises_on_invalid_token() -> None:
+    listener = HomeAssistantActionListener(config=_listener_config())
+    ws = _FakeWebSocket(
+        [json.dumps({"type": "auth_required"}), json.dumps({"type": "auth_invalid"})]
+    )
+
+    with pytest.raises(PermissionError):
+        asyncio.run(listener._authenticate(ws))
+
+
+def test_listener_handle_message_calls_on_action_for_a_recognized_action_event() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def on_action(action_id: str, device_id: str) -> None:
+        calls.append((action_id, device_id))
+
+    listener = HomeAssistantActionListener(config=_listener_config(), on_action=on_action)
+    raw = json.dumps(
+        {
+            "type": "event",
+            "event": {
+                "event_type": "mobile_app_notification_action",
+                "data": {"action": f"knock_on_my_way{ACTION_DEVICE_ID_SEP}cam1"},
+            },
+        }
+    )
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == [("knock_on_my_way", "cam1")]
+
+
+def test_listener_handle_message_ignores_other_event_types() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def on_action(action_id: str, device_id: str) -> None:
+        calls.append((action_id, device_id))
+
+    listener = HomeAssistantActionListener(config=_listener_config(), on_action=on_action)
+    raw = json.dumps({"type": "event", "event": {"event_type": "something_else", "data": {}}})
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == []
+
+
+def test_listener_handle_message_ignores_an_unparseable_action() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def on_action(action_id: str, device_id: str) -> None:
+        calls.append((action_id, device_id))
+
+    listener = HomeAssistantActionListener(config=_listener_config(), on_action=on_action)
+    raw = json.dumps(
+        {
+            "type": "event",
+            "event": {
+                "event_type": "mobile_app_notification_action",
+                "data": {"action": "no_separator_here"},
+            },
+        }
+    )
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == []
+
+
+def test_listener_handle_message_is_a_no_op_without_an_on_action_callback() -> None:
+    listener = HomeAssistantActionListener(config=_listener_config())
+    raw = json.dumps(
+        {
+            "type": "event",
+            "event": {
+                "event_type": "mobile_app_notification_action",
+                "data": {"action": f"knock_on_my_way{ACTION_DEVICE_ID_SEP}cam1"},
+            },
+        }
+    )
+
+    asyncio.run(listener.handle_message(raw))  # should not raise
 
 
 @respx.mock

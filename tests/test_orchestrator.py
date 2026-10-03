@@ -270,3 +270,38 @@ def test_respond_does_not_regreet_after_an_emergency_turn_is_followed_by_a_norma
     second = orchestrator.respond(_event("Hi, I have an Amazon package"), state=state)
 
     assert "my name is knock" not in second.text.lower()
+
+
+# -- summarize_for_notification ----------------------------------------------------
+
+
+def test_summarize_for_notification_uses_the_llm_when_configured() -> None:
+    llm = _FakeLLMProvider("A FedEx driver has a package for you")
+    summary = Orchestrator(llm_provider=llm).summarize_for_notification(
+        "FedEx driver with a box", fallback="A delivery needs a signature."
+    )
+
+    assert summary == "A FedEx driver has a package for you"
+    assert len(llm.prompts) == 1
+    assert "FedEx driver with a box" in llm.prompts[0]
+
+
+def test_summarize_for_notification_falls_back_without_a_provider() -> None:
+    summary = Orchestrator().summarize_for_notification(
+        "FedEx driver with a box", fallback="A delivery needs a signature."
+    )
+    assert summary == "A delivery needs a signature."
+
+
+def test_summarize_for_notification_falls_back_on_llm_failure() -> None:
+    summary = Orchestrator(llm_provider=_FailingLLMProvider()).summarize_for_notification(
+        "FedEx driver with a box", fallback="A delivery needs a signature."
+    )
+    assert summary == "A delivery needs a signature."
+
+
+def test_summarize_for_notification_falls_back_on_a_blank_llm_reply() -> None:
+    summary = Orchestrator(llm_provider=_FakeLLMProvider("   ")).summarize_for_notification(
+        "FedEx driver with a box", fallback="A delivery needs a signature."
+    )
+    assert summary == "A delivery needs a signature."

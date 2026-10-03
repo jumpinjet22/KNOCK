@@ -67,7 +67,13 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
-from knock.integrations.homeassistant import HomeAssistantNotifier
+from knock.integrations.homeassistant import (
+    ACTION_DEVICE_ID_SEP,
+    KNOCK_ON_MY_WAY_ACTION,
+    KNOCK_TURN_AWAY_ACTION,
+    HomeAssistantActionListener,
+    HomeAssistantNotifier,
+)
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
@@ -103,6 +109,13 @@ _MAX_CONVERSATION_TURNS = 5
 # actual reply, so the visitor gets some acknowledgement instead of dead
 # air while that runs.
 _THINKING_PHRASE = "Let me think about that for a moment."
+
+# Spoken back to the visitor once someone at the Home Assistant end taps an
+# action button on a signature-required delivery notification (see
+# `handle_notification_action`) -- the visitor is presumably still standing
+# at the door waiting to hear whether to stick around.
+_ON_MY_WAY_PHRASE = "Good news, the homeowner says they're on their way."
+_TURN_AWAY_PHRASE = "I'm sorry, but the homeowner isn't able to accept this right now."
 
 
 def _default_session_id(device_id: str) -> str:
@@ -345,12 +358,24 @@ class UnifiBridge:
                 await self.speak_to_visitor(event.device_id, decision.text)
 
             if decision.intent == "delivery_signature_required":
+                fallback = f"A delivery at the door needs a signature (camera: {event.device_id})."
+                summary = self.orchestrator.summarize_for_notification(
+                    visitor_event.text, fallback=fallback
+                )
+                on_my_way = f"{KNOCK_ON_MY_WAY_ACTION}{ACTION_DEVICE_ID_SEP}{event.device_id}"
+                turn_away = f"{KNOCK_TURN_AWAY_ACTION}{ACTION_DEVICE_ID_SEP}{event.device_id}"
                 await self._notify_household(
                     event.device_id,
-                    f"A delivery at the door needs a signature (camera: {event.device_id}).",
+                    summary,
+                    # The device id rides along in the action identifier
+                    # itself (parsed back out by HomeAssistantActionListener)
+                    # -- the simplest way to know which camera a button tap
+                    # refers to, without depending on whatever extra context
+                    # a given Home Assistant mobile app version does or
+                    # doesn't echo back on the action event.
                     actions=[
-                        {"action": "knock_on_my_way", "title": "I'm on my way"},
-                        {"action": "knock_turn_away", "title": "Turn them away"},
+                        {"action": on_my_way, "title": "I'm on my way"},
+                        {"action": turn_away, "title": "Turn them away"},
                     ],
                 )
 
@@ -368,6 +393,24 @@ class UnifiBridge:
             )
 
         return decision
+
+    async def handle_notification_action(self, action_id: str, device_id: str) -> None:
+        """React to a Home Assistant mobile app notification-action tap --
+        the "I'm on my way" / "Turn them away" buttons on a
+        signature-required delivery notification (see `handle_event`).
+
+        Called by `HomeAssistantActionListener` as its `on_action` callback
+        (see `main()`), which has already parsed the device id back out of
+        the action identifier itself.
+        """
+        if action_id == KNOCK_ON_MY_WAY_ACTION:
+            await self.speak_to_visitor(device_id, _ON_MY_WAY_PHRASE)
+        elif action_id == KNOCK_TURN_AWAY_ACTION:
+            await self.speak_to_visitor(device_id, _TURN_AWAY_PHRASE)
+        else:
+            logger.warning(
+                "Unrecognized notification action %r for device %s", action_id, device_id
+            )
 
     async def listen_to_visitor(self, device_id: str) -> str:
         """Capture a short audio window from `device_id`'s mic and transcribe it.
@@ -467,9 +510,24 @@ class UnifiBridge:
             await self.client.close_session()
 
 
+async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistantConfig) -> None:
+    tasks = [bridge.run()]
+    # The listener opens its own persistent websocket connection -- only
+    # worth running (and worth the connection-refused log spam if Home
+    # Assistant isn't reachable) when a token is actually configured, same
+    # gate `ha_notifier` implicitly gets from `notify()`'s own no-op check.
+    if ha_config.token.get_secret_value():
+        listener = HomeAssistantActionListener(
+            config=ha_config, on_action=bridge.handle_notification_action
+        )
+        tasks.append(listener.run())
+    await asyncio.gather(*tasks)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    ha_config = HomeAssistantConfig.from_env()
     bridge = UnifiBridge(
         config=UnifiConfig.from_env(),
         orchestrator=orchestrator,
@@ -478,7 +536,7 @@ def main() -> None:
         tts_provider=KokoroTTSProvider(config=KokoroConfig.from_env()),
         # A no-op if KNOCK_HA_NOTIFY_SERVICE isn't set -- no need to check
         # whether Home Assistant is actually configured before wiring it in.
-        ha_notifier=HomeAssistantNotifier(config=HomeAssistantConfig.from_env()),
+        ha_notifier=HomeAssistantNotifier(config=ha_config),
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",
@@ -486,7 +544,7 @@ def main() -> None:
         bridge.config.port,
         bridge.config.trigger_on,
     )
-    asyncio.run(bridge.run())
+    asyncio.run(_run_bridge_and_listener(bridge, ha_config))
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ import itertools
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 
 _UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _IGNORED_STATES = {None, "unknown", "unavailable"}
+
+# Notification-action identifiers KNOCK sends (see UnifiBridge's
+# signature-required notification) and the listener below reacts to. The
+# device id rides along embedded in the action string itself (see
+# ACTION_DEVICE_ID_SEP) rather than depending on whichever extra context a
+# given Home Assistant mobile app version does or doesn't echo back on the
+# action event -- the `action` identifier is the one thing guaranteed to
+# round-trip verbatim.
+KNOCK_ON_MY_WAY_ACTION = "knock_on_my_way"
+KNOCK_TURN_AWAY_ACTION = "knock_turn_away"
+ACTION_DEVICE_ID_SEP = "::"
 
 
 def _default_session_id(entity_id: str) -> str:
@@ -220,6 +231,91 @@ class HomeAssistantBridge:
         ack = json.loads(await ws.recv())
         if not ack.get("success", False):
             raise ConnectionError(f"Failed to subscribe to state_changed events: {ack}")
+
+
+def parse_action_device_id(raw_action: str) -> tuple[str, str] | None:
+    """Split `f"{action_id}{ACTION_DEVICE_ID_SEP}{device_id}"` back apart,
+    or `None` if `raw_action` isn't one of KNOCK's own action identifiers.
+    """
+    action_id, sep, device_id = raw_action.partition(ACTION_DEVICE_ID_SEP)
+    if not sep or not device_id:
+        return None
+    return action_id, device_id
+
+
+class HomeAssistantActionListener:
+    """Reacts to a Home Assistant mobile app notification-action tap (e.g.
+    the "I'm on my way" / "Turn them away" buttons on a signature-required
+    delivery notification -- see `UnifiBridge`).
+
+    Runs its own persistent websocket connection, independent of (and
+    typically alongside -- see `unifi.main()`) a `HomeAssistantBridge`'s
+    own connection, since the two subscribe to different event types for
+    different reasons.
+    """
+
+    def __init__(
+        self,
+        config: HomeAssistantConfig | None = None,
+        on_action: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> None:
+        self.config = config or HomeAssistantConfig()
+        self._on_action = on_action
+        self._request_ids = itertools.count(1)
+
+    async def handle_message(self, raw_message: str | bytes) -> None:
+        message = json.loads(raw_message)
+        if message.get("type") != "event":
+            return
+        event = message.get("event") or {}
+        if event.get("event_type") != "mobile_app_notification_action":
+            return
+
+        raw_action = (event.get("data") or {}).get("action")
+        if not raw_action:
+            return
+        parsed = parse_action_device_id(raw_action)
+        if parsed is None:
+            return
+
+        if self._on_action is not None:
+            await self._on_action(*parsed)
+
+    async def run(self) -> None:
+        async with websockets.connect(websocket_url(self.config.base_url)) as ws:
+            await self._authenticate(ws)
+            await self._subscribe(ws)
+            async for raw_message in ws:
+                try:
+                    await self.handle_message(raw_message)
+                except Exception as exc:  # noqa: BLE001 - keep listening either way
+                    logger.warning("Failed to handle a notification action event: %s", exc)
+
+    async def _authenticate(self, ws: _WebSocketLike) -> None:
+        hello = json.loads(await ws.recv())
+        if hello.get("type") != "auth_required":
+            raise ConnectionError(f"Unexpected Home Assistant handshake message: {hello}")
+
+        await ws.send(
+            json.dumps({"type": "auth", "access_token": self.config.token.get_secret_value()})
+        )
+        response = json.loads(await ws.recv())
+        if response.get("type") != "auth_ok":
+            raise PermissionError(f"Home Assistant authentication failed: {response}")
+
+    async def _subscribe(self, ws: _WebSocketLike) -> None:
+        await ws.send(
+            json.dumps(
+                {
+                    "id": next(self._request_ids),
+                    "type": "subscribe_events",
+                    "event_type": "mobile_app_notification_action",
+                }
+            )
+        )
+        ack = json.loads(await ws.recv())
+        if not ack.get("success", False):
+            raise ConnectionError(f"Failed to subscribe to notification action events: {ack}")
 
 
 def main() -> None:

@@ -11,6 +11,7 @@ from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
+from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
 from knock.integrations.unifi import _THINKING_PHRASE, UnifiBridge, _default_session_id
 from knock.providers.tts.base import SynthesizedAudio
 
@@ -285,6 +286,67 @@ def test_speak_to_visitor_streams_synthesized_audio(tmp_path) -> None:
     assert captured["sampwidth"] == 2
     assert captured["frames"] == b"\x01\x02\x03\x04"
     captured["stream"].run_until_complete.assert_awaited_once()
+
+
+# -- handle_notification_action ----------------------------------------------------
+
+
+def test_handle_notification_action_speaks_on_my_way_phrase(tmp_path) -> None:
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=MagicMock(),
+    )
+    spoken: list[tuple[str, str]] = []
+
+    async def fake_speak(device_id: str, text: str) -> None:
+        spoken.append((device_id, text))
+
+    bridge.speak_to_visitor = fake_speak  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_notification_action("knock_on_my_way", "cam1"))
+
+    assert len(spoken) == 1
+    assert spoken[0][0] == "cam1"
+    assert "on their way" in spoken[0][1].lower()
+
+
+def test_handle_notification_action_speaks_turn_away_phrase(tmp_path) -> None:
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=MagicMock(),
+    )
+    spoken: list[tuple[str, str]] = []
+
+    async def fake_speak(device_id: str, text: str) -> None:
+        spoken.append((device_id, text))
+
+    bridge.speak_to_visitor = fake_speak  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_notification_action("knock_turn_away", "cam1"))
+
+    assert len(spoken) == 1
+    assert spoken[0][0] == "cam1"
+    assert "isn't able to accept" in spoken[0][1].lower()
+
+
+def test_handle_notification_action_ignores_an_unrecognized_action(tmp_path) -> None:
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=MagicMock(),
+    )
+    spoken: list[tuple[str, str]] = []
+
+    async def fake_speak(device_id: str, text: str) -> None:
+        spoken.append((device_id, text))
+
+    bridge.speak_to_visitor = fake_speak  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_notification_action("some_other_action", "cam1"))
+
+    assert spoken == []
 
 
 def test_speak_to_visitor_skips_cameras_without_a_speaker(tmp_path) -> None:
@@ -705,6 +767,13 @@ def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
     actions = ha_notifier.notify.call_args.kwargs["actions"]
     titles = {action["title"] for action in actions}
     assert titles == {"I'm on my way", "Turn them away"}
+    # The device id rides along embedded in the action identifier itself --
+    # see HomeAssistantActionListener/parse_action_device_id.
+    action_ids = {action["action"] for action in actions}
+    assert action_ids == {
+        f"knock_on_my_way{ACTION_DEVICE_ID_SEP}cam1",
+        f"knock_turn_away{ACTION_DEVICE_ID_SEP}cam1",
+    }
 
 
 def test_handle_event_notifies_home_assistant_on_an_emergency(tmp_path) -> None:

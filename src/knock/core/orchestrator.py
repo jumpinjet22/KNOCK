@@ -47,6 +47,18 @@ def _response_prompt(intent: str, visitor_text: str) -> str:
     )
 
 
+def _notification_summary_prompt(visitor_text: str) -> str:
+    return (
+        f'Context from a doorbell visit: "{visitor_text}"\n'
+        "Write one short phrase (under 12 words) summarizing who's at the "
+        'door, suitable as a phone push notification -- e.g. "A FedEx '
+        'driver has a package for you" or "A UPS delivery needs a '
+        "signature.\" State only what's actually said/seen; don't invent "
+        "a carrier or detail that isn't there. No greeting, no extra "
+        "commentary, just the summary."
+    )
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -153,3 +165,20 @@ class Orchestrator:
             return response_for(intent)
 
         return generated or response_for(intent)
+
+    def summarize_for_notification(self, visitor_text: str, *, fallback: str) -> str:
+        """A short, human-readable phrase for a push notification -- e.g.
+        "A FedEx driver has a package for you" instead of a generic
+        placeholder. Same best-effort pattern as `_text_for_intent`: no
+        provider, a failure, or a blank reply all fall back to `fallback`.
+        """
+        if self.llm_provider is None:
+            return fallback
+
+        try:
+            summary = self.llm_provider.generate(_notification_summary_prompt(visitor_text)).strip()
+        except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
+            logger.warning("LLM notification summary failed: %s", exc)
+            return fallback
+
+        return summary or fallback
