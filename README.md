@@ -236,6 +236,17 @@ Pull requests still build the image on every PR (to catch a broken `Dockerfile` 
 
 Note: GHCR packages publish as **private** by default on their first push, regardless of the repo's own visibility -- after the workflow runs once, you'll need to flip it to public yourself (package settings on GitHub) if you want `docker pull` to work without authenticating.
 
+### Try the full stack
+
+Want to try KNOCK itself without owning UniFi Protect/Frigate/Home Assistant hardware? `docker/compose.demo.yml` runs a complete, self-contained stack -- KNOCK plus a real Ollama (LLM + vision), Wyoming Whisper (speech-to-text), and Wyoming Kokoro (text-to-speech), all pulled from public images, nothing built from source:
+
+```bash
+docker compose -f docker/compose.demo.yml up -d
+docker compose -f docker/compose.demo.yml logs -f ollama-pull   # first run only -- downloads the LLM/vision models
+```
+
+Open `http://localhost:8080`, finish the first-run admin setup, and head to the Debug page -- the Conversation Simulator exercises the full policy/intent/LLM pipeline by typing what a visitor might say, and the Vision/LLM/STT/TTS panels talk to the real providers above directly. No physical doorbell or camera bridge required. See the comments in the compose file for notes on swapping in a larger Ollama model for better intent-classification results.
+
 ## Future Roadmap
 
 See:

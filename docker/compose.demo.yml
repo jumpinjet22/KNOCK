@@ -19,6 +19,18 @@
 # already present in the ollama-data volume, so re-running `up` later does
 # nothing extra. KNOCK itself starts immediately either way; only the
 # LLM/Vision debug panels need that pull to finish first.
+#
+# A note on model quality, from actually running this: llama3.2 (3B) is
+# small enough to download and run almost anywhere, but it's noticeably
+# more conservative than a larger model on KNOCK's LLM-assisted intent
+# classification -- e.g. "I'm here to fix the water heater, I have an
+# appointment" correctly becomes a canned-but-safe "unknown" response
+# rather than the more specific service_appointment KNOCK is capable of
+# recognizing. That's a model-capability gap, not a bug: the fallback
+# behavior is working exactly as designed either way. For a demo that
+# shows off that feature well, swap `KNOCK_OLLAMA_MODEL` to a larger model
+# (e.g. qwen3.5:9b, which is what this project's own reference deployment
+# actually runs) and pull that instead of llama3.2 below.
 
 name: knock-demo
 
@@ -31,6 +43,7 @@ services:
     environment:
       KNOCK_OLLAMA_HOST: ollama
       KNOCK_OLLAMA_PORT: "11434"
+      KNOCK_OLLAMA_MODEL: llama3.2
       KNOCK_VISION_HOST: ollama
       KNOCK_VISION_PORT: "11434"
       KNOCK_VISION_MODEL: moondream
