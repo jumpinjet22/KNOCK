@@ -31,7 +31,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 import websockets
@@ -73,6 +73,36 @@ def _default_session_id(entity_id: str) -> str:
     return f"ha-{safe}"[:128]
 
 
+# Lets the same three kinds of door event ring differently on a phone,
+# instead of every notification looking and sounding identical regardless
+# of urgency. "channel" is an Android notification channel name -- the
+# companion app creates it the first time it's used, but Android itself
+# (not Home Assistant, not KNOCK) only lets the *user* assign that
+# channel's sound/importance, one time, via Settings > Apps > Home
+# Assistant > Notifications > [channel name]. "push" configures the iOS
+# equivalent: "interruption-level" controls whether it bypasses Focus/
+# silent mode ("critical" -- requires the household to have granted the
+# Home Assistant app's one-time "Critical Notifications" permission, or
+# iOS silently treats it as a normal alert instead) all the way down to
+# "passive" (no sound/vibration, appears in the notification list only).
+NotificationCategory = Literal["emergency", "approval", "fyi"]
+
+_CATEGORY_CHANNELS: dict[NotificationCategory, str] = {
+    "emergency": "knock_emergency",
+    "approval": "knock_approval",
+    "fyi": "knock_fyi",
+}
+
+_CATEGORY_PUSH: dict[NotificationCategory, dict[str, Any]] = {
+    "emergency": {
+        "interruption-level": "critical",
+        "sound": {"name": "default", "critical": 1, "volume": 1.0},
+    },
+    "approval": {"interruption-level": "time-sensitive"},
+    "fyi": {"interruption-level": "passive"},
+}
+
+
 class HomeAssistantNotifier:
     """Thin REST client for calling one Home Assistant service.
 
@@ -91,7 +121,13 @@ class HomeAssistantNotifier:
             headers={"Authorization": f"Bearer {config.token.get_secret_value()}"},
         )
 
-    def notify(self, message: str, *, actions: list[dict[str, str]] | None = None) -> None:
+    def notify(
+        self,
+        message: str,
+        *,
+        actions: list[dict[str, str]] | None = None,
+        category: NotificationCategory = "fyi",
+    ) -> None:
         """No-op if `notify_service` isn't configured -- callers don't need
         to check that themselves before calling this.
 
@@ -101,13 +137,24 @@ class HomeAssistantNotifier:
         *sends* them here; reacting to which one was tapped is a Home
         Assistant automation on the `mobile_app_notification_action` event,
         not something this call waits for or knows about.
+
+        `category` picks the Android channel / iOS interruption-level (see
+        `_CATEGORY_CHANNELS`/`_CATEGORY_PUSH` above) so emergency, approval-
+        needed, and plain-FYI door events can be told apart by sound/
+        priority on a phone, not just by the message text. Defaults to the
+        least intrusive tier ("fyi") if a caller doesn't specify one.
         """
         if not self.config.notify_service:
             return
         domain, _, name = self.config.notify_service.partition(".")
-        payload: dict[str, Any] = {"message": message}
+        data: dict[str, Any] = {
+            "channel": _CATEGORY_CHANNELS[category],
+            "tag": f"knock-{category}",
+            "push": _CATEGORY_PUSH[category],
+        }
         if actions:
-            payload["data"] = {"actions": actions}
+            data["actions"] = actions
+        payload: dict[str, Any] = {"message": message, "data": data}
         response = self._http_client.post(
             f"{self.config.base_url}/api/services/{domain}/{name}",
             json=payload,
@@ -188,7 +235,9 @@ class HomeAssistantBridge:
         self.session_store.save(state)
 
         try:
-            self._notifier.notify(decision.text)
+            self._notifier.notify(
+                decision.text, category="emergency" if decision.escalate else "fyi"
+            )
         except Exception as exc:  # noqa: BLE001 - the notify call is best-effort
             logger.warning("Home Assistant notify service call failed: %s", exc)
 

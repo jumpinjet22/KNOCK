@@ -953,6 +953,7 @@ def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
         f"knock_on_my_way{ACTION_DEVICE_ID_SEP}cam1",
         f"knock_turn_away{ACTION_DEVICE_ID_SEP}cam1",
     }
+    assert ha_notifier.notify.call_args.kwargs["category"] == "approval"
 
 
 def test_handle_event_notifies_home_assistant_on_a_food_delivery_with_action_buttons(
@@ -974,6 +975,7 @@ def test_handle_event_notifies_home_assistant_on_a_food_delivery_with_action_but
     actions = ha_notifier.notify.call_args.kwargs["actions"]
     titles = {action["title"] for action in actions}
     assert titles == {"I'm on my way", "Turn them away"}
+    assert ha_notifier.notify.call_args.kwargs["category"] == "approval"
 
 
 def test_handle_event_notifies_home_assistant_on_an_official_visit_without_buttons(
@@ -1002,6 +1004,7 @@ def test_handle_event_notifies_home_assistant_on_an_official_visit_without_butto
     ha_notifier.notify.assert_called_once()
     assert ha_notifier.notify.call_args.args[0] == "A city official is at the door."
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+    assert ha_notifier.notify.call_args.kwargs.get("category") == "fyi"
 
 
 def test_handle_event_notifies_home_assistant_on_a_ride_arrival_without_buttons(
@@ -1021,6 +1024,7 @@ def test_handle_event_notifies_home_assistant_on_a_ride_arrival_without_buttons(
 
     ha_notifier.notify.assert_called_once()
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+    assert ha_notifier.notify.call_args.kwargs.get("category") == "fyi"
 
 
 def test_handle_event_notifies_home_assistant_on_a_service_appointment_with_a_coming_button(
@@ -1056,6 +1060,7 @@ def test_handle_event_notifies_home_assistant_on_a_service_appointment_with_a_co
     assert len(actions) == 1
     assert actions[0]["title"] == "I'm coming to the door"
     assert actions[0]["action"] == f"knock_coming_to_door{ACTION_DEVICE_ID_SEP}cam1"
+    assert ha_notifier.notify.call_args.kwargs["category"] == "approval"
 
 
 def test_handle_event_does_not_notify_home_assistant_for_a_visitation(tmp_path) -> None:
@@ -1106,6 +1111,7 @@ def test_handle_event_notifies_home_assistant_on_suspicious_activity_without_but
     ha_notifier.notify.assert_called_once()
     assert ha_notifier.notify.call_args.args[0] == "Someone is lingering at the door."
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+    assert ha_notifier.notify.call_args.kwargs.get("category") == "fyi"
 
 
 def test_handle_event_notifies_home_assistant_on_an_emergency(tmp_path) -> None:
@@ -1126,6 +1132,7 @@ def test_handle_event_notifies_home_assistant_on_an_emergency(tmp_path) -> None:
     assert "emergency" in message.lower()
     # An emergency alert isn't something to "approve" -- no action buttons.
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+    assert ha_notifier.notify.call_args.kwargs.get("category") == "emergency"
 
 
 def test_handle_event_does_not_notify_home_assistant_for_a_plain_delivery(tmp_path) -> None:

@@ -78,6 +78,7 @@ from knock.integrations.homeassistant import (
     KNOCK_TURN_AWAY_ACTION,
     HomeAssistantActionListener,
     HomeAssistantNotifier,
+    NotificationCategory,
 )
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
@@ -354,7 +355,12 @@ class UnifiBridge:
         return [{"action": coming, "title": "I'm coming to the door"}]
 
     async def _notify_household(
-        self, device_id: str, message: str, *, actions: list[dict[str, str]] | None = None
+        self,
+        device_id: str,
+        message: str,
+        *,
+        actions: list[dict[str, str]] | None = None,
+        category: NotificationCategory = "fyi",
     ) -> None:
         """Best-effort, off the event loop (the HTTP call itself is
         synchronous) -- a down or unconfigured Home Assistant never affects
@@ -363,7 +369,9 @@ class UnifiBridge:
         if self.ha_notifier is None:
             return
         try:
-            await asyncio.to_thread(self.ha_notifier.notify, message, actions=actions)
+            await asyncio.to_thread(
+                self.ha_notifier.notify, message, actions=actions, category=category
+            )
         except Exception as exc:  # noqa: BLE001 - notification is best-effort
             logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
 
@@ -442,6 +450,7 @@ class UnifiBridge:
                 await self._notify_household(
                     event.device_id,
                     f'Possible emergency at the door: "{visitor_event.text}"',
+                    category="emergency",
                 )
 
             if self.tts_provider is not None:
@@ -462,7 +471,10 @@ class UnifiBridge:
                     visitor_event.text, fallback=fallback
                 )
                 await self._notify_household(
-                    event.device_id, summary, actions=self._approval_actions(event.device_id)
+                    event.device_id,
+                    summary,
+                    actions=self._approval_actions(event.device_id),
+                    category="approval",
                 )
 
             if decision.intent in ("official_visit", "suspicious_activity", "ride_arrived"):
@@ -499,6 +511,7 @@ class UnifiBridge:
                     event.device_id,
                     summary,
                     actions=self._coming_to_door_action(event.device_id),
+                    category="approval",
                 )
 
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1

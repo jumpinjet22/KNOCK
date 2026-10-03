@@ -153,6 +153,8 @@ It subscribes to `state_changed` events and reacts whenever `KNOCK_HA_TRIGGER_EN
 
 **Safety note:** this bridge only ever calls whatever service *you* configure via `KNOCK_HA_NOTIFY_SERVICE` -- it ships with no default that unlocks, arms, or disarms anything. That's entirely your own Home Assistant configuration choice. Connection settings (`KNOCK_HA_BASE_URL`/`_TOKEN`/`_TRIGGER_ENTITY_ID`/`_NOTIFY_SERVICE`/`_VERIFY_SSL`) follow the same env-var pattern as everything else; keep HA on plain `http://` on your LAN unless you've got a real (non-self-signed) cert, to avoid TLS verification headaches.
 
+**Different tones per event:** every notification carries one of three categories -- `emergency` (escalation), `approval` (a delivery/appointment with a decision button), or `fyi` (everything else) -- as an Android `channel` (`knock_emergency`/`knock_approval`/`knock_fyi`) and an iOS `interruption-level` (`critical`/`time-sensitive`/`passive`). iOS's `critical` level needs the Home Assistant app's one-time "Critical Notifications" permission granted on your phone, or it's silently treated as normal. Android can't have its sound set programmatically at all -- the first notification of each category creates that channel, then you assign its sound once yourself under Settings > Apps > Home Assistant > Notifications > (channel name).
+
 ### UniFi Protect
 
 `knock.integrations.unifi.UnifiBridge` connects to a local UniFi OS console via [`uiprotect`](https://github.com/uilibs/uiprotect)'s realtime event websocket. Create an API key for a **local console user** -- cloud SSO/MFA accounts aren't supported by the underlying library, so a local-only account is required (which fits KNOCK's local-first stance anyway). Run it standalone:

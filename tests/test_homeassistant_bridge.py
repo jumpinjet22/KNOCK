@@ -145,7 +145,36 @@ def test_handle_state_changed_calls_notify_service_with_bearer_token(tmp_path) -
     assert decision is not None
     assert route.called
     assert route.calls.last.request.headers["authorization"] == "Bearer secret-token"
-    assert json.loads(route.calls.last.request.content) == {"message": decision.text}
+    body = json.loads(route.calls.last.request.content)
+    assert body["message"] == decision.text
+    # A non-escalating state change is the "fyi" tier -- see
+    # test_handle_state_changed_uses_the_emergency_category_on_escalation
+    # for the escalate=True case.
+    assert body["data"]["channel"] == "knock_fyi"
+
+
+@respx.mock
+def test_handle_state_changed_uses_the_emergency_category_on_escalation(tmp_path) -> None:
+    # build_event() always sets the visitor text to "<entity_id> triggered"
+    # -- an entity id containing "help" is enough to trip the deterministic
+    # emergency rule, same as real visitor speech would.
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    bridge = _bridge(
+        tmp_path,
+        trigger_entity_id="binary_sensor.help_button",
+        notify_service="notify.mobile_app_test",
+    )
+    data = _state_changed("binary_sensor.help_button", "off", "on")
+
+    decision = bridge.handle_state_changed(data)
+
+    assert decision is not None
+    assert decision.escalate is True
+    body = json.loads(route.calls.last.request.content)
+    assert body["data"]["channel"] == "knock_emergency"
+    assert body["data"]["push"]["interruption-level"] == "critical"
 
 
 @respx.mock
@@ -293,9 +322,36 @@ def test_notifier_calls_the_configured_service_with_a_bearer_token() -> None:
 
     assert route.called
     assert route.calls.last.request.headers["authorization"] == "Bearer secret-token"
-    assert json.loads(route.calls.last.request.content) == {
-        "message": "A delivery needs a signature."
-    }
+    body = json.loads(route.calls.last.request.content)
+    assert body["message"] == "A delivery needs a signature."
+    # Defaults to the least intrusive tier when a caller doesn't specify one.
+    assert body["data"]["channel"] == "knock_fyi"
+    assert body["data"]["tag"] == "knock-fyi"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "category,expected_channel,expected_interruption_level",
+    [
+        ("emergency", "knock_emergency", "critical"),
+        ("approval", "knock_approval", "time-sensitive"),
+        ("fyi", "knock_fyi", "passive"),
+    ],
+)
+def test_notifier_picks_channel_and_interruption_level_by_category(
+    category, expected_channel, expected_interruption_level
+) -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.notify("A door event happened.", category=category)
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["data"]["channel"] == expected_channel
+    assert body["data"]["tag"] == f"knock-{category}"
+    assert body["data"]["push"]["interruption-level"] == expected_interruption_level
 
 
 @respx.mock
