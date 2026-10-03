@@ -9,6 +9,7 @@ from uiprotect import EventChange
 
 from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
+from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
@@ -24,6 +25,22 @@ def _event(
     return SimpleNamespace(
         type=event_type, device_id=device_id, smart_detect_types=smart_detect_types
     )
+
+
+class _SequencedLLMProvider:
+    """Returns a different canned reply per call, in order -- lets a test
+    drive the orchestrator's classify-then-phrase LLM calls deterministically
+    (e.g. to land on an LLM-only intent like official_visit/suspicious_activity
+    that no keyword could ever reach).
+    """
+
+    name = "sequenced-fake-llm"
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = iter(responses)
+
+    def generate(self, prompt: str) -> str:
+        return next(self._responses)
 
 
 def _bridge(tmp_path, mock_client: MagicMock | None = None, **config_overrides) -> UnifiBridge:
@@ -645,7 +662,12 @@ def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -
 
 
 def _conversational_bridge(
-    tmp_path, *, transcripts: list[str], tts_text_log: list[str], ha_notifier=None
+    tmp_path,
+    *,
+    transcripts: list[str],
+    tts_text_log: list[str],
+    ha_notifier=None,
+    orchestrator=None,
 ):
     mock_client = MagicMock()
     fake_camera = MagicMock()
@@ -672,6 +694,7 @@ def _conversational_bridge(
 
     return UnifiBridge(
         config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        orchestrator=orchestrator,
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -774,6 +797,83 @@ def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
         f"knock_on_my_way{ACTION_DEVICE_ID_SEP}cam1",
         f"knock_turn_away{ACTION_DEVICE_ID_SEP}cam1",
     }
+
+
+def test_handle_event_notifies_home_assistant_on_a_food_delivery_with_action_buttons(
+    tmp_path,
+) -> None:
+    # Food is time-sensitive like a signature-required delivery -- same
+    # approval buttons, not just an FYI.
+    ha_notifier = MagicMock()
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I have a pizza delivery", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    actions = ha_notifier.notify.call_args.kwargs["actions"]
+    titles = {action["title"] for action in actions}
+    assert titles == {"I'm on my way", "Turn them away"}
+
+
+def test_handle_event_notifies_home_assistant_on_an_official_visit_without_buttons(
+    tmp_path,
+) -> None:
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_SequencedLLMProvider(
+            [
+                "official_visit",  # classification
+                "I'll make sure the household is aware you're here.",  # phrasing
+                "A city official is at the door.",  # notification summary
+            ]
+        )
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I'm here from the city inspector's office", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.args[0] == "A city official is at the door."
+    assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+
+
+def test_handle_event_notifies_home_assistant_on_suspicious_activity_without_buttons(
+    tmp_path,
+) -> None:
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_SequencedLLMProvider(
+            [
+                "suspicious_activity",  # classification
+                "I've let the household know you're here.",  # phrasing
+                "Someone is lingering at the door.",  # notification summary
+            ]
+        )
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["Just checking out the property", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.args[0] == "Someone is lingering at the door."
+    assert ha_notifier.notify.call_args.kwargs.get("actions") is None
 
 
 def test_handle_event_notifies_home_assistant_on_an_emergency(tmp_path) -> None:

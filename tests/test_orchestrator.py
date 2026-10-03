@@ -87,6 +87,23 @@ class _FakeLLMProvider:
         return self.response
 
 
+class _SequencedLLMProvider:
+    """Returns a different canned reply per call, in order -- for testing
+    the two-call classify-then-phrase flow where each call needs its own
+    response (unlike `_FakeLLMProvider`'s single fixed reply).
+    """
+
+    name = "sequenced-fake-llm"
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = iter(responses)
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return next(self._responses)
+
+
 class _FailingLLMProvider:
     name = "failing-llm"
 
@@ -95,12 +112,16 @@ class _FailingLLMProvider:
 
 
 def test_unknown_intent_uses_the_llm_fallback_when_configured() -> None:
+    # A fixed-reply fake also stands in for "the classification step found
+    # no matching label" (its reply isn't one of the known intents), so
+    # this still ends up phrasing as "unknown" -- just via two LLM calls
+    # now (classify, then phrase) instead of one.
     llm = _FakeLLMProvider("Sorry, could you repeat that?")
     decision = Orchestrator(llm_provider=llm).respond(_event("Do you like jazz?"))
 
     assert decision.text == "Sorry, could you repeat that?"
-    assert len(llm.prompts) == 1
-    assert "Do you like jazz?" in llm.prompts[0]
+    assert len(llm.prompts) == 2
+    assert all("Do you like jazz?" in prompt for prompt in llm.prompts)
 
 
 def test_llm_is_consulted_for_a_known_intent_too_not_just_unknown() -> None:
@@ -322,3 +343,73 @@ def test_summarize_for_notification_falls_back_on_a_blank_llm_reply() -> None:
         "FedEx driver with a box", fallback="A delivery needs a signature."
     )
     assert summary == "A delivery needs a signature."
+
+
+# -- LLM-refined "unknown" intents (service_appointment, person_lookup, etc) ------
+
+
+def test_unknown_message_gets_refined_by_the_llm_into_a_specific_intent() -> None:
+    llm = _SequencedLLMProvider(
+        ["service_appointment", "Thanks, I'll let them know you're here for your appointment."]
+    )
+    decision = Orchestrator(llm_provider=llm).respond(
+        _event("I'm here to fix the water heater, I have an appointment")
+    )
+
+    assert decision.intent == "service_appointment"
+    assert len(llm.prompts) == 2
+    assert "Pick the single" not in llm.prompts[0]  # sanity: not asserting exact wording
+    assert decision.text == "Thanks, I'll let them know you're here for your appointment."
+
+
+def test_llm_refinement_is_never_consulted_when_keywords_already_matched() -> None:
+    # Only the phrasing call happens (one prompt) -- the classification
+    # call is skipped entirely since classify_intent() already found a
+    # match, not just "called but ignored."
+    llm = _SequencedLLMProvider(["Sure, go ahead and leave it by the door."])
+    decision = Orchestrator(llm_provider=llm).respond(_event("Hi, I have an Amazon package"))
+
+    assert decision.intent == "delivery"
+    assert len(llm.prompts) == 1
+    assert "keyword classifier guesses" in llm.prompts[0].lower()
+
+
+def test_llm_refinement_falls_back_to_unknown_on_an_unrecognized_label() -> None:
+    llm = _SequencedLLMProvider(["something-made-up", "Sorry, I can't help with that right now."])
+    decision = Orchestrator(llm_provider=llm).respond(_event("Do you like jazz?"))
+
+    assert decision.intent == "unknown"
+
+
+def test_llm_refinement_falls_back_to_unknown_without_a_provider() -> None:
+    decision = Orchestrator().respond(_event("Do you like jazz?"))
+    assert decision.intent == "unknown"
+
+
+def test_llm_refinement_falls_back_to_unknown_on_failure() -> None:
+    decision = Orchestrator(llm_provider=_FailingLLMProvider()).respond(_event("Do you like jazz?"))
+    assert decision.intent == "unknown"
+    assert "can't help" in decision.text.lower()
+
+
+def test_person_lookup_intent() -> None:
+    llm = _SequencedLLMProvider(["person_lookup", "I'll pass along that you're looking for them."])
+    decision = Orchestrator(llm_provider=llm).respond(_event("Is John here?"))
+    assert decision.intent == "person_lookup"
+    assert decision.text == "I'll pass along that you're looking for them."
+
+
+def test_official_visit_intent() -> None:
+    llm = _SequencedLLMProvider(
+        ["official_visit", "I'll make sure the household is aware you're here."]
+    )
+    decision = Orchestrator(llm_provider=llm).respond(
+        _event("I'm here from the city inspector's office")
+    )
+    assert decision.intent == "official_visit"
+
+
+def test_suspicious_activity_intent() -> None:
+    llm = _SequencedLLMProvider(["suspicious_activity", "I've let the household know you're here."])
+    decision = Orchestrator(llm_provider=llm).respond(_event("Just checking out the property"))
+    assert decision.intent == "suspicious_activity"

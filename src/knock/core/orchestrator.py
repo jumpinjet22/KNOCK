@@ -43,8 +43,61 @@ _INTENT_DESCRIPTIONS = {
     "religious_soliciting": "someone doing religious canvassing or solicitation",
     "political_soliciting": "someone doing political canvassing or collecting signatures/votes",
     "soliciting": "a door-to-door salesperson or solicitor",
+    "service_appointment": (
+        "a contractor or technician arriving for a scheduled service "
+        "appointment -- acknowledge they're expected and that the right "
+        "person will be with them; don't confirm whether anyone is "
+        "currently home"
+    ),
+    "person_lookup": (
+        "someone asking for a specific person by name, not asking in "
+        "general whether anyone is home -- say you'll pass along that "
+        "they're looking for them; never confirm whether that person is "
+        "currently home"
+    ),
+    "official_visit": (
+        "someone claiming to be police, a government official, or a "
+        "utility/service worker on official business -- don't confirm or "
+        "deny anyone is home, don't grant entry or any access, just say "
+        "the household will be made aware"
+    ),
+    "suspicious_activity": (
+        "behavior or language that's concerning but doesn't rise to an "
+        "emergency (e.g. lingering, casing the property, vague threats) "
+        "-- respond briefly and non-confrontationally; never confirm "
+        "whether anyone is home"
+    ),
     "unknown": "something that didn't match any of the system's known categories",
 }
+
+# When `classify_intent()`'s keyword rules find nothing (`"unknown"`), these
+# are the additional situations the LLM itself may recognize before KNOCK
+# gives up and calls it genuinely unknown -- see `_refine_unknown_intent`.
+# Deliberately a closed list parsed exactly, not free-form text: this only
+# ever runs *after* PolicyEngine has already allowed the message through,
+# so a wrong or unparseable guess here just leaves it at "unknown" (today's
+# existing behavior), never anywhere near the emergency/blocked path.
+_LLM_CLASSIFIABLE_INTENTS = [
+    "service_appointment",
+    "person_lookup",
+    "official_visit",
+    "suspicious_activity",
+]
+
+
+def _classification_prompt(visitor_text: str) -> str:
+    labels = ", ".join([*_LLM_CLASSIFIABLE_INTENTS, "unknown"])
+    return (
+        f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        "The system's keyword rules found no match. Decide whether this "
+        f"clearly and specifically fits one of these categories: {labels}.\n"
+        "Only choose a specific category if it obviously and unambiguously "
+        'applies. "unknown" is the correct answer most of the time -- for '
+        "small talk, vague chatter, irrelevant questions, or anything that "
+        'does not clearly match, reply exactly "unknown". When in doubt, '
+        'reply "unknown".\n'
+        "Reply with only one word, lowercase, nothing else."
+    )
 
 
 def _response_prompt(intent: str, visitor_text: str) -> str:
@@ -133,6 +186,8 @@ class Orchestrator:
             )
         else:
             intent = classify_intent(event.text)
+            if intent == "unknown":
+                intent = self._refine_unknown_intent(event.text)
             last_intent = intent
             response_text = self.policy.apply_style(self._text_for_intent(intent, event.text))
             response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
@@ -165,6 +220,27 @@ class Orchestrator:
         )
 
         return response
+
+    def _refine_unknown_intent(self, visitor_text: str) -> str:
+        """One more chance to recognize a known-but-unlisted situation (a
+        contractor, someone asking for a person by name, an official
+        visit, concerning-but-not-emergency behavior) before `classify_intent`
+        truly gives up on a message.
+
+        Same best-effort pattern as `_text_for_intent`: no provider, a
+        failure, or a reply outside `_LLM_CLASSIFIABLE_INTENTS` all fall
+        back to "unknown" -- today's existing behavior, never a regression.
+        """
+        if self.llm_provider is None:
+            return "unknown"
+
+        try:
+            guess = self.llm_provider.generate(_classification_prompt(visitor_text)).strip().lower()
+        except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
+            logger.warning("LLM intent classification failed: %s", exc)
+            return "unknown"
+
+        return guess if guess in _LLM_CLASSIFIABLE_INTENTS else "unknown"
 
     def _text_for_intent(self, intent: str, visitor_text: str) -> str:
         if self.llm_provider is None:

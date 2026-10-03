@@ -270,6 +270,23 @@ class UnifiBridge:
             return SessionState(session_id=session_id, updated_at=timestamp)
         return existing
 
+    def _approval_actions(self, device_id: str) -> list[dict[str, str]]:
+        """The "I'm on my way" / "Turn them away" button pair for a
+        notification that needs a household decision, not just an FYI.
+
+        The device id rides along embedded in the action identifier itself
+        (parsed back out by `HomeAssistantActionListener`) -- the simplest
+        way to know which camera a button tap refers to, without depending
+        on whatever extra context a given Home Assistant mobile app version
+        does or doesn't echo back on the action event.
+        """
+        on_my_way = f"{KNOCK_ON_MY_WAY_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
+        turn_away = f"{KNOCK_TURN_AWAY_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
+        return [
+            {"action": on_my_way, "title": "I'm on my way"},
+            {"action": turn_away, "title": "Turn them away"},
+        ]
+
     async def _notify_household(
         self, device_id: str, message: str, *, actions: list[dict[str, str]] | None = None
     ) -> None:
@@ -357,34 +374,33 @@ class UnifiBridge:
             if self.tts_provider is not None:
                 await self.speak_to_visitor(event.device_id, decision.text)
 
-            if decision.intent == "delivery_signature_required":
-                fallback = f"A delivery at the door needs a signature (camera: {event.device_id})."
+            if decision.intent in ("delivery_signature_required", "food_delivery"):
+                # Both are time-sensitive in a way a plain delivery isn't
+                # (can't just be left indefinitely), so the household gets
+                # "I'm on my way" / "Turn them away" buttons, not just an
+                # FYI -- see `_approval_actions` for why the device id rides
+                # along embedded in the action identifier itself.
+                fallback = (
+                    f"A delivery at the door needs a signature (camera: {event.device_id})."
+                    if decision.intent == "delivery_signature_required"
+                    else f"A food delivery is at the door (camera: {event.device_id})."
+                )
                 summary = self.orchestrator.summarize_for_notification(
                     visitor_event.text, fallback=fallback
                 )
-                on_my_way = f"{KNOCK_ON_MY_WAY_ACTION}{ACTION_DEVICE_ID_SEP}{event.device_id}"
-                turn_away = f"{KNOCK_TURN_AWAY_ACTION}{ACTION_DEVICE_ID_SEP}{event.device_id}"
                 await self._notify_household(
-                    event.device_id,
-                    summary,
-                    # The device id rides along in the action identifier
-                    # itself (parsed back out by HomeAssistantActionListener)
-                    # -- the simplest way to know which camera a button tap
-                    # refers to, without depending on whatever extra context
-                    # a given Home Assistant mobile app version does or
-                    # doesn't echo back on the action event.
-                    actions=[
-                        {"action": on_my_way, "title": "I'm on my way"},
-                        {"action": turn_away, "title": "Turn them away"},
-                    ],
+                    event.device_id, summary, actions=self._approval_actions(event.device_id)
                 )
 
-            if decision.intent == "food_delivery":
-                # Just an FYI, not an approval request (no action buttons) --
-                # food sitting at the door is time-sensitive in a way a
-                # package isn't, so the household should know right away,
-                # but there's nothing here for them to "approve."
-                fallback = f"A food delivery is at the door (camera: {event.device_id})."
+            if decision.intent in ("official_visit", "suspicious_activity"):
+                # Same FYI pattern as food_delivery above -- the household
+                # should know either happened, but there's no button-press
+                # decision to make, so no action buttons.
+                fallback = (
+                    "Someone claiming official business is at the door"
+                    if decision.intent == "official_visit"
+                    else "Possibly concerning activity at the door"
+                ) + f" (camera: {event.device_id})."
                 summary = self.orchestrator.summarize_for_notification(
                     visitor_event.text, fallback=fallback
                 )
