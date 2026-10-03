@@ -354,3 +354,33 @@ export const debugApi = {
       body: { text },
     }),
 }
+
+export interface TrainingReview {
+  status: "pending" | "approved" | "rejected"
+  intent_override: string | null
+  response_override: string | null
+}
+
+export interface TrainingQueueItem {
+  key: string
+  entry: AuditEntry
+  review: TrainingReview
+}
+
+export interface TrainingIntentOptions {
+  intents: string[]
+}
+
+export const trainingApi = {
+  intents: () => apiFetch<TrainingIntentOptions>("/api/training/intents"),
+  queue: (limit = 200) => apiFetch<TrainingQueueItem[]>(`/api/training/queue?limit=${limit}`),
+  review: (
+    key: string,
+    body: {
+      status: TrainingReview["status"]
+      intent_override?: string | null
+      response_override?: string | null
+    },
+  ) => apiFetch<TrainingReview>(`/api/training/queue/${key}`, { method: "PUT", body }),
+  exportUrl: "/api/training/export",
+}

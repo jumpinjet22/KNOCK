@@ -630,18 +630,31 @@ foundation work) and needs a deliberate decision on the install/trust
 model before it ships -- a plugin is arbitrary third-party code running
 with access to camera credentials and Home Assistant tokens.
 
-### Model distillation / LoRA training workflow
+### Model distillation / LoRA training workflow 🟡 Export built, training itself is external
 
-KNOCK already records every interaction in its audit log. A future
-workflow would let a person review real interactions, confirm or correct
-the intent and response, and use the approved set to fine-tune a small,
-purpose-built model with LoRA -- instead of relying entirely on prompt
-engineering against a general-purpose model.
+The review-and-export half is done: a **Training** page lets a person
+page through real audit-log interactions, approve or correct the intent/
+response for each, and download an instruction-tuning JSONL file (`GET
+/api/training/export`) built from the exact same prompts `Orchestrator`
+sends the LLM in production (`_classification_prompt`/`_response_prompt`)
+-- so a fine-tuned model trains on literally the same input shape it'll
+see at inference time. Review state lives in a small separate JSON store
+(`TrainingReviewStore`, keyed by a content hash of each audit entry, not
+a new field on `AuditEntry` itself) so it works retroactively on every
+already-recorded entry without a schema migration.
 
-This is lower priority while KNOCK's intents and response style are still
-actively changing: prompt changes ship in minutes, but each new intent
-under a distilled model would need new training examples and a re-tune.
-Worth revisiting once the intent taxonomy and response style stabilize.
+The actual LoRA training run is deliberately **not** part of KNOCK --
+it happens on a separate local machine with a real GPU (this household
+runs it on an idle RTX 5070 Ti, specifically *not* the machine serving
+production Ollama inference, to avoid contending with real-time doorbell
+responses), using whatever training stack the person prefers (PEFT/
+transformers, Axolotl, Unsloth, etc.) pointed at the exported file. KNOCK
+only produces the training data; it doesn't run or manage the fine-tune.
+
+Still open: actually loading a fine-tuned/distilled model back into the
+`OllamaConfig.model` setting and comparing its real-world performance
+against the current prompt-engineered general-purpose model -- the loop
+isn't closed until someone's actually run it and compared.
 
 ---
 

@@ -9,6 +9,7 @@ import { History } from "./pages/History"
 import { Login } from "./pages/Login"
 import { Processes } from "./pages/Processes"
 import { Settings } from "./pages/Settings"
+import { Training } from "./pages/Training"
 
 function SetupRoute() {
   const { state } = useAuth()
@@ -96,6 +97,16 @@ export default function App() {
             <ProtectedRoute>
               <AppShell>
                 <History />
+              </AppShell>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/training"
+          element={
+            <ProtectedRoute>
+              <AppShell>
+                <Training />
               </AppShell>
             </ProtectedRoute>
           }

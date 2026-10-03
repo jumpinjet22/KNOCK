@@ -8,6 +8,7 @@ const NAV_LINKS = [
   { to: "/cameras", label: "Cameras", end: false },
   { to: "/processes", label: "Processes", end: false },
   { to: "/history", label: "History", end: false },
+  { to: "/training", label: "Training", end: false },
   { to: "/debug", label: "Debug", end: false },
   { to: "/settings", label: "Settings", end: false },
 ]

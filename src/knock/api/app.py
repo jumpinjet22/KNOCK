@@ -20,6 +20,7 @@ from knock.api.oauth_routes import router as oauth_router
 from knock.api.settings_routes import router as settings_router
 from knock.api.supervisor_routes import get_bridge_supervisor
 from knock.api.supervisor_routes import router as supervisor_router
+from knock.api.training_routes import router as training_router
 from knock.api.video_routes import router as video_router
 from knock.api.webauthn_routes import router as webauthn_router
 from knock.config import OllamaConfig
@@ -100,6 +101,7 @@ app.include_router(oauth_router)
 app.include_router(video_router)
 app.include_router(history_router)
 app.include_router(webauthn_router)
+app.include_router(training_router)
 # Resolved once at process start (same as the CSRF/OAuth-session secrets
 # above) -- an Ollama setting changed later through the web UI takes effect
 # on the next restart, not live. Construction itself never touches the
