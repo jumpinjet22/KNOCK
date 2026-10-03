@@ -1,10 +1,12 @@
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import respx
 
+import knock.integrations.frigate as frigate_module
 from knock.config import FrigateConfig
+from knock.core.audit import JSONLAuditLog
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.frigate import FrigateBridge, FrigateDetection, _default_session_id
 
@@ -205,3 +207,17 @@ def test_frigate_config_from_env(monkeypatch) -> None:
     assert config.mqtt_host == "frigate.local"
     assert config.trigger_labels == ["person", "package"]
     assert config.zones == ["front_porch"]
+
+
+def test_main_wires_a_real_audit_log_not_the_null_default(tmp_path, monkeypatch) -> None:
+    # See the matching test in test_unifi_bridge.py for the full incident:
+    # main() previously left audit_log on its NullAuditLog class default,
+    # so this bridge (like all four) never actually wrote to audit.jsonl
+    # in production despite real conversations happening.
+    monkeypatch.setenv("KNOCK_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    with patch.object(frigate_module, "FrigateBridge") as bridge_cls:
+        frigate_module.main()
+
+    kwargs = bridge_cls.call_args.kwargs
+    assert isinstance(kwargs["audit_log"], JSONLAuditLog)
+    assert kwargs["audit_log"].path == tmp_path / "audit.jsonl"

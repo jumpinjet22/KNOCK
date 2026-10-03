@@ -37,7 +37,7 @@ import httpx
 import websockets
 
 from knock.config import HomeAssistantConfig, OllamaConfig
-from knock.core.audit import AuditLog, NullAuditLog
+from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
@@ -327,7 +327,15 @@ class HomeAssistantActionListener:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
-    bridge = HomeAssistantBridge(config=HomeAssistantConfig.from_env(), orchestrator=orchestrator)
+    bridge = HomeAssistantBridge(
+        config=HomeAssistantConfig.from_env(),
+        orchestrator=orchestrator,
+        # Without this, the bridge falls back to its class default
+        # (NullAuditLog) and every real conversation silently never reaches
+        # audit.jsonl / the web UI's History page -- the CLI and web API
+        # already construct a real JSONLAuditLog() the same way.
+        audit_log=JSONLAuditLog(),
+    )
     logger.info(
         "Starting KNOCK Home Assistant bridge: %s (entity=%s)",
         bridge.config.base_url,

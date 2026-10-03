@@ -28,7 +28,7 @@ import httpx
 import paho.mqtt.client as mqtt
 
 from knock.config import FrigateConfig, OllamaConfig, VisionConfig
-from knock.core.audit import AuditLog, NullAuditLog
+from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
@@ -186,6 +186,11 @@ def main() -> None:
         config=FrigateConfig.from_env(),
         orchestrator=orchestrator,
         vision_provider=OllamaVisionProvider(config=VisionConfig.from_env()),
+        # Without this, the bridge falls back to its class default
+        # (NullAuditLog) and every real conversation silently never reaches
+        # audit.jsonl / the web UI's History page -- the CLI and web API
+        # already construct a real JSONLAuditLog() the same way.
+        audit_log=JSONLAuditLog(),
     )
     logger.info(
         "Starting KNOCK Frigate bridge: %s:%s (prefix=%s, labels=%s)",

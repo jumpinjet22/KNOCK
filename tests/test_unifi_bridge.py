@@ -2,13 +2,15 @@ import asyncio
 import wave
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from uiprotect import EventChange
 
+import knock.integrations.unifi as unifi_module
 from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
+from knock.core.audit import JSONLAuditLog
 from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
@@ -1605,3 +1607,27 @@ def test_handle_event_skips_the_delay_when_set_to_zero(tmp_path) -> None:
 
     elapsed = asyncio.run(scenario())
     assert elapsed < 1.0
+
+
+def test_main_wires_a_real_audit_log_not_the_null_default(tmp_path, monkeypatch) -> None:
+    # Regression test: UnifiBridge's class default (audit_log=None ->
+    # NullAuditLog) is correct for library/test use, but main() -- the
+    # actual console-script entrypoint every real deployment runs -- must
+    # override it with a real JSONLAuditLog(), the same way the CLI and
+    # web API already do. Without this, every real conversation silently
+    # never reaches audit.jsonl or the web UI's History page, which is
+    # exactly what happened in production: confirmed live, no audit.jsonl
+    # file existed at all despite real conversations having occurred.
+    monkeypatch.setenv("KNOCK_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    with (
+        patch.object(unifi_module, "UnifiBridge") as bridge_cls,
+        # main() passes a real coroutine (_run_bridge_and_listener(...)) to
+        # asyncio.run -- close it rather than leaving it unawaited, or
+        # pytest flags a RuntimeWarning at garbage collection.
+        patch.object(unifi_module.asyncio, "run", side_effect=lambda coro: coro.close()),
+    ):
+        unifi_module.main()
+
+    kwargs = bridge_cls.call_args.kwargs
+    assert isinstance(kwargs["audit_log"], JSONLAuditLog)
+    assert kwargs["audit_log"].path == tmp_path / "audit.jsonl"

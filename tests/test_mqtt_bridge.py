@@ -1,10 +1,12 @@
 import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import knock.integrations.mqtt as mqtt_module
 from knock.config import MqttConfig
+from knock.core.audit import JSONLAuditLog
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.mqtt import MqttBridge, _default_session_id
 
@@ -130,3 +132,17 @@ def test_mqtt_config_from_env(monkeypatch) -> None:
     assert config.host == "broker.local"
     assert config.port == 8883
     assert config.topic_in == "home/doorbell/events"
+
+
+def test_main_wires_a_real_audit_log_not_the_null_default(tmp_path, monkeypatch) -> None:
+    # See the matching test in test_unifi_bridge.py for the full incident:
+    # main() previously left audit_log on its NullAuditLog class default,
+    # so this bridge (like all four) never actually wrote to audit.jsonl
+    # in production despite real conversations happening.
+    monkeypatch.setenv("KNOCK_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    with patch.object(mqtt_module, "MqttBridge") as bridge_cls:
+        mqtt_module.main()
+
+    kwargs = bridge_cls.call_args.kwargs
+    assert isinstance(kwargs["audit_log"], JSONLAuditLog)
+    assert kwargs["audit_log"].path == tmp_path / "audit.jsonl"

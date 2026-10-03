@@ -65,7 +65,7 @@ from knock.config import (
     WhisperConfig,
 )
 from knock.conversation.prompts import GREETING
-from knock.core.audit import AuditLog, NullAuditLog
+from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
@@ -724,6 +724,11 @@ def main() -> None:
         # A no-op if KNOCK_HA_NOTIFY_SERVICE isn't set -- no need to check
         # whether Home Assistant is actually configured before wiring it in.
         ha_notifier=HomeAssistantNotifier(config=ha_config),
+        # Without this, the bridge falls back to its class default
+        # (NullAuditLog) and every real conversation silently never reaches
+        # audit.jsonl / the web UI's History page -- the CLI and web API
+        # already construct a real JSONLAuditLog() the same way.
+        audit_log=JSONLAuditLog(),
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",

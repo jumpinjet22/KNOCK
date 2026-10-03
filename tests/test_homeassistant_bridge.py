@@ -1,11 +1,14 @@
 import asyncio
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
 
+import knock.integrations.homeassistant as homeassistant_module
 from knock.config import HomeAssistantConfig
+from knock.core.audit import JSONLAuditLog
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
@@ -466,3 +469,20 @@ def test_notifier_raises_on_an_http_error_let_the_caller_decide_how_to_handle_it
 
     with pytest.raises(httpx.HTTPStatusError):
         notifier.notify("hello")
+
+
+def test_main_wires_a_real_audit_log_not_the_null_default(tmp_path, monkeypatch) -> None:
+    # See the matching test in test_unifi_bridge.py for the full incident:
+    # main() previously left audit_log on its NullAuditLog class default,
+    # so this bridge (like all four) never actually wrote to audit.jsonl
+    # in production despite real conversations happening.
+    monkeypatch.setenv("KNOCK_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    with (
+        patch.object(homeassistant_module, "HomeAssistantBridge") as bridge_cls,
+        patch.object(homeassistant_module.asyncio, "run"),
+    ):
+        homeassistant_module.main()
+
+    kwargs = bridge_cls.call_args.kwargs
+    assert isinstance(kwargs["audit_log"], JSONLAuditLog)
+    assert kwargs["audit_log"].path == tmp_path / "audit.jsonl"
