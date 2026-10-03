@@ -566,16 +566,21 @@ like plain GitHub OAuth2 would need. It also fits KNOCK's local-first
 stance better than Google does -- sign in through a self-hosted identity
 provider instead of a cloud one.
 
-### Installable web app
+### Installable web app ✅ Done
 
-Let the web UI install like a native app (an icon, its own window, no
-browser chrome) instead of only living in a browser tab. A Progressive
-Web App (a manifest + service worker added to the existing Vite/React
-SPA) is the natural fit here, since KNOCK already has the web app --
-Chrome, and other browsers, can install any PWA directly, no separate
-Chrome-specific extension needed. Mainly valuable paired with live
-intercom mode and push notifications, so answering the door from a phone
-feels like using an app, not a website.
+A hand-written manifest (`web/public/manifest.webmanifest`) and a
+deliberately no-op service worker (`web/public/sw.js` -- satisfies the
+"has a fetch handler" installability requirement, does no caching at all,
+since this is a security-sensitive admin app where serving stale
+authenticated content would be a real risk) let the web UI install like a
+native app in Chrome and other browsers, no separate extension needed.
+Icons generated from the existing brand mark at the required 192/512
+sizes, both standard and maskable variants. Requires a secure context
+(HTTPS or localhost), same constraint WebAuthn already has.
+
+Still valuable to pair with later: live intercom mode and push
+notifications, so answering the door from a phone feels like using an
+app, not a website.
 
 ### Visitor profiles
 
