@@ -359,6 +359,15 @@ mature community-run local protocol (`eufy-security-ws`).
 See Phase 7's notes -- the short wake window also conflicts with KNOCK's
 multi-turn conversation design, independent of which battery brand is used.
 
+### Per-camera trigger selection
+
+Today a smart-detect trigger (e.g. "person") fires from any camera on the
+console that reports it, not just the doorbell. A real setup usually has
+several cameras (driveway, backyard, side yard, etc.) that shouldn't start
+a conversation every time they detect motion. Needs a camera picker in
+Settings so smart alerts can be scoped to specific camera(s) instead of
+the whole console.
+
 ---
 
 # Phase 7 — Audio Pipeline
@@ -403,12 +412,30 @@ Add optional image and video understanding.
 - Vehicle detection
 - Safety analysis
 - Event summaries
+- Known visitor recognition
 
 ## Important
 
 Vision processing is optional.
 
 KNOCK should still function without GPUs or advanced vision models.
+
+## Definitions
+
+### Known visitor recognition
+
+A step beyond generic visitor descriptions: recognize a specific,
+previously-tagged person and either skip the interaction entirely
+(household members, trusted regulars) or greet them by name instead of
+running the normal classify-and-respond pipeline. This needs actual face
+recognition, not just scene description -- a different vision capability
+than today's generic describe-the-image providers.
+
+See Phase 9's "Visitor profiles" for the policy side (who gets ignored,
+who gets greeted, managed from Settings). Worth flagging early: this means
+storing biometric data (faces) locally, which needs the same
+written-with-care posture secrets already get in the config store, not
+just another settings field.
 
 ---
 
@@ -428,6 +455,13 @@ KNOCK should still function without GPUs or advanced vision models.
 - Model distillation / LoRA training workflow
 
 ## Definitions
+
+### Visitor profiles
+
+The policy side of Phase 8's "known visitor recognition": once a person
+can be recognized, something needs to decide what happens next -- ignore
+them entirely, greet them by name, or treat them normally. Managed from
+Settings as a list of tagged people, each with an ignore-or-greet choice.
 
 ### Bridge plugin architecture
 
