@@ -334,7 +334,7 @@ Connect KNOCK to external systems.
 - Frigate
 - UniFi Protect
 - ONVIF cameras
-- ESPHome
+- ESPHome ✅ Done (via MQTT)
 - SIP / VoIP
 
 ## Definitions
@@ -342,6 +342,17 @@ Connect KNOCK to external systems.
 ### MQTT
 
 MQTT is a lightweight messaging system commonly used in smart home environments.
+
+### ESPHome
+
+ESPHome devices speak MQTT natively, so a DIY doorbell needs no
+KNOCK-specific code -- just an `mqtt.publish` action wired to the button
+press, publishing straight to `KNOCK_MQTT_TOPIC_IN` in the same JSON shape
+the MQTT bridge already expects. See the README's MQTT section for a
+working example config. A dedicated bridge using ESPHome's own native API
+(`aioesphomeapi`) instead of an MQTT broker would be lower-latency, but
+isn't built -- flagged here as a possible future refinement, not a gap in
+basic support.
 
 ### Frigate
 
@@ -641,8 +652,8 @@ sign-in) all actually work today, not just on paper.
 What's left is genuinely the "advanced features" tier now, not
 foundation-building:
 
-- Phase 6 gaps: ONVIF, ESPHome (dedicated), SIP/VoIP, per-camera trigger
-  selection
+- Phase 6 gaps: ONVIF, SIP/VoIP (per-camera trigger selection and basic
+  ESPHome support are both done now)
 - Phase 7 gaps: live intercom mode, real multi-voice switching
 - Phase 8 gaps: known visitor recognition, structured vision detection
   (today's vision is one generic description, not separate categories)

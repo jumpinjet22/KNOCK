@@ -109,6 +109,28 @@ It subscribes to `KNOCK_MQTT_TOPIC_IN` (default `knock/events`) for JSON payload
 
 `text` is the only required field; `source`, `timestamp`, and `session_id` all have sensible defaults (repeated messages from the same `source` continue one session automatically). The resulting response is published as JSON to `KNOCK_MQTT_TOPIC_OUT` (default `knock/responses`). Connection settings (`KNOCK_MQTT_HOST`/`_PORT`/`_CLIENT_ID`/`_USERNAME`/`_PASSWORD`/`_KEEPALIVE`) follow the same env-var pattern as the LLM/STT/TTS/Vision providers above.
 
+#### A DIY doorbell with ESPHome
+
+[ESPHome](https://esphome.io) devices already speak MQTT natively, so a DIY doorbell button needs no KNOCK-specific code -- just an `mqtt.publish` action wired to whatever triggers the press, publishing the exact JSON shape above to `KNOCK_MQTT_TOPIC_IN`:
+
+```yaml
+mqtt:
+  broker: 192.168.1.50   # same host as KNOCK_MQTT_HOST
+
+binary_sensor:
+  - platform: gpio
+    pin: GPIO4
+    name: "Doorbell Button"
+    on_press:
+      then:
+        - mqtt.publish:
+            topic: knock/events
+            payload: !lambda |-
+              return "{\"text\": \"Doorbell button pressed\", \"source\": \"front-doorbell\"}";
+```
+
+This is intentionally the extent of ESPHome "integration": a dedicated bridge using ESPHome's own native API (`aioesphomeapi`) instead of going through an MQTT broker would be lower-latency, but isn't built -- MQTT already gets a DIY doorbell talking to KNOCK today.
+
 ### Frigate
 
 `knock.integrations.frigate.FrigateBridge` consumes [Frigate](https://frigate.video)'s own MQTT event stream -- since Frigate already runs its own object detector, KNOCK gets person/vehicle/package labels for free, no separate vision model required for this path (though one can still be plugged in for a richer description, see below). Run it standalone:
