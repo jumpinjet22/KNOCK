@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { ApiError, scriptsApi, type ScriptStatus } from "../lib/api"
 
 const inputClass =
-  "w-full rounded-md border border-steel/30 bg-white px-3 py-2 text-sm text-ink outline-none focus:border-porch focus:ring-1 focus:ring-porch dark:border-steel/40 dark:bg-ink dark:text-mist"
+  "w-full rounded-md border border-steel/30 bg-white px-3 py-2 text-sm text-ink outline-none placeholder:text-steel/50 focus:border-porch focus:ring-1 focus:ring-porch dark:border-steel/40 dark:bg-ink dark:text-mist"
 
 const buttonClass =
   "rounded-md px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
@@ -135,7 +135,7 @@ export function ScriptRunnerPanel() {
               type="text"
               value={scenarioModels}
               onChange={(e) => setScenarioModels(e.target.value)}
-              placeholder="qwen2.5:14b,llama3.1:8b"
+              placeholder="e.g. qwen2.5:14b,llama3.1:8b"
               disabled={isRunning}
               className={inputClass}
             />
@@ -159,7 +159,7 @@ export function ScriptRunnerPanel() {
               type="text"
               value={responseModels}
               onChange={(e) => setResponseModels(e.target.value)}
-              placeholder="qwen2.5:14b,llama3.1:8b"
+              placeholder="e.g. qwen2.5:14b,llama3.1:8b"
               disabled={isRunning}
               className={inputClass}
             />
