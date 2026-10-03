@@ -44,9 +44,25 @@ _INTENT_DESCRIPTIONS = {
         "any reason -- the homeowner comes out to the driver, never the "
         "other way around"
     ),
-    "religious_soliciting": "someone doing religious canvassing or solicitation",
-    "political_soliciting": "someone doing political canvassing or collecting signatures/votes",
-    "soliciting": "a door-to-door salesperson or solicitor",
+    "religious_soliciting": (
+        "someone doing religious canvassing or solicitation -- say "
+        'something like "Thanks, but we are not interested in religious '
+        'materials today." Keep it brief and firm; never imply anyone is '
+        "home, away, inside, or available later, and never invite them to "
+        "come back or speak to someone else"
+    ),
+    "political_soliciting": (
+        "someone doing political canvassing or collecting signatures/votes "
+        '-- say something like "Thanks, but we do not discuss politics or '
+        'take campaign materials at the door." Keep it brief and firm; '
+        "never imply anyone is home, away, inside, or available later"
+    ),
+    "soliciting": (
+        "a door-to-door salesperson or solicitor -- say something like "
+        '"Sorry, we do not accept solicitations here. Please do not leave '
+        'anything." Keep it brief and firm; never imply anyone is home, '
+        "away, inside, or available later"
+    ),
     "service_appointment": (
         "a contractor or technician arriving for a scheduled service "
         "appointment -- acknowledge they're expected and that the right "
@@ -71,7 +87,13 @@ _INTENT_DESCRIPTIONS = {
         "-- respond briefly and non-confrontationally; never confirm "
         "whether anyone is home"
     ),
-    "unknown": "something that didn't match any of the system's known categories",
+    "unknown": (
+        "something that didn't match any of the system's known categories "
+        "-- say something like \"Sorry, I didn't quite catch that, could "
+        'you try again?" Keep it brief and neutral; never imply anyone is '
+        "home, away, inside, or available later, and never mention a "
+        "resident returning or anyone's schedule"
+    ),
 }
 
 # When `classify_intent()`'s keyword rules find nothing (`"unknown"`), these
