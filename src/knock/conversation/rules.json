@@ -13,7 +13,7 @@
       "flag": "schedule",
       "action": "block",
       "weight": 1.0,
-      "phrases": ["schedule", "when do you leave", "what time are you away"]
+      "phrases": ["your schedule", "when do you leave", "what time are you away"]
     },
     {
       "id": "unlock-direct",
