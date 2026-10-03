@@ -501,11 +501,10 @@ def test_handle_event_greets_before_speaking_the_response_on_first_turn(tmp_path
     assert GREETING not in decision.text
 
 
-def test_handle_event_always_regreets_on_a_fresh_ring(tmp_path) -> None:
-    # A ring is as clear a "this is a new visit" signal as exists, so it
-    # always restarts the session and re-greets -- even if the same
-    # camera's session already has turns on it from an earlier, unrelated
-    # visit.
+def test_handle_event_does_not_regreet_on_a_rapid_repeat_ring(tmp_path) -> None:
+    # An impatient or accidental double-press of the doorbell button
+    # shouldn't restart the whole conversation and re-play the entire
+    # greeting -- see UnifiConfig.ring_cooldown_seconds.
     mock_client = MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
@@ -532,8 +531,58 @@ def test_handle_event_always_regreets_on_a_fresh_ring(tmp_path) -> None:
     tts_provider.synthesize.reset_mock()
     asyncio.run(bridge.handle_event(_event(event_type="ring")))
 
-    # Greeting + response, both turns -- the ring reset the session instead
-    # of continuing turn 2 without a greeting.
+    # Just the response, no second greeting -- continuing turn 2 of the
+    # same session instead of restarting on the rapid second ring.
+    assert tts_provider.synthesize.await_count == 1
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 2
+
+
+def test_handle_event_regreets_on_a_ring_after_the_cooldown_expires(tmp_path) -> None:
+    # A ring arriving after the cooldown window (but well short of the full
+    # idle timeout) is still plausibly a different visitor, so it restarts
+    # and re-greets same as before the cooldown feature existed.
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+
+    tts_provider = MagicMock()
+    tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
+
+    def stream_factory(camera, content_url, session):
+        stream = MagicMock()
+        stream.run_until_complete = AsyncMock()
+        return stream
+
+    session_store = JSONFileSessionStore(tmp_path)
+    session_store.save(
+        SessionState(
+            session_id="unifi-cam1",
+            turn_count=1,
+            updated_at=datetime.now(UTC) - timedelta(seconds=20),
+        )
+    )
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(
+            host="127.0.0.1",
+            port=443,
+            api_key="k",
+            ring_chime_delay_seconds=0.0,
+            ring_cooldown_seconds=15.0,
+        ),
+        session_store=session_store,
+        client=mock_client,
+        tts_provider=tts_provider,
+        talkback_stream_factory=stream_factory,
+    )
+
+    asyncio.run(bridge.handle_event(_event(event_type="ring")))
+
+    # Greeting + response -- a fresh session, not a continuation of turn 2.
     assert tts_provider.synthesize.await_count == 2
     final_state = bridge.session_store.load("unifi-cam1")
     assert final_state is not None
@@ -1283,6 +1332,7 @@ def test_unifi_config_rtsp_defaults() -> None:
     assert config.listen_seconds == 10.0
     assert config.ring_chime_delay_seconds == 2.0
     assert config.silence_rms_threshold == 60.0
+    assert config.ring_cooldown_seconds == 15.0
 
 
 def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
@@ -1290,6 +1340,7 @@ def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
     monkeypatch.setenv("KNOCK_UNIFI_LISTEN_SECONDS", "8.5")
     monkeypatch.setenv("KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", "3.5")
     monkeypatch.setenv("KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", "80.0")
+    monkeypatch.setenv("KNOCK_UNIFI_RING_COOLDOWN_SECONDS", "20.0")
 
     config = UnifiConfig.from_env()
 
@@ -1297,6 +1348,7 @@ def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
     assert config.listen_seconds == 8.5
     assert config.ring_chime_delay_seconds == 3.5
     assert config.silence_rms_threshold == 80.0
+    assert config.ring_cooldown_seconds == 20.0
 
 
 # -- ring chime delay ---------------------------------------------------------------

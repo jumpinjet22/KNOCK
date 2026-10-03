@@ -275,15 +275,21 @@ class UnifiBridge:
         this still looks like the same ongoing visit.
 
         See `_SESSION_IDLE_TIMEOUT`'s docstring for why a per-camera session
-        can't just persist forever.
+        can't just persist forever, and `UnifiConfig.ring_cooldown_seconds`'
+        for why a `ring` doesn't unconditionally force a restart -- an
+        impatient double-press of the button would otherwise re-play the
+        entire greeting mid-conversation instead of being debounced.
         """
         existing = self.session_store.load(session_id)
         is_ring = str(event.type) == "ring"
         is_stale = (
             existing is not None and (timestamp - existing.updated_at) > _SESSION_IDLE_TIMEOUT
         )
+        is_within_cooldown = existing is not None and (
+            timestamp - existing.updated_at
+        ) <= timedelta(seconds=self.config.ring_cooldown_seconds)
 
-        if existing is None or is_ring or is_stale:
+        if existing is None or is_stale or (is_ring and not is_within_cooldown):
             return SessionState(session_id=session_id, updated_at=timestamp)
         return existing
 

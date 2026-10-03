@@ -343,6 +343,16 @@ class UnifiConfig(BaseModel):
     # doorbell mic: ambient room noise alone reads around RMS 5-6, well
     # under this default, leaving a wide margin before actual speech.
     silence_rms_threshold: float = 60.0
+    # Debounces a rapid second `ring` within this many seconds of the
+    # session's last turn -- an impatient or accidental double-press
+    # otherwise forces a full session restart (see
+    # UnifiBridge._start_or_resume_session), re-playing the entire greeting
+    # mid-conversation. Deliberately much shorter than
+    # `_SESSION_IDLE_TIMEOUT`: this is about debouncing the same visitor
+    # mashing the button, not about how long a visit can go quiet before
+    # it's considered over -- a `ring` after the cooldown but still within
+    # the idle timeout still restarts, since that's plausibly a new visitor.
+    ring_cooldown_seconds: float = 15.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -368,6 +378,9 @@ class UnifiConfig(BaseModel):
             silence_rms_threshold=float(
                 os.environ.get("KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", "60.0")
             ),
+            ring_cooldown_seconds=float(
+                os.environ.get("KNOCK_UNIFI_RING_COOLDOWN_SECONDS", "15.0")
+            ),
         )
 
     @classmethod
@@ -390,5 +403,8 @@ class UnifiConfig(BaseModel):
             ),
             silence_rms_threshold=_resolve(
                 "KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", s, "silence_rms_threshold", 60.0, float
+            ),
+            ring_cooldown_seconds=_resolve(
+                "KNOCK_UNIFI_RING_COOLDOWN_SECONDS", s, "ring_cooldown_seconds", 15.0, float
             ),
         )

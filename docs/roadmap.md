@@ -221,7 +221,7 @@ Example:
 
 ---
 
-# Phase 4 — Session and State Management
+# Phase 4 — Session and State Management ✅ Done
 
 ## Goal
 
@@ -245,6 +245,18 @@ A session represents one active visitor interaction.
 
 Example:
 A delivery driver speaking three times should still belong to one conversation session.
+
+### Cooldown handling
+
+Distinct from timeout handling (below): timeout is about how long a visit
+can go quiet before it's considered over; cooldown is about debouncing an
+impatient or accidental double-press of the doorbell button within the
+same visit. Without it, a second `ring` moments after the first forced a
+full session restart, re-playing the entire greeting mid-conversation. A
+`ring` within `UnifiConfig.ring_cooldown_seconds` (default 15s) of the
+session's last turn continues the existing session instead; one after the
+cooldown but still short of the full idle timeout still restarts, since
+that's plausibly a different visitor.
 
 ### Context
 
@@ -618,9 +630,8 @@ That could eventually include:
 # Current Priority
 
 Phases 1-5 are done: clean architecture, the local text harness, the
-deterministic safety engine, session/state management (minus cooldown
-handling), and the full provider system -- all with real test coverage,
-not just scaffolding.
+deterministic safety engine, session/state management, and the full
+provider system -- all with real test coverage, not just scaffolding.
 
 Phase 6 (Integration Layer) and Phase 7 (Audio Pipeline) are mostly done
 and proven against real hardware: MQTT, Home Assistant, Frigate, and
