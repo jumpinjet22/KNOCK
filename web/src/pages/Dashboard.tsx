@@ -7,6 +7,7 @@ const STAT_TILES: { key: string; label: string }[] = [
   { key: "political_soliciting", label: "Political canvassers turned away" },
   { key: "delivery", label: "Deliveries" },
   { key: "delivery_signature_required", label: "Signature-required deliveries" },
+  { key: "food_delivery", label: "Food deliveries" },
   { key: "unknown", label: "Unrecognized visitors" },
 ]
 

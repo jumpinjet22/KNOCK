@@ -379,6 +379,17 @@ class UnifiBridge:
                     ],
                 )
 
+            if decision.intent == "food_delivery":
+                # Just an FYI, not an approval request (no action buttons) --
+                # food sitting at the door is time-sensitive in a way a
+                # package isn't, so the household should know right away,
+                # but there's nothing here for them to "approve."
+                fallback = f"A food delivery is at the door (camera: {event.device_id})."
+                summary = self.orchestrator.summarize_for_notification(
+                    visitor_event.text, fallback=fallback
+                )
+                await self._notify_household(event.device_id, summary)
+
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
             if decision.escalate or not can_converse or is_last_possible_turn:
                 break

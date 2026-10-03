@@ -22,11 +22,23 @@ def _with_greeting(text: str, *, is_first_turn: bool) -> str:
 # LLM prompt below so it understands the classifier's guess without needing
 # to know KNOCK's internal intent names.
 _INTENT_DESCRIPTIONS = {
-    "delivery": "a package delivery",
+    "delivery": (
+        "a package delivery -- the policy is to accept it: say it's fine to "
+        "leave the package by the door. Don't refuse it, don't say "
+        "deliveries aren't expected or accepted, and don't redirect them to "
+        "anyone else"
+    ),
     "delivery_signature_required": (
         "a package delivery that requires a signature -- say you'll let the "
         "homeowner know they need to come sign for it; don't say the "
         "delivery can't be accepted or turn the driver away"
+    ),
+    "food_delivery": (
+        "a food delivery (pizza, takeout, DoorDash/Grubhub/Uber Eats, etc) "
+        "-- unlike a package, food can't just sit at the door: say you'll "
+        "let the homeowner know right away so they can come get it. Don't "
+        "say to leave it by the door, and don't say deliveries aren't "
+        "accepted or expected"
     ),
     "religious_soliciting": "someone doing religious canvassing or solicitation",
     "political_soliciting": "someone doing political canvassing or collecting signatures/votes",

@@ -44,6 +44,14 @@ def test_delivery_signature_required_intent() -> None:
     assert decision.escalate is False
 
 
+def test_food_delivery_intent() -> None:
+    decision = Orchestrator().respond(_event("Hi I have a pizza delivery"))
+    assert "right away" in decision.text.lower()
+    assert "leave the package" not in decision.text.lower()
+    assert decision.escalate is False
+    assert decision.intent == "food_delivery"
+
+
 def test_religious_soliciting_intent() -> None:
     decision = Orchestrator().respond(_event("Do you have a minute to talk about the Bible?"))
     assert "not interested" in decision.text.lower()
@@ -106,6 +114,15 @@ def test_llm_is_consulted_for_a_known_intent_too_not_just_unknown() -> None:
     assert len(llm.prompts) == 1
     assert "Hi, I have an Amazon package" in llm.prompts[0]
     assert "delivery" in llm.prompts[0].lower()
+
+
+def test_llm_prompt_for_food_delivery_warns_against_leaving_it_at_the_door() -> None:
+    llm = _FakeLLMProvider("Sure, I'll let them know right away.")
+    Orchestrator(llm_provider=llm).respond(_event("Hi I have a pizza delivery"))
+
+    assert len(llm.prompts) == 1
+    assert "food" in llm.prompts[0].lower()
+    assert "leave it by the door" in llm.prompts[0].lower()
 
 
 def test_known_intent_uses_the_canned_response_without_an_llm_provider() -> None:

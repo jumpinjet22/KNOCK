@@ -13,6 +13,16 @@ def test_a_signature_requirement_overrides_the_generic_delivery_intent() -> None
     assert classify_intent("Can you sign for this delivery?") == "delivery_signature_required"
 
 
+def test_classifies_food_keywords_as_food_delivery_not_generic_delivery() -> None:
+    # Food is time-sensitive (it sits out getting cold) in a way a package
+    # isn't, so it needs its own intent rather than falling through to the
+    # generic "leave it at the door" delivery response.
+    assert classify_intent("Hi I have a pizza delivery") == "food_delivery"
+    assert classify_intent("DoorDash order for you") == "food_delivery"
+    assert classify_intent("Grubhub delivery here") == "food_delivery"
+    assert classify_intent("Uber Eats order") == "food_delivery"
+
+
 def test_classifies_help_keywords_as_emergency() -> None:
     assert classify_intent("help!") == "emergency"
     assert classify_intent("medical emergency") == "emergency"

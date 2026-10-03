@@ -29,6 +29,7 @@ _TRACKED_STATS_INTENTS = [
     "political_soliciting",
     "delivery",
     "delivery_signature_required",
+    "food_delivery",
     "unknown",
 ]
 
