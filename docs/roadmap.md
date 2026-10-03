@@ -340,7 +340,24 @@ Home Assistant is a local smart home automation platform.
 
 ### ONVIF
 
-ONVIF is a common camera communication standard.
+ONVIF is a common camera communication standard. A single ONVIF-generic
+bridge can cover a wide range of budget/no-name doorbells at once, the same
+way Reolink and Amcrest also expose ONVIF alongside their own local APIs.
+
+### Battery-powered doorbells
+
+Battery doorbells (most Ring, Blink, Arlo, and Eufy/Reolink's battery
+lines) sleep almost all the time and only wake briefly on motion or a
+button press, then upload a clip and sleep again. That's a fundamentally
+different shape than the always-on, continuously reachable PoE/wired
+doorbells KNOCK integrates with today, and it correlates with which
+vendors expose a local API at all: wired doorbells tend to have one
+(UniFi, ONVIF, Reolink/Amcrest, Hikvision ISAPI), while battery doorbells
+tend to be cloud-first by design. Eufy is the notable exception, with a
+mature community-run local protocol (`eufy-security-ws`).
+
+See Phase 7's notes -- the short wake window also conflicts with KNOCK's
+multi-turn conversation design, independent of which battery brand is used.
 
 ---
 
@@ -363,6 +380,13 @@ Add real voice interaction.
 This phase happens after the text system is stable.
 
 Voice systems add significant complexity.
+
+A battery-powered doorbell's short wake window may not fit KNOCK's
+multi-turn conversation loop (greet, listen, think, speak, listen again).
+Supporting one well may need a separate, single-exchange interaction mode
+-- capture one message and respond once, rather than a live back-and-forth
+-- instead of forcing the existing conversational loop onto a device that
+can't stay awake for it.
 
 ---
 
@@ -400,6 +424,41 @@ KNOCK should still function without GPUs or advanced vision models.
 - Multi-door support
 - Church/business concierge mode
 - Accessibility support
+- Bridge plugin architecture
+- Model distillation / LoRA training workflow
+
+## Definitions
+
+### Bridge plugin architecture
+
+Today every bridge (MQTT, Frigate, Home Assistant, UniFi Protect) is
+hardcoded into the process supervisor and the settings system. A plugin
+architecture would let a third-party package register its own bridge
+through Python's standard "entry points" mechanism instead, so installing
+a package is enough for it to show up in the Processes and Settings pages
+automatically -- no code changes to KNOCK itself.
+
+This matters most for hardware KNOCK doesn't support out of the box yet:
+ONVIF-generic, Reolink, Amcrest, battery-powered doorbells, and anything
+built on ESPHome.
+
+This is explicitly a later-version item (not part of the current
+foundation work) and needs a deliberate decision on the install/trust
+model before it ships -- a plugin is arbitrary third-party code running
+with access to camera credentials and Home Assistant tokens.
+
+### Model distillation / LoRA training workflow
+
+KNOCK already records every interaction in its audit log. A future
+workflow would let a person review real interactions, confirm or correct
+the intent and response, and use the approved set to fine-tune a small,
+purpose-built model with LoRA -- instead of relying entirely on prompt
+engineering against a general-purpose model.
+
+This is lower priority while KNOCK's intents and response style are still
+actively changing: prompt changes ship in minutes, but each new intent
+under a distilled model would need new training examples and a re-tune.
+Worth revisiting once the intent taxonomy and response style stabilize.
 
 ---
 
