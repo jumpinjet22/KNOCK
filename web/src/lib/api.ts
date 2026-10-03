@@ -389,3 +389,28 @@ export const trainingApi = {
   ) => apiFetch<TrainingReview>(`/api/training/queue/${key}`, { method: "PUT", body }),
   exportUrl: "/api/training/export",
 }
+
+export interface ScriptStatus {
+  script: "generate_scenarios" | "generate_training_data" | null
+  status: "idle" | "running" | "completed" | "failed" | "stopped"
+  exit_code: number | null
+  started_at: number | null
+}
+
+export interface ScriptLogs {
+  lines: string[]
+  next_after: number
+}
+
+export const scriptsApi = {
+  status: () => apiFetch<ScriptStatus>("/api/training/scripts/status"),
+  logs: (after = 0) => apiFetch<ScriptLogs>(`/api/training/scripts/logs?after=${after}`),
+  stop: () => apiFetch<ScriptStatus>("/api/training/scripts/stop", { method: "POST" }),
+  generateScenarios: (body: { models: string[]; count_per_category?: number }) =>
+    apiFetch<ScriptStatus>("/api/training/scripts/generate-scenarios", { method: "POST", body }),
+  generateTrainingData: (body: { models: string[]; scenarios?: string; repeats?: number }) =>
+    apiFetch<ScriptStatus>("/api/training/scripts/generate-training-data", {
+      method: "POST",
+      body,
+    }),
+}

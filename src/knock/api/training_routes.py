@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from knock.api.auth_routes import CurrentUserDep
 from knock.core.audit import AuditEntry, JSONLAuditLog
+from knock.core.script_runner import RunState, ScriptName, ScriptRunner
 from knock.core.training import (
     VALID_TRAINING_INTENTS,
     TrainingReview,
@@ -27,6 +28,8 @@ from knock.core.training import (
 
 router = APIRouter(prefix="/api/training", tags=["training"])
 
+_script_runner = ScriptRunner()
+
 
 def get_audit_log() -> JSONLAuditLog:
     return JSONLAuditLog()
@@ -36,8 +39,13 @@ def get_review_store() -> TrainingReviewStore:
     return TrainingReviewStore()
 
 
+def get_script_runner() -> ScriptRunner:
+    return _script_runner
+
+
 AuditLogDep = Annotated[JSONLAuditLog, Depends(get_audit_log)]
 ReviewStoreDep = Annotated[TrainingReviewStore, Depends(get_review_store)]
+ScriptRunnerDep = Annotated[ScriptRunner, Depends(get_script_runner)]
 
 
 class TrainingQueueItem(BaseModel):
@@ -146,3 +154,138 @@ def export_training_data(
         media_type="application/jsonl",
         headers={"Content-Disposition": 'attachment; filename="knock_training_data.jsonl"'},
     )
+
+
+# -- script runner: kick off the local synthetic-data scripts from the
+# browser instead of a terminal (scripts/generate_scenarios.py,
+# scripts/generate_training_data.py). See knock.core.script_runner for
+# why this isn't built on BridgeSupervisor. --------------------------------
+
+
+class ScriptStatus(BaseModel):
+    script: str | None
+    status: Literal["idle", "running", "completed", "failed", "stopped"]
+    exit_code: int | None
+    started_at: float | None
+
+
+def _status_response(state: RunState) -> ScriptStatus:
+    return ScriptStatus(
+        script=state.script,
+        status=state.status,
+        exit_code=state.exit_code,
+        started_at=state.started_at,
+    )
+
+
+@router.get("/scripts/status", response_model=ScriptStatus)
+def get_script_status(current_user: CurrentUserDep, *, runner: ScriptRunnerDep) -> ScriptStatus:
+    return _status_response(runner.state())
+
+
+class ScriptLogs(BaseModel):
+    lines: list[str]
+    next_after: int
+
+
+@router.get("/scripts/logs", response_model=ScriptLogs)
+def get_script_logs(
+    current_user: CurrentUserDep,
+    *,
+    runner: ScriptRunnerDep,
+    after: int = Query(default=0, ge=0),
+) -> ScriptLogs:
+    lines, next_after = runner.tail(after)
+    return ScriptLogs(lines=lines, next_after=next_after)
+
+
+@router.post("/scripts/stop", response_model=ScriptStatus)
+def stop_script(current_user: CurrentUserDep, *, runner: ScriptRunnerDep) -> ScriptStatus:
+    runner.stop()
+    return _status_response(runner.state())
+
+
+def _start(runner: ScriptRunner, script: ScriptName, args: list[str]) -> None:
+    # ScriptRunner.start() itself raises under its own lock if a run is
+    # already in progress -- that's the real guard against two near-
+    # simultaneous requests both starting a script; this just turns it
+    # into a clean 409 instead of an unhandled 500.
+    try:
+        runner.start(script, args)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class GenerateScenariosRequest(BaseModel):
+    models: list[str]
+    categories: list[str] | None = None
+    count_per_category: int = 15
+    batch_size: int = 5
+    ollama_host: str = "127.0.0.1"
+    ollama_port: int = 11434
+    ollama_timeout: float = 120.0
+    output: str = "scripts/training_scenarios.generated.txt"
+
+
+@router.post("/scripts/generate-scenarios", response_model=ScriptStatus)
+def start_generate_scenarios(
+    body: GenerateScenariosRequest, current_user: CurrentUserDep, *, runner: ScriptRunnerDep
+) -> ScriptStatus:
+    if not body.models:
+        raise HTTPException(status_code=400, detail="models must not be empty")
+    args = [
+        "--models",
+        ",".join(body.models),
+        "--count-per-category",
+        str(body.count_per_category),
+        "--batch-size",
+        str(body.batch_size),
+        "--ollama-host",
+        body.ollama_host,
+        "--ollama-port",
+        str(body.ollama_port),
+        "--ollama-timeout",
+        str(body.ollama_timeout),
+        "--output",
+        body.output,
+    ]
+    if body.categories:
+        args += ["--categories", ",".join(body.categories)]
+    _start(runner, "generate_scenarios", args)
+    return _status_response(runner.state())
+
+
+class GenerateTrainingDataRequest(BaseModel):
+    models: list[str]
+    scenarios: str = "scripts/training_scenarios.txt"
+    ollama_host: str = "127.0.0.1"
+    ollama_port: int = 11434
+    ollama_timeout: float = 120.0
+    repeats: int = 1
+    audit_log: str | None = None
+
+
+@router.post("/scripts/generate-training-data", response_model=ScriptStatus)
+def start_generate_training_data(
+    body: GenerateTrainingDataRequest, current_user: CurrentUserDep, *, runner: ScriptRunnerDep
+) -> ScriptStatus:
+    if not body.models:
+        raise HTTPException(status_code=400, detail="models must not be empty")
+    args = [
+        "--models",
+        ",".join(body.models),
+        "--scenarios",
+        body.scenarios,
+        "--ollama-host",
+        body.ollama_host,
+        "--ollama-port",
+        str(body.ollama_port),
+        "--ollama-timeout",
+        str(body.ollama_timeout),
+        "--repeats",
+        str(body.repeats),
+    ]
+    if body.audit_log:
+        args += ["--audit-log", body.audit_log]
+    _start(runner, "generate_training_data", args)
+    return _status_response(runner.state())

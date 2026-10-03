@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react"
+import { ScriptRunnerPanel } from "../components/ScriptRunnerPanel"
 import { ApiError, trainingApi, type TrainingQueueItem, type TrainingReview } from "../lib/api"
+import { useUIMode } from "../lib/uiMode"
 
 type StatusFilter = "pending" | "approved" | "rejected"
 
@@ -84,6 +86,7 @@ function EntryFields({
 }
 
 export function Training() {
+  const { trainingOnly } = useUIMode()
   const [items, setItems] = useState<TrainingQueueItem[] | null>(null)
   const [intents, setIntents] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -183,6 +186,12 @@ export function Training() {
           Export training file
         </a>
       </div>
+
+      {trainingOnly && (
+        <div className="mt-6">
+          <ScriptRunnerPanel />
+        </div>
+      )}
 
       <div className="mt-4 flex gap-1 border-b border-steel/20">
         {STATUS_TABS.map((tab) => (

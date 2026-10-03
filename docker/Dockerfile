@@ -23,6 +23,14 @@ WORKDIR /app
 
 COPY pyproject.toml README.md /app/
 COPY src /app/src
+# Not installed as part of the package (outside src/) -- these are the
+# manual, hands-on dev tools for generating LoRA training data locally
+# (see scripts/generate_scenarios.py/generate_training_data.py), run
+# directly as `python scripts/...py` with this image's own cwd (/app) as
+# the working directory. Harmless to ship in every image; only ever
+# invoked by the Training page's script-runner panel, itself gated behind
+# KNOCK_TRAINING_MODE=1.
+COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
 

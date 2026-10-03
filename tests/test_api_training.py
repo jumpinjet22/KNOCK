@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -6,9 +7,10 @@ from fastapi.testclient import TestClient
 
 from knock.api.app import app
 from knock.api.auth_routes import get_auth_store, get_web_session_store
-from knock.api.training_routes import get_audit_log, get_review_store
+from knock.api.training_routes import get_audit_log, get_review_store, get_script_runner
 from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.auth import AuthStore, WebSessionStore
+from knock.core.script_runner import ScriptRunner
 from knock.core.training import TrainingReview, TrainingReviewStore, example_key
 
 
@@ -23,13 +25,32 @@ def review_store(tmp_path) -> TrainingReviewStore:
 
 
 @pytest.fixture
-def client(tmp_path, audit_log, review_store):
+def scripts_dir(tmp_path) -> Path:
+    directory = tmp_path / "scripts"
+    directory.mkdir()
+    (directory / "generate_scenarios.py").write_text(
+        "import sys\nprint('scenarios ran with', sys.argv[1:])"
+    )
+    (directory / "generate_training_data.py").write_text(
+        "import sys\nprint('training data ran with', sys.argv[1:])"
+    )
+    return directory
+
+
+@pytest.fixture
+def script_runner(scripts_dir) -> ScriptRunner:
+    return ScriptRunner(scripts_dir=scripts_dir)
+
+
+@pytest.fixture
+def client(tmp_path, audit_log, review_store, script_runner):
     app.dependency_overrides[get_auth_store] = lambda: AuthStore(tmp_path / "auth.json")
     app.dependency_overrides[get_web_session_store] = lambda: WebSessionStore(
         tmp_path / "web_sessions.json"
     )
     app.dependency_overrides[get_audit_log] = lambda: audit_log
     app.dependency_overrides[get_review_store] = lambda: review_store
+    app.dependency_overrides[get_script_runner] = lambda: script_runner
     try:
         yield TestClient(app)
     finally:
@@ -55,6 +76,26 @@ def _put(client: TestClient, path: str, json: dict) -> httpx.Response:
     if token:
         headers["x-csrftoken"] = token
     return client.put(path, json=json, headers=headers)
+
+
+def _post(client: TestClient, path: str, json: dict | None = None) -> httpx.Response:
+    headers = {}
+    token = client.cookies.get("csrftoken")
+    if token:
+        headers["x-csrftoken"] = token
+    return client.post(path, json=json, headers=headers)
+
+
+def _wait_until_idle(client: TestClient, *, timeout: float = 5.0) -> dict:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = client.get("/api/training/scripts/status").json()
+        if body["status"] != "running":
+            return body
+        time.sleep(0.02)
+    raise AssertionError("script never finished")
 
 
 def _entry(
@@ -260,3 +301,91 @@ def test_export_includes_an_approved_entrys_training_records(client, audit_log) 
     lines = [line for line in resp.text.strip().splitlines() if line]
     assert len(lines) == 2
     assert all('"task"' in line for line in lines)
+
+
+# -- scripts ----------------------------------------------------------------
+
+
+def test_script_status_requires_authentication(client) -> None:
+    resp = client.get("/api/training/scripts/status")
+    assert resp.status_code == 401
+
+
+def test_script_status_is_idle_before_anything_runs(client) -> None:
+    _login(client)
+    resp = client.get("/api/training/scripts/status")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "script": None,
+        "status": "idle",
+        "exit_code": None,
+        "started_at": None,
+    }
+
+
+def test_generate_scenarios_requires_authentication(client) -> None:
+    resp = _post(client, "/api/training/scripts/generate-scenarios", {"models": ["m1"]})
+    assert resp.status_code == 401
+
+
+def test_generate_scenarios_rejects_empty_models(client) -> None:
+    _login(client)
+    resp = _post(client, "/api/training/scripts/generate-scenarios", {"models": []})
+    assert resp.status_code == 400
+
+
+def test_generate_scenarios_runs_and_completes(client) -> None:
+    _login(client)
+    resp = _post(
+        client,
+        "/api/training/scripts/generate-scenarios",
+        {"models": ["m1", "m2"], "count_per_category": 3},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["script"] == "generate_scenarios"
+
+    final = _wait_until_idle(client)
+    assert final["status"] == "completed"
+    assert final["exit_code"] == 0
+
+    logs = client.get("/api/training/scripts/logs").json()
+    assert any("--models" in line and "m1,m2" in line for line in logs["lines"])
+
+
+def test_generate_training_data_runs_and_completes(client) -> None:
+    _login(client)
+    resp = _post(
+        client,
+        "/api/training/scripts/generate-training-data",
+        {"models": ["m1"], "scenarios": "scripts/training_scenarios.txt"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["script"] == "generate_training_data"
+
+    final = _wait_until_idle(client)
+    assert final["status"] == "completed"
+
+
+def test_cannot_start_a_second_script_while_one_is_running(client, script_runner) -> None:
+    _login(client)
+    # Use a script that sleeps so the first run is still in-flight.
+    (script_runner._scripts_dir / "generate_scenarios.py").write_text("import time\ntime.sleep(2)")
+    resp1 = _post(client, "/api/training/scripts/generate-scenarios", {"models": ["m1"]})
+    assert resp1.status_code == 200
+
+    resp2 = _post(client, "/api/training/scripts/generate-training-data", {"models": ["m1"]})
+    assert resp2.status_code == 409
+
+    stop_resp = _post(client, "/api/training/scripts/stop")
+    assert stop_resp.status_code == 200
+    _wait_until_idle(client)
+
+
+def test_stop_requires_authentication(client) -> None:
+    resp = client.post("/api/training/scripts/stop")
+    assert resp.status_code == 401
+
+
+def test_script_logs_requires_authentication(client) -> None:
+    resp = client.get("/api/training/scripts/logs")
+    assert resp.status_code == 401
