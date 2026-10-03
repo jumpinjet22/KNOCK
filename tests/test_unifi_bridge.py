@@ -1,3 +1,4 @@
+import array
 import asyncio
 import wave
 from datetime import UTC, datetime, timedelta
@@ -13,7 +14,12 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
-from knock.integrations.unifi import _THINKING_PHRASE, UnifiBridge, _default_session_id, _rms
+from knock.integrations.unifi import (
+    UnifiBridge,
+    _default_session_id,
+    _generate_thinking_tone,
+    _rms,
+)
 from knock.providers.tts.base import SynthesizedAudio
 
 
@@ -337,6 +343,36 @@ def test_speak_to_visitor_streams_synthesized_audio(tmp_path) -> None:
     assert captured["rate"] == 22050
     assert captured["sampwidth"] == 2
     assert captured["frames"] == b"\x01\x02\x03\x04"
+    captured["stream"].run_until_complete.assert_awaited_once()
+
+
+def test_play_thinking_tone_streams_without_consulting_tts(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.feature_flags.has_speaker = True
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+    mock_client.create_talkback_session_public = AsyncMock(return_value="fake-session")
+
+    tts_provider = MagicMock()
+    tts_provider.synthesize = AsyncMock(return_value=_synthesized_audio())
+
+    captured: dict = {}
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        tts_provider=tts_provider,
+        talkback_stream_factory=_recording_stream_factory(captured),
+    )
+
+    asyncio.run(bridge._play_thinking_tone("cam1"))
+
+    # The whole point: a tone, not a TTS call -- no wording to get wrong,
+    # no extra round-trip to a TTS server.
+    tts_provider.synthesize.assert_not_awaited()
+    assert captured["camera"] is fake_camera
+    assert captured["session"] == "fake-session"
+    assert captured["frames"]  # non-empty generated tone audio
     captured["stream"].run_until_complete.assert_awaited_once()
 
 
@@ -819,10 +855,11 @@ def test_handle_event_continues_the_conversation_while_the_visitor_keeps_talking
 
     assert decision is not None
     # Greeting, then one spoken response per turn (delivery, then
-    # signature-required) -- the empty third transcript ends it there.
+    # signature-required) -- the empty third transcript ends it there. The
+    # "thinking" cue between turns is a generated tone now, not a TTS
+    # call, so it never appears in tts_text_log at all.
     assert tts_text_log[0] == GREETING
-    assert tts_text_log.count(_THINKING_PHRASE) == 2
-    responses = [text for text in tts_text_log if text not in (GREETING, _THINKING_PHRASE)]
+    responses = [text for text in tts_text_log if text != GREETING]
     assert len(responses) == 2
     assert "leave the package" in responses[0].lower()
     assert "homeowner" in responses[1].lower()
@@ -1216,6 +1253,36 @@ def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
     stt_provider.transcribe.assert_awaited_once_with(
         b"\x01\x02\x03\x04", rate=16000, width=2, channels=1
     )
+
+
+# -- _generate_thinking_tone ----------------------------------------------------------
+
+
+def test_generate_thinking_tone_produces_nonempty_pcm() -> None:
+    audio = _generate_thinking_tone()
+    assert audio.audio
+    assert audio.width == 2
+    assert audio.channels == 1
+    assert audio.rate > 0
+
+
+def test_generate_thinking_tone_duration_matches_the_configured_notes() -> None:
+    from knock.integrations.unifi import _THINKING_TONE_NOTES
+
+    audio = _generate_thinking_tone()
+    expected_samples = sum(int(audio.rate * duration) for _, duration in _THINKING_TONE_NOTES)
+    # 2 bytes/sample (width=2), mono
+    assert len(audio.audio) == expected_samples * 2
+
+
+def test_generate_thinking_tone_stays_within_16_bit_range() -> None:
+    samples = array.array("h")
+    audio = _generate_thinking_tone()
+    samples.frombytes(audio.audio)
+    assert all(-32768 <= s <= 32767 for s in samples)
+    # Comfortably under full scale (0.6 amplitude headroom baked in), not silent
+    assert max(abs(s) for s in samples) > 1000
+    assert max(abs(s) for s in samples) < 32767
 
 
 # -- _rms ---------------------------------------------------------------------------

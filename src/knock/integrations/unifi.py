@@ -40,6 +40,7 @@ from __future__ import annotations
 import array
 import asyncio
 import logging
+import math
 import re
 import tempfile
 import time
@@ -105,11 +106,14 @@ _SESSION_IDLE_TIMEOUT = timedelta(minutes=5)
 # Whisper returning short junk transcripts forever.
 _MAX_CONVERSATION_TURNS = 5
 
-# Spoken right after listening ends and before the (sometimes slow --
+# Played right after listening ends and before the (sometimes slow --
 # vision description, an LLM fallback call) processing that decides the
 # actual reply, so the visitor gets some acknowledgement instead of dead
-# air while that runs.
-_THINKING_PHRASE = "Let me think about that for a moment."
+# air while that runs. A tone rather than a spoken placeholder phrase --
+# no TTS round-trip needed just to say "one moment," and no particular
+# wording to get wrong.
+_THINKING_TONE_SAMPLE_RATE = 16000
+_THINKING_TONE_NOTES = [(440.0, 0.15), (554.37, 0.15)]  # A4 -> C#5, 150ms each
 
 # Spoken back to the visitor once someone at the Home Assistant end taps an
 # action button on a signature-required delivery notification (see
@@ -138,6 +142,25 @@ def _rms(pcm: bytes) -> float:
     samples = array.array("h")
     samples.frombytes(pcm[: sample_count * 2])
     return (sum(s * s for s in samples) / sample_count) ** 0.5
+
+
+def _generate_thinking_tone() -> SynthesizedAudio:
+    """A short two-note chime, synthesized directly (no TTS server
+    involved) -- see `_THINKING_TONE_NOTES`.
+    """
+    rate = _THINKING_TONE_SAMPLE_RATE
+    samples = array.array("h")
+    for freq, duration in _THINKING_TONE_NOTES:
+        count = int(rate * duration)
+        fade_samples = max(1, int(count * 0.1))
+        for i in range(count):
+            # A short fade in/out (first/last ~10% of each note) avoids the
+            # audible click a sine wave starting/stopping abruptly would
+            # otherwise produce.
+            fade = min(i / fade_samples, 1.0, (count - i) / fade_samples)
+            value = math.sin(2 * math.pi * freq * i / rate) * fade * 0.6
+            samples.append(int(value * 32767))
+    return SynthesizedAudio(audio=samples.tobytes(), rate=rate, width=2, channels=1)
 
 
 def _write_wav(path: Path, audio: SynthesizedAudio) -> None:
@@ -361,7 +384,7 @@ class UnifiBridge:
             if transcript:
                 visitor_event = visitor_event.model_copy(update={"text": transcript})
             if self.tts_provider is not None:
-                await self.speak_to_visitor(event.device_id, _THINKING_PHRASE)
+                await self._play_thinking_tone(event.device_id)
 
         if self.vision_provider is not None:
             try:
@@ -468,7 +491,7 @@ class UnifiBridge:
                 )
                 break
             if self.tts_provider is not None:
-                await self.speak_to_visitor(event.device_id, _THINKING_PHRASE)
+                await self._play_thinking_tone(event.device_id)
             visitor_event = visitor_event.model_copy(
                 update={"text": reply, "timestamp": datetime.now(UTC)}
             )
@@ -559,6 +582,29 @@ class UnifiBridge:
 
         try:
             audio = await self.tts_provider.synthesize(text)
+        except Exception as exc:  # noqa: BLE001 - talkback is best-effort
+            logger.warning("Talkback to device %s failed: %s", device_id, exc)
+            return
+        await self._play_audio(device_id, audio)
+
+    async def _play_thinking_tone(self, device_id: str) -> None:
+        """A short audio cue played while KNOCK is processing a reply, in
+        place of a spoken placeholder phrase -- no TTS round-trip needed
+        just to say "one moment," and nothing tying it to any particular
+        wording.
+        """
+        await self._play_audio(device_id, _generate_thinking_tone())
+
+    async def _play_audio(self, device_id: str, audio: SynthesizedAudio) -> None:
+        """Stream already-synthesized PCM audio to `device_id`'s speaker,
+        best-effort -- shared by `speak_to_visitor` (TTS output) and
+        `_play_thinking_tone` (a generated tone, no TTS involved).
+
+        Any failure here (no speaker on this camera, streaming error) is
+        logged and swallowed -- talkback is an enhancement, never a
+        requirement for the rest of the response.
+        """
+        try:
             # Same public-only-client constraint as `listen_to_visitor` --
             # read the already-primed camera from `public_bootstrap` rather
             # than the private `get_camera()`.
