@@ -14,8 +14,10 @@ from wyoming.event import async_read_event, async_write_event
 
 from knock.api.app import app
 from knock.api.auth_routes import get_auth_store, get_web_session_store
+from knock.api.debug_routes import get_audit_log
 from knock.api.settings_routes import get_config_store
 from knock.config import OllamaConfig, VisionConfig
+from knock.core.audit import JSONLAuditLog
 from knock.core.auth import AuthStore, WebSessionStore
 from knock.core.config_store import ConfigStore
 
@@ -26,12 +28,18 @@ def config_store(tmp_path) -> ConfigStore:
 
 
 @pytest.fixture
-def client(tmp_path, config_store):
+def audit_log(tmp_path) -> JSONLAuditLog:
+    return JSONLAuditLog(tmp_path / "audit.jsonl")
+
+
+@pytest.fixture
+def client(tmp_path, config_store, audit_log):
     app.dependency_overrides[get_auth_store] = lambda: AuthStore(tmp_path / "auth.json")
     app.dependency_overrides[get_web_session_store] = lambda: WebSessionStore(
         tmp_path / "web_sessions.json"
     )
     app.dependency_overrides[get_config_store] = lambda: config_store
+    app.dependency_overrides[get_audit_log] = lambda: audit_log
     try:
         yield TestClient(app)
     finally:
@@ -326,6 +334,19 @@ def test_debug_conversation_simulate_normal_intent(client) -> None:
     assert body["intent"] == "delivery"
     assert body["policy_allowed"] is True
     assert body["decision"]["escalate"] is False
+
+
+def test_debug_conversation_simulate_records_to_the_audit_log(client, audit_log) -> None:
+    # Regression test: the orchestrator here used to be constructed with no
+    # audit_log at all, so every simulated line silently never reached
+    # audit.jsonl -- unlike the CLI's own REPL, which already did.
+    _login(client)
+    _post(client, "/api/debug/conversation/simulate", {"text": "I have a package for you"})
+
+    entries = audit_log.recent()
+    assert len(entries) == 1
+    assert entries[0].text == "I have a package for you"
+    assert entries[0].intent == "delivery"
 
 
 def test_debug_conversation_simulate_emergency_escalates(client) -> None:

@@ -16,14 +16,16 @@ import io
 import time
 import wave
 from datetime import UTC, datetime
+from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from knock.api.auth_routes import CurrentUserDep
 from knock.api.settings_routes import ConfigStoreDep
 from knock.config import KokoroConfig, OllamaConfig, VisionConfig, WhisperConfig
+from knock.core.audit import JSONLAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
@@ -34,6 +36,13 @@ from knock.providers.vision.ollama import OllamaVisionProvider
 from knock.providers.vision.safety import contains_alarming_language, sanitize_description
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
+
+
+def get_audit_log() -> JSONLAuditLog:
+    return JSONLAuditLog()
+
+
+AuditLogDep = Annotated[JSONLAuditLog, Depends(get_audit_log)]
 
 
 def _pcm_to_wav_base64(pcm: bytes, *, rate: int, width: int, channels: int) -> str:
@@ -240,16 +249,26 @@ class ConversationSimulateResponse(BaseModel):
 
 @router.post("/conversation/simulate", response_model=ConversationSimulateResponse)
 def debug_conversation_simulate(
-    body: ConversationSimulateRequest, current_user: CurrentUserDep, *, store: ConfigStoreDep
+    body: ConversationSimulateRequest,
+    current_user: CurrentUserDep,
+    *,
+    store: ConfigStoreDep,
+    audit_log: AuditLogDep,
 ) -> ConversationSimulateResponse:
     """A browser version of the CLI REPL: run one visitor line through the
     real, unmodified policy engine and orchestrator (no session persisted),
     surfacing the policy details `Orchestrator.respond()` doesn't return on
     its own -- useful for debugging why a rule did or didn't fire without
     needing real hardware.
+
+    Recorded to the real audit log, same as the CLI's own REPL -- a
+    simulated line is exactly as reviewable/trainable afterward (History,
+    Training) as a real conversation, and previously wasn't: the
+    orchestrator here was constructed without an audit_log at all, so
+    every simulated line silently never reached audit.jsonl.
     """
     orchestrator = Orchestrator(
-        llm_provider=OllamaProvider(config=OllamaConfig.from_sources(store))
+        llm_provider=OllamaProvider(config=OllamaConfig.from_sources(store)), audit_log=audit_log
     )
     policy_decision = orchestrator.policy.evaluate(body.text)
     event = VisitorEvent(text=body.text, timestamp=datetime.now(UTC))
