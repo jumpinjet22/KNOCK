@@ -44,7 +44,12 @@ class _SequencedLLMProvider:
 
 
 def _bridge(tmp_path, mock_client: MagicMock | None = None, **config_overrides) -> UnifiBridge:
-    defaults = {"host": "127.0.0.1", "port": 443, "api_key": "test-key"}
+    defaults = {
+        "host": "127.0.0.1",
+        "port": 443,
+        "api_key": "test-key",
+        "ring_chime_delay_seconds": 0.0,
+    }
     config = UnifiConfig(**{**defaults, **config_overrides})
     return UnifiBridge(
         config=config,
@@ -267,7 +272,7 @@ def _synthesized_audio() -> SynthesizedAudio:
 
 def test_speak_to_visitor_is_a_no_op_without_tts_provider(tmp_path) -> None:
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=MagicMock(),
     )
@@ -286,7 +291,7 @@ def test_speak_to_visitor_streams_synthesized_audio(tmp_path) -> None:
 
     captured: dict = {}
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -310,7 +315,7 @@ def test_speak_to_visitor_streams_synthesized_audio(tmp_path) -> None:
 
 def test_handle_notification_action_speaks_on_my_way_phrase(tmp_path) -> None:
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=MagicMock(),
     )
@@ -330,7 +335,7 @@ def test_handle_notification_action_speaks_on_my_way_phrase(tmp_path) -> None:
 
 def test_handle_notification_action_speaks_turn_away_phrase(tmp_path) -> None:
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=MagicMock(),
     )
@@ -350,7 +355,7 @@ def test_handle_notification_action_speaks_turn_away_phrase(tmp_path) -> None:
 
 def test_handle_notification_action_ignores_an_unrecognized_action(tmp_path) -> None:
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=MagicMock(),
     )
@@ -377,7 +382,7 @@ def test_speak_to_visitor_skips_cameras_without_a_speaker(tmp_path) -> None:
 
     stream_factory = MagicMock()
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -403,7 +408,7 @@ def test_speak_to_visitor_falls_back_when_public_session_unavailable(tmp_path) -
 
     captured: dict = {}
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -423,7 +428,7 @@ def test_speak_to_visitor_survives_synthesis_failure(tmp_path) -> None:
     stream_factory = MagicMock()
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -450,7 +455,7 @@ def test_speak_to_visitor_survives_stream_failure(tmp_path) -> None:
     stream_factory = MagicMock(return_value=failing_stream)
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -476,7 +481,7 @@ def test_handle_event_greets_before_speaking_the_response_on_first_turn(tmp_path
         return stream
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -516,7 +521,7 @@ def test_handle_event_always_regreets_on_a_fresh_ring(tmp_path) -> None:
         return stream
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -554,7 +559,13 @@ def test_handle_event_does_not_regreet_for_a_repeated_non_ring_trigger(tmp_path)
         return stream
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", trigger_on=["ring", "person"]),
+        config=UnifiConfig(
+            host="127.0.0.1",
+            port=443,
+            api_key="k",
+            ring_chime_delay_seconds=0.0,
+            trigger_on=["ring", "person"],
+        ),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -596,7 +607,13 @@ def test_handle_event_restarts_a_stale_session_even_without_a_ring(tmp_path) -> 
     session_store.save(stale)
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", trigger_on=["ring", "person"]),
+        config=UnifiConfig(
+            host="127.0.0.1",
+            port=443,
+            api_key="k",
+            ring_chime_delay_seconds=0.0,
+            trigger_on=["ring", "person"],
+        ),
         session_store=session_store,
         client=mock_client,
         tts_provider=tts_provider,
@@ -646,7 +663,7 @@ def test_handle_event_greets_before_listening_for_the_visitors_reply(tmp_path) -
         return stream
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         tts_provider=tts_provider,
@@ -693,7 +710,7 @@ def _conversational_bridge(
         return stream
 
     return UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         orchestrator=orchestrator,
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
@@ -1041,7 +1058,7 @@ def _fake_rtsp_streams(url: str | None):
 
 def test_listen_to_visitor_is_a_no_op_without_stt_provider(tmp_path) -> None:
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=MagicMock(),
     )
@@ -1059,7 +1076,13 @@ def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
 
     capture = MagicMock(return_value=b"\x01\x02\x03\x04")
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", listen_seconds=4.0),
+        config=UnifiConfig(
+            host="127.0.0.1",
+            port=443,
+            api_key="k",
+            ring_chime_delay_seconds=0.0,
+            listen_seconds=4.0,
+        ),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         stt_provider=stt_provider,
@@ -1086,7 +1109,7 @@ def test_listen_to_visitor_returns_empty_without_an_rtsp_stream(tmp_path) -> Non
     capture = MagicMock()
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         stt_provider=stt_provider,
@@ -1109,7 +1132,7 @@ def test_listen_to_visitor_survives_capture_failure(tmp_path) -> None:
     capture = MagicMock(side_effect=RuntimeError("stream unavailable"))
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         stt_provider=stt_provider,
@@ -1131,7 +1154,7 @@ def test_handle_event_uses_transcript_as_event_text_when_available(tmp_path) -> 
     capture = MagicMock(return_value=b"\x01\x02")
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         stt_provider=stt_provider,
@@ -1154,7 +1177,7 @@ def test_handle_event_falls_back_to_generic_text_when_transcript_is_empty(tmp_pa
     stt_provider.transcribe = AsyncMock(return_value="")
 
     bridge = UnifiBridge(
-        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k"),
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
         session_store=JSONFileSessionStore(tmp_path),
         client=mock_client,
         stt_provider=stt_provider,
@@ -1170,13 +1193,57 @@ def test_unifi_config_rtsp_defaults() -> None:
     config = UnifiConfig()
     assert config.rtsp_quality == "high"
     assert config.listen_seconds == 10.0
+    assert config.ring_chime_delay_seconds == 2.0
 
 
 def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
     monkeypatch.setenv("KNOCK_UNIFI_RTSP_QUALITY", "package")
     monkeypatch.setenv("KNOCK_UNIFI_LISTEN_SECONDS", "8.5")
+    monkeypatch.setenv("KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", "3.5")
 
     config = UnifiConfig.from_env()
 
     assert config.rtsp_quality == "package"
     assert config.listen_seconds == 8.5
+    assert config.ring_chime_delay_seconds == 3.5
+
+
+# -- ring chime delay ---------------------------------------------------------------
+
+
+def test_handle_event_waits_out_the_ring_chime_delay(tmp_path) -> None:
+    bridge = _bridge(tmp_path, ring_chime_delay_seconds=0.05)
+
+    async def scenario() -> float:
+        start = asyncio.get_event_loop().time()
+        await bridge.handle_event(_event())
+        return asyncio.get_event_loop().time() - start
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed >= 0.05
+
+
+def test_handle_event_skips_the_delay_for_a_smart_detect_trigger(tmp_path) -> None:
+    bridge = _bridge(tmp_path, trigger_on=["ring", "person"], ring_chime_delay_seconds=5.0)
+
+    async def scenario() -> float:
+        start = asyncio.get_event_loop().time()
+        await bridge.handle_event(
+            _event(event_type="smartDetectZone", smart_detect_types=("person",))
+        )
+        return asyncio.get_event_loop().time() - start
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 1.0
+
+
+def test_handle_event_skips_the_delay_when_set_to_zero(tmp_path) -> None:
+    bridge = _bridge(tmp_path, ring_chime_delay_seconds=0.0)
+
+    async def scenario() -> float:
+        start = asyncio.get_event_loop().time()
+        await bridge.handle_event(_event())
+        return asyncio.get_event_loop().time() - start
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 1.0

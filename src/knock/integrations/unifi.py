@@ -305,6 +305,13 @@ class UnifiBridge:
         if not self.should_trigger(event):
             return None
 
+        if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
+            # Let the physical doorbell chime finish before KNOCK starts
+            # talking over it or opens its listen window early enough to
+            # capture the tail of the chime instead of just the visitor. A
+            # silent smart-detect trigger has no chime to wait out.
+            await asyncio.sleep(self.config.ring_chime_delay_seconds)
+
         visitor_event = self.build_event(event)
         session_id = _default_session_id(event.device_id)
         state = self._start_or_resume_session(session_id, event, visitor_event.timestamp)

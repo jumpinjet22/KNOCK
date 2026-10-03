@@ -327,6 +327,13 @@ class UnifiConfig(BaseModel):
     trigger_on: list[str] = Field(default_factory=lambda: ["ring"])
     rtsp_quality: str = "high"
     listen_seconds: float = 10.0
+    # A physical doorbell chime takes a couple of seconds to finish playing
+    # after the `ring` event fires -- without this, KNOCK's greeting starts
+    # talking over it, and/or STT's listen window opens early enough to
+    # capture the tail of the chime instead of just the visitor. Only
+    # applied for an actual `ring` (see UnifiBridge.handle_event); a silent
+    # smart-detect trigger has no chime to wait out.
+    ring_chime_delay_seconds: float = 2.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -346,6 +353,9 @@ class UnifiConfig(BaseModel):
             trigger_on=trigger_on,
             rtsp_quality=os.environ.get("KNOCK_UNIFI_RTSP_QUALITY", "high"),
             listen_seconds=float(os.environ.get("KNOCK_UNIFI_LISTEN_SECONDS", "10.0")),
+            ring_chime_delay_seconds=float(
+                os.environ.get("KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", "2.0")
+            ),
         )
 
     @classmethod
@@ -363,4 +373,7 @@ class UnifiConfig(BaseModel):
             ),
             rtsp_quality=_resolve("KNOCK_UNIFI_RTSP_QUALITY", s, "rtsp_quality", "high"),
             listen_seconds=_resolve("KNOCK_UNIFI_LISTEN_SECONDS", s, "listen_seconds", 10.0, float),
+            ring_chime_delay_seconds=_resolve(
+                "KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", s, "ring_chime_delay_seconds", 2.0, float
+            ),
         )
