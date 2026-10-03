@@ -71,6 +71,19 @@ def test_classifies_occupancy_probes() -> None:
     assert classify_intent("is anyone home") == "occupancy_probe"
 
 
+def test_classifies_service_company_phrasing_as_service_appointment() -> None:
+    # Found via a real production misclassification: a technician
+    # announcing themselves as "[Name] service company... is here" with no
+    # explicit job detail (no "AC", "repair", etc.) matched no keyword at
+    # all, fell to the LLM safety net, and got guessed as "delivery"
+    # instead. None of these phrasings overlap with any delivery/food/ride
+    # keyword, so this needs its own deterministic catch rather than
+    # relying on the LLM to guess right every time.
+    assert classify_intent("Weeks Service Company is here.") == "service_appointment"
+    assert classify_intent("I'm here for my scheduled appointment") == "service_appointment"
+    assert classify_intent("Here for the appointment") == "service_appointment"
+
+
 def test_classifies_religious_canvassing() -> None:
     assert (
         classify_intent("Do you have a moment to talk about the Bible?") == "religious_soliciting"

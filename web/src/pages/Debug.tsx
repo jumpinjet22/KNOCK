@@ -372,7 +372,7 @@ function ConversationPanel() {
       {result && (
         <div className="mt-6 space-y-4">
           <ResultField label="Response text" value={result.decision.text} />
-          <div className="grid grid-cols-2 gap-4 text-sm">
+          <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
             <Fact label="Reason" value={result.decision.reason} />
             <Fact label="Escalate" value={result.decision.escalate ? "yes" : "no"} />
             <Fact label="Intent" value={result.intent} />

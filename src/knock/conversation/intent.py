@@ -52,6 +52,24 @@ _RIDE_KEYWORDS = [
     "here for your ride",
 ]
 _SIGNATURE_KEYWORDS = ["sign", "signature", "initial"]
+# Found via a real production misclassification: "[Name] service company...
+# is here" (a technician announcing themselves with no explicit job detail
+# like "AC" or "repair") was left entirely to the LLM safety net, which
+# guessed "delivery" instead of "service_appointment" -- "service company"
+# on its own doesn't contain any word the generic delivery keyword check
+# below would ever match, so there was nothing to stop it falling all the
+# way to "unknown" and then being misclassified there. A deterministic
+# catch here means a wrong LLM guess can't happen for this common phrasing
+# at all.
+_SERVICE_APPOINTMENT_KEYWORDS = [
+    "service company",
+    "service appointment",
+    "scheduled appointment",
+    "here for the appointment",
+    "here for my appointment",
+    "maintenance visit",
+    "repair appointment",
+]
 
 
 def classify_intent(text: str) -> str:
@@ -78,6 +96,8 @@ def classify_intent(text: str) -> str:
         return "emergency"
     if any(k in lowered for k in ["are you home", "anyone home"]):
         return "occupancy_probe"
+    if any(k in lowered for k in _SERVICE_APPOINTMENT_KEYWORDS):
+        return "service_appointment"
     if any(k in lowered for k in _RELIGIOUS_KEYWORDS):
         return "religious_soliciting"
     if any(k in lowered for k in _POLITICAL_KEYWORDS):
