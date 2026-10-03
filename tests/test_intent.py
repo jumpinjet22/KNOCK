@@ -11,6 +11,16 @@ def test_classifies_package_keywords_as_delivery() -> None:
 def test_a_signature_requirement_overrides_the_generic_delivery_intent() -> None:
     assert classify_intent("I need a signature for this package") == "delivery_signature_required"
     assert classify_intent("Can you sign for this delivery?") == "delivery_signature_required"
+    # "initial" is a common real-world phrasing for the same requirement
+    # (e.g. UPS/FedEx drivers often say "initial" rather than "sign") that
+    # doesn't contain "sign" as a substring -- found via live LLM-refinement
+    # probing, where this phrasing matched the generic "delivery" keyword
+    # branch and never reached the LLM safety net at all (which only runs
+    # when the keyword classifier lands on "unknown").
+    assert (
+        classify_intent("I need someone to initial for this package real quick")
+        == "delivery_signature_required"
+    )
 
 
 def test_classifies_food_keywords_as_food_delivery_not_generic_delivery() -> None:

@@ -24,7 +24,6 @@ from pydantic import BaseModel
 from knock.api.auth_routes import CurrentUserDep
 from knock.api.settings_routes import ConfigStoreDep
 from knock.config import KokoroConfig, OllamaConfig, VisionConfig, WhisperConfig
-from knock.conversation.intent import classify_intent
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
@@ -258,7 +257,7 @@ def debug_conversation_simulate(
 
     return ConversationSimulateResponse(
         decision=decision,
-        intent=classify_intent(body.text),
+        intent=decision.intent or "unknown",
         policy_allowed=policy_decision.allowed,
         policy_reason=policy_decision.reason,
         policy_flags=policy_decision.flags,

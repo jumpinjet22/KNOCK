@@ -1001,6 +1001,37 @@ def test_handle_event_notifies_home_assistant_on_a_ride_arrival_without_buttons(
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
 
 
+def test_handle_event_notifies_home_assistant_on_a_service_appointment_without_buttons(
+    tmp_path,
+) -> None:
+    # Time-sensitive like ride_arrived (a technician waiting at the door
+    # will leave if no one responds), but nothing for the household to
+    # approve, so no action buttons.
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_SequencedLLMProvider(
+            [
+                "service_appointment",  # classification
+                "Thanks, I'll let them know you're here for the appointment.",  # phrasing
+                "A technician has arrived for the AC repair.",  # notification summary
+            ]
+        )
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I'm here to work on your AC unit", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.args[0] == "A technician has arrived for the AC repair."
+    assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+
+
 def test_handle_event_does_not_notify_home_assistant_for_a_visitation(tmp_path) -> None:
     # A routine friendly visit isn't time-sensitive or notable the way the
     # other FYI-notified intents are, so it deliberately doesn't page anyone.

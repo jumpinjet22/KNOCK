@@ -356,6 +356,39 @@ def test_debug_conversation_simulate_uses_llm_for_unknown_intent(client, config_
 
 
 @respx.mock
+def test_debug_conversation_simulate_reports_the_llm_refined_intent(client, config_store) -> None:
+    # Regression test: the top-level "intent" field must reflect what
+    # orchestrator.respond() actually decided (including LLM refinement of
+    # a keyword-classifier miss), not a second, independent raw
+    # classify_intent() call that bypasses refinement entirely and would
+    # wrongly report "unknown" even though the response text it's next to
+    # is clearly phrased for the refined intent.
+    _login(client)
+    config = OllamaConfig.from_sources(config_store)
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode()
+        if "keyword rules found no match" in prompt:
+            return httpx.Response(200, json={"response": "service_appointment"})
+        return httpx.Response(
+            200, json={"response": "Thanks, I'll let them know you're here for the appointment."}
+        )
+
+    respx.post(f"{config.base_url}/api/generate").mock(side_effect=_respond)
+
+    resp = _post(
+        client,
+        "/api/debug/conversation/simulate",
+        {"text": "I'm with weeks service company. I'm here to work on your AC unit"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intent"] == "service_appointment"
+    assert body["decision"]["intent"] == "service_appointment"
+
+
+@respx.mock
 def test_debug_conversation_simulate_falls_back_when_llm_fails(client, config_store) -> None:
     _login(client)
     config = OllamaConfig.from_sources(config_store)

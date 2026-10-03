@@ -546,8 +546,31 @@ just another settings field.
 - Model distillation / LoRA training workflow
 - Installable web app (PWA / "Chrome app")
 - Self-hosted OIDC sign-in (Authentik, etc.)
+- Calendar integration
 
 ## Definitions
+
+### Calendar integration
+
+Feed relevant calendar context (e.g. a CalDAV feed, Google Calendar, or a
+local ICS file) into the LLM as extra context when it's actually relevant
+to the visitor's claim -- the clearest case is corroborating a
+`service_appointment` ("I'm here for the AC repair") against a real
+scheduled event, so KNOCK can respond with actual confidence instead of
+taking a visitor's word for it, and could flag a mismatch (claimed
+appointment with nothing on the calendar) as `suspicious_activity`
+instead of the normal acknowledgment.
+
+This has to be designed carefully against Phase 3's schedule-protection
+rule: calendar data is exactly the kind of information KNOCK must never
+leak back to a visitor (an event title/time is a schedule). The calendar
+feed can only ever be read *internally* to inform classification/response
+choice -- never quoted, summarized, or referenced in anything said at the
+door. Likely implemented as a new read-only provider (mirrors the
+LLM/STT/TTS/vision provider pattern) consulted only for the intents where
+it's actually appropriate (service_appointment today; maybe
+delivery_signature_required or visitation later), not wired into every
+response.
 
 ### Self-hosted OIDC sign-in (Authentik, etc.)
 

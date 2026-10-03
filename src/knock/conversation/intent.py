@@ -51,6 +51,7 @@ _RIDE_KEYWORDS = [
     "ride is here",
     "here for your ride",
 ]
+_SIGNATURE_KEYWORDS = ["sign", "signature", "initial"]
 
 
 def classify_intent(text: str) -> str:
@@ -65,7 +66,7 @@ def classify_intent(text: str) -> str:
         # A signature requirement means no one can just leave it at the door
         # -- that's the opposite of the generic delivery response, so it
         # needs its own intent rather than falling through to "delivery".
-        if "sign" in lowered:
+        if any(k in lowered for k in _SIGNATURE_KEYWORDS):
             return "delivery_signature_required"
         return "delivery"
     # Checked after food/delivery on purpose: "uber eats" already matches

@@ -454,17 +454,25 @@ class UnifiBridge:
                     event.device_id, summary, actions=self._approval_actions(event.device_id)
                 )
 
-            if decision.intent in ("official_visit", "suspicious_activity", "ride_arrived"):
+            if decision.intent in (
+                "official_visit",
+                "suspicious_activity",
+                "ride_arrived",
+                "service_appointment",
+            ):
                 # Same FYI pattern as food_delivery above -- the household
                 # should know, but there's no button-press decision to make,
                 # so no action buttons. ride_arrived is here because a
                 # waiting driver is time-sensitive the same way food is;
-                # visitation deliberately isn't -- a routine friendly visit
-                # doesn't need to interrupt anyone with a push notification.
+                # service_appointment too -- a technician who's arrived and
+                # getting no response will leave; visitation deliberately
+                # isn't -- a routine friendly visit doesn't need to
+                # interrupt anyone with a push notification.
                 fallback = {
                     "official_visit": "Someone claiming official business is at the door",
                     "suspicious_activity": "Possibly concerning activity at the door",
                     "ride_arrived": "A rideshare/taxi driver is here for pickup",
+                    "service_appointment": "A technician has arrived for a service appointment",
                 }[decision.intent] + f" (camera: {event.device_id})."
                 summary = self.orchestrator.summarize_for_notification(
                     visitor_event.text, fallback=fallback
