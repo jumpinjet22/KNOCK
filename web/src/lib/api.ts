@@ -238,9 +238,14 @@ export interface SessionState {
   history: string[]
 }
 
+export interface IntentStats {
+  counts: Record<string, number>
+}
+
 export const historyApi = {
   audit: (limit = 200) => apiFetch<AuditEntry[]>(`/api/audit?limit=${limit}`),
   sessions: (limit = 200) => apiFetch<SessionState[]>(`/api/sessions?limit=${limit}`),
+  stats: () => apiFetch<IntentStats>("/api/stats"),
 }
 
 export interface GoogleOAuthStatus {

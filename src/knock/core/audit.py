@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -75,3 +76,22 @@ class JSONLAuditLog:
         entries = [AuditEntry.model_validate_json(line) for line in lines if line.strip()]
         entries.reverse()
         return entries[:limit]
+
+    def count_by_intent(self) -> dict[str, int]:
+        """All-time counts of each classified intent (e.g. for a dashboard's
+        "N solicitors turned away" stats), across the whole file -- not
+        bounded by `recent()`'s limit. `None` (emergency/blocked requests,
+        which never reach `classify_intent()`) is excluded; those have
+        their own `reason`-based meaning, not an intent to tally here.
+        """
+        if not self.path.exists():
+            return {}
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        counts: Counter[str] = Counter()
+        for line in lines:
+            if not line.strip():
+                continue
+            entry = AuditEntry.model_validate_json(line)
+            if entry.intent is not None:
+                counts[entry.intent] += 1
+        return dict(counts)

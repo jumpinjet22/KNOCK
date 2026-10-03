@@ -49,7 +49,7 @@ def _login(client: TestClient) -> None:
     assert resp.status_code == 201
 
 
-def _audit_entry(text: str) -> AuditEntry:
+def _audit_entry(text: str, intent: str | None = "delivery") -> AuditEntry:
     return AuditEntry(
         timestamp=datetime.now(UTC),
         text=text,
@@ -57,7 +57,7 @@ def _audit_entry(text: str) -> AuditEntry:
         matched_rule_ids=[],
         allowed=True,
         reason="normal",
-        intent="delivery",
+        intent=intent,
     )
 
 
@@ -71,6 +71,11 @@ def test_get_audit_requires_authentication(client) -> None:
 
 def test_list_sessions_requires_authentication(client) -> None:
     resp = client.get("/api/sessions")
+    assert resp.status_code == 401
+
+
+def test_get_stats_requires_authentication(client) -> None:
+    resp = client.get("/api/stats")
     assert resp.status_code == 401
 
 
@@ -106,6 +111,34 @@ def test_get_audit_is_empty_before_anything_is_recorded(client) -> None:
     resp = client.get("/api/audit")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+# -- stats ------------------------------------------------------------------------
+
+
+def test_get_stats_tallies_tracked_intents(client, audit_log) -> None:
+    _login(client)
+    audit_log.record(_audit_entry("one", intent="soliciting"))
+    audit_log.record(_audit_entry("two", intent="soliciting"))
+    audit_log.record(_audit_entry("three", intent="religious_soliciting"))
+    audit_log.record(_audit_entry("four", intent="emergency"))  # never tracked
+
+    resp = client.get("/api/stats")
+
+    assert resp.status_code == 200
+    counts = resp.json()["counts"]
+    assert counts["soliciting"] == 2
+    assert counts["religious_soliciting"] == 1
+    assert counts["political_soliciting"] == 0
+    assert "emergency" not in counts
+
+
+def test_get_stats_is_all_zero_before_anything_is_recorded(client) -> None:
+    _login(client)
+    resp = client.get("/api/stats")
+    assert resp.status_code == 200
+    counts = resp.json()["counts"]
+    assert all(value == 0 for value in counts.values())
 
 
 # -- sessions ---------------------------------------------------------------------
