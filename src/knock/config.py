@@ -334,6 +334,15 @@ class UnifiConfig(BaseModel):
     # applied for an actual `ring` (see UnifiBridge.handle_event); a silent
     # smart-detect trigger has no chime to wait out.
     ring_chime_delay_seconds: float = 2.0
+    # Below this RMS loudness, captured audio is treated as silence and
+    # never sent to the STT provider -- Whisper (like most STT models) will
+    # confidently hallucinate *something* from near-silent audio rather
+    # than admit nothing was said, which let the conversation loop in
+    # UnifiBridge.handle_event() run its full turn cap instead of
+    # recognizing a visitor had gone quiet. Measured against a real
+    # doorbell mic: ambient room noise alone reads around RMS 5-6, well
+    # under this default, leaving a wide margin before actual speech.
+    silence_rms_threshold: float = 60.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -356,6 +365,9 @@ class UnifiConfig(BaseModel):
             ring_chime_delay_seconds=float(
                 os.environ.get("KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", "2.0")
             ),
+            silence_rms_threshold=float(
+                os.environ.get("KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", "60.0")
+            ),
         )
 
     @classmethod
@@ -375,5 +387,8 @@ class UnifiConfig(BaseModel):
             listen_seconds=_resolve("KNOCK_UNIFI_LISTEN_SECONDS", s, "listen_seconds", 10.0, float),
             ring_chime_delay_seconds=_resolve(
                 "KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", s, "ring_chime_delay_seconds", 2.0, float
+            ),
+            silence_rms_threshold=_resolve(
+                "KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", s, "silence_rms_threshold", 60.0, float
             ),
         )

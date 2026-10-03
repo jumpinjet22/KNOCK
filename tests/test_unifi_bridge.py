@@ -13,7 +13,7 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
-from knock.integrations.unifi import _THINKING_PHRASE, UnifiBridge, _default_session_id
+from knock.integrations.unifi import _THINKING_PHRASE, UnifiBridge, _default_session_id, _rms
 from knock.providers.tts.base import SynthesizedAudio
 
 
@@ -1098,6 +1098,94 @@ def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
     )
 
 
+# -- _rms ---------------------------------------------------------------------------
+
+
+def test_rms_of_empty_bytes_is_zero() -> None:
+    assert _rms(b"") == 0.0
+
+
+def test_rms_of_a_single_sample_is_its_absolute_value() -> None:
+    # 0x0201 little-endian signed = 513
+    assert _rms(b"\x01\x02") == 513.0
+
+
+def test_rms_averages_across_multiple_samples() -> None:
+    # Two samples of equal magnitude, opposite sign -- RMS should still be
+    # the shared magnitude, unlike a plain mean which would cancel to 0.
+    positive = (100).to_bytes(2, byteorder="little", signed=True)
+    negative = (-100).to_bytes(2, byteorder="little", signed=True)
+    assert _rms(positive + negative) == 100.0
+
+
+def test_rms_ignores_a_trailing_odd_byte() -> None:
+    assert _rms(b"\x01\x02\xff") == 513.0
+
+
+def test_listen_to_visitor_skips_stt_for_near_silent_audio(tmp_path) -> None:
+    # The actual production bug this guards against: a visitor who's
+    # already walked away leaves the mic picking up near-silent room tone,
+    # and Whisper (like most STT models) will still confidently
+    # hallucinate *some* non-empty text rather than admit nothing was
+    # said -- which kept the conversation loop in handle_event() running
+    # for its full turn cap instead of recognizing the visit was over.
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high?enableSrtp")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(return_value="thank you")
+
+    # Two near-zero 16-bit samples -- well under the default threshold.
+    capture = MagicMock(return_value=b"\x02\x00\x01\x00")
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+
+    transcript = asyncio.run(bridge.listen_to_visitor("cam1"))
+
+    assert transcript == ""
+    stt_provider.transcribe.assert_not_awaited()
+
+
+def test_listen_to_visitor_respects_a_configured_silence_threshold(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high?enableSrtp")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock(return_value="Hi, I have an Amazon package")
+
+    # RMS of a single sample at 513 -- below a strict custom threshold even
+    # though it's above the default, proving the config value is actually
+    # consulted rather than a hardcoded constant.
+    capture = MagicMock(return_value=b"\x01\x02")
+    bridge = UnifiBridge(
+        config=UnifiConfig(
+            host="127.0.0.1",
+            port=443,
+            api_key="k",
+            ring_chime_delay_seconds=0.0,
+            silence_rms_threshold=1000.0,
+        ),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+
+    transcript = asyncio.run(bridge.listen_to_visitor("cam1"))
+
+    assert transcript == ""
+    stt_provider.transcribe.assert_not_awaited()
+
+
 def test_listen_to_visitor_returns_empty_without_an_rtsp_stream(tmp_path) -> None:
     mock_client = MagicMock()
     fake_camera = MagicMock()
@@ -1194,18 +1282,21 @@ def test_unifi_config_rtsp_defaults() -> None:
     assert config.rtsp_quality == "high"
     assert config.listen_seconds == 10.0
     assert config.ring_chime_delay_seconds == 2.0
+    assert config.silence_rms_threshold == 60.0
 
 
 def test_unifi_config_rtsp_from_env(monkeypatch) -> None:
     monkeypatch.setenv("KNOCK_UNIFI_RTSP_QUALITY", "package")
     monkeypatch.setenv("KNOCK_UNIFI_LISTEN_SECONDS", "8.5")
     monkeypatch.setenv("KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", "3.5")
+    monkeypatch.setenv("KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", "80.0")
 
     config = UnifiConfig.from_env()
 
     assert config.rtsp_quality == "package"
     assert config.listen_seconds == 8.5
     assert config.ring_chime_delay_seconds == 3.5
+    assert config.silence_rms_threshold == 80.0
 
 
 # -- ring chime delay ---------------------------------------------------------------

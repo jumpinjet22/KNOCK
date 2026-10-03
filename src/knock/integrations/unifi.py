@@ -37,6 +37,7 @@ blocking it.
 
 from __future__ import annotations
 
+import array
 import asyncio
 import logging
 import re
@@ -121,6 +122,22 @@ _TURN_AWAY_PHRASE = "I'm sorry, but the homeowner isn't able to accept this righ
 def _default_session_id(device_id: str) -> str:
     safe = _UNSAFE_SESSION_CHARS.sub("_", device_id) or "unknown"
     return f"unifi-{safe}"[:128]
+
+
+def _rms(pcm: bytes) -> float:
+    """Root-mean-square amplitude of 16-bit mono PCM -- a cheap,
+    dependency-free loudness measure used to skip transcribing near-silent
+    audio (see `UnifiConfig.silence_rms_threshold`). Measured against a
+    real doorbell mic: ambient room noise alone came back around RMS 5-6,
+    nowhere near speech levels, so there's a wide, safe margin between
+    "silence" and "someone is talking."
+    """
+    sample_count = len(pcm) // 2
+    if sample_count == 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[: sample_count * 2])
+    return (sum(s * s for s in samples) / sample_count) ** 0.5
 
 
 def _write_wav(path: Path, audio: SynthesizedAudio) -> None:
@@ -478,6 +495,17 @@ class UnifiBridge:
                 self.config.verify_ssl,
             )
             if not pcm:
+                return ""
+
+            if _rms(pcm) < self.config.silence_rms_threshold:
+                # Whisper (and STT models generally) will still confidently
+                # hallucinate *something* from near-silent audio rather than
+                # admit "nothing was said" -- that hallucinated non-empty
+                # text is exactly what let the conversation loop in
+                # handle_event() run for its full turn cap instead of
+                # recognizing the visitor had already left. Checking loudness
+                # before ever asking the model avoids the question entirely.
+                logger.info("Captured audio for %s is near-silent; skipping STT", device_id)
                 return ""
 
             return await self.stt_provider.transcribe(
