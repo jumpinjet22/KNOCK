@@ -38,6 +38,8 @@ _FOOD_KEYWORDS = [
     "uber eats",
     "postmates",
     "food delivery",
+    "deliver food",
+    "deliver your food",
     "takeout",
     "take-out",
 ]
@@ -51,7 +53,7 @@ def classify_intent(text: str) -> str:
     # needs its own intent rather than falling through to "delivery".
     if any(k in lowered for k in _FOOD_KEYWORDS):
         return "food_delivery"
-    if any(k in lowered for k in ["package", "delivery", "amazon", "ups", "fedex"]):
+    if any(k in lowered for k in ["package", "delivery", "deliver", "amazon", "ups", "fedex"]):
         # A signature requirement means no one can just leave it at the door
         # -- that's the opposite of the generic delivery response, so it
         # needs its own intent rather than falling through to "delivery".

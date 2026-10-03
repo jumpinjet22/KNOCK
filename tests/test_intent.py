@@ -23,6 +23,20 @@ def test_classifies_food_keywords_as_food_delivery_not_generic_delivery() -> Non
     assert classify_intent("Uber Eats order") == "food_delivery"
 
 
+def test_classifies_deliver_food_phrasing_as_food_delivery() -> None:
+    # Live transcripts came back as "I am here to deliver food" -- a real
+    # spoken phrasing that matched neither "food delivery" (reversed word
+    # order) nor the generic "delivery" keyword (verb "deliver", not the
+    # noun), so it silently fell through to "unknown" every time.
+    assert classify_intent("I am here to deliver food.") == "food_delivery"
+    assert classify_intent("I'm here to deliver food.") == "food_delivery"
+    assert classify_intent("I have your food delivery") == "food_delivery"
+
+
+def test_classifies_deliver_as_generic_delivery() -> None:
+    assert classify_intent("I need you to deliver this") == "delivery"
+
+
 def test_classifies_help_keywords_as_emergency() -> None:
     assert classify_intent("help!") == "emergency"
     assert classify_intent("medical emergency") == "emergency"

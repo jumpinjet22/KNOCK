@@ -413,3 +413,22 @@ def test_suspicious_activity_intent() -> None:
     llm = _SequencedLLMProvider(["suspicious_activity", "I've let the household know you're here."])
     decision = Orchestrator(llm_provider=llm).respond(_event("Just checking out the property"))
     assert decision.intent == "suspicious_activity"
+
+
+def test_llm_refinement_recovers_a_delivery_phrasing_keywords_missed() -> None:
+    # The actual production bug: "I came to drop some food off" matches no
+    # food/delivery keyword, so classify_intent() alone would call it
+    # "unknown" forever -- the LLM refinement step is the safety net that
+    # must still land on the right real intent, not just the 4 categories
+    # with no keyword list at all.
+    llm = _SequencedLLMProvider(["food_delivery", "Thanks, I'll let them know right away."])
+    decision = Orchestrator(llm_provider=llm).respond(_event("I came to drop some food off"))
+    assert decision.intent == "food_delivery"
+
+
+def test_llm_refinement_recovers_soliciting_phrasing_keywords_missed() -> None:
+    llm = _SequencedLLMProvider(["soliciting", "Sorry, we don't accept solicitations here."])
+    decision = Orchestrator(llm_provider=llm).respond(
+        _event("Got a minute to hear about our lawn care service?")
+    )
+    assert decision.intent == "soliciting"

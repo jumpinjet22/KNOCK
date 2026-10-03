@@ -441,10 +441,28 @@ class UnifiBridge:
 
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
             if decision.escalate or not can_converse or is_last_possible_turn:
+                reason = (
+                    "escalated"
+                    if decision.escalate
+                    else "cannot converse (no STT/TTS)"
+                    if not can_converse
+                    else "hit the max turn cap"
+                )
+                logger.info(
+                    "Conversation with %s ending after turn %d: %s",
+                    event.device_id,
+                    turn_index + 1,
+                    reason,
+                )
                 break
 
             reply = await self.listen_to_visitor(event.device_id)
             if not reply:
+                logger.info(
+                    "Conversation with %s ending after turn %d: visitor went quiet",
+                    event.device_id,
+                    turn_index + 1,
+                )
                 break
             if self.tts_provider is not None:
                 await self.speak_to_visitor(event.device_id, _THINKING_PHRASE)
@@ -517,9 +535,11 @@ class UnifiBridge:
                 logger.info("Captured audio for %s is near-silent; skipping STT", device_id)
                 return ""
 
-            return await self.stt_provider.transcribe(
+            transcript = await self.stt_provider.transcribe(
                 pcm, rate=_CAPTURE_SAMPLE_RATE, width=2, channels=1
             )
+            logger.info("Transcribed for %s: %r", device_id, transcript)
+            return transcript
         except Exception as exc:  # noqa: BLE001 - speech capture is best-effort
             logger.warning("Speech capture failed for device %s: %s", device_id, exc)
             return ""

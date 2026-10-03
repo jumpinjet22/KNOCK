@@ -96,14 +96,26 @@ _INTENT_DESCRIPTIONS = {
     ),
 }
 
-# When `classify_intent()`'s keyword rules find nothing (`"unknown"`), these
-# are the additional situations the LLM itself may recognize before KNOCK
-# gives up and calls it genuinely unknown -- see `_refine_unknown_intent`.
+# When `classify_intent()`'s keyword rules find nothing (`"unknown"`), the
+# LLM gets a chance to recognize it as any real intent before KNOCK gives up
+# -- see `_refine_unknown_intent`. This covers every intent, not just the
+# ones with no keyword list at all: natural language has endless phrasing a
+# fixed keyword list can never fully anticipate (e.g. "I'm here to deliver
+# food" matched no keyword before this existed, even though food_delivery
+# obviously fits), so the LLM is a genuine safety net for keyword misses,
+# not just a way to recognize wholly new categories.
+#
 # Deliberately a closed list parsed exactly, not free-form text: this only
 # ever runs *after* PolicyEngine has already allowed the message through,
 # so a wrong or unparseable guess here just leaves it at "unknown" (today's
 # existing behavior), never anywhere near the emergency/blocked path.
 _LLM_CLASSIFIABLE_INTENTS = [
+    "delivery",
+    "delivery_signature_required",
+    "food_delivery",
+    "religious_soliciting",
+    "political_soliciting",
+    "soliciting",
     "service_appointment",
     "person_lookup",
     "official_visit",
@@ -245,6 +257,15 @@ class Orchestrator:
             )
         )
 
+        logger.info(
+            "Orchestrator decision: text=%r intent=%r reason=%r escalate=%s response=%r",
+            event.text,
+            last_intent,
+            response.reason,
+            response.escalate,
+            response.text,
+        )
+
         return response
 
     def _refine_unknown_intent(self, visitor_text: str) -> str:
@@ -266,7 +287,9 @@ class Orchestrator:
             logger.warning("LLM intent classification failed: %s", exc)
             return "unknown"
 
-        return guess if guess in _LLM_CLASSIFIABLE_INTENTS else "unknown"
+        result = guess if guess in _LLM_CLASSIFIABLE_INTENTS else "unknown"
+        logger.info("LLM intent refinement: text=%r guess=%r -> %s", visitor_text, guess, result)
+        return result
 
     def _text_for_intent(self, intent: str, visitor_text: str) -> str:
         if self.llm_provider is None:
