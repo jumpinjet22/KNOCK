@@ -73,6 +73,7 @@ from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
+    KNOCK_COMING_TO_DOOR_ACTION,
     KNOCK_ON_MY_WAY_ACTION,
     KNOCK_TURN_AWAY_ACTION,
     HomeAssistantActionListener,
@@ -122,11 +123,12 @@ _THINKING_SOUND = "thinking.wav"
 _ERROR_SOUND = "error.wav"
 
 # Spoken back to the visitor once someone at the Home Assistant end taps an
-# action button on a signature-required delivery notification (see
+# action button on a delivery/appointment notification (see
 # `handle_notification_action`) -- the visitor is presumably still standing
 # at the door waiting to hear whether to stick around.
 _ON_MY_WAY_PHRASE = "Good news, the homeowner says they're on their way."
 _TURN_AWAY_PHRASE = "I'm sorry, but the homeowner isn't able to accept this right now."
+_COMING_TO_DOOR_PHRASE = "Good news, they'll be right at the door."
 
 
 def _default_session_id(device_id: str) -> str:
@@ -342,6 +344,15 @@ class UnifiBridge:
             {"action": turn_away, "title": "Turn them away"},
         ]
 
+    def _coming_to_door_action(self, device_id: str) -> list[dict[str, str]]:
+        """A single acknowledgement button for a service_appointment
+        notification -- unlike `_approval_actions`, there's no "turn them
+        away" decision here (the technician is already expected), just a
+        way to tell a waiting visitor someone's coming.
+        """
+        coming = f"{KNOCK_COMING_TO_DOOR_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
+        return [{"action": coming, "title": "I'm coming to the door"}]
+
     async def _notify_household(
         self, device_id: str, message: str, *, actions: list[dict[str, str]] | None = None
     ) -> None:
@@ -454,30 +465,41 @@ class UnifiBridge:
                     event.device_id, summary, actions=self._approval_actions(event.device_id)
                 )
 
-            if decision.intent in (
-                "official_visit",
-                "suspicious_activity",
-                "ride_arrived",
-                "service_appointment",
-            ):
-                # Same FYI pattern as food_delivery above -- the household
-                # should know, but there's no button-press decision to make,
-                # so no action buttons. ride_arrived is here because a
-                # waiting driver is time-sensitive the same way food is;
-                # service_appointment too -- a technician who's arrived and
-                # getting no response will leave; visitation deliberately
-                # isn't -- a routine friendly visit doesn't need to
-                # interrupt anyone with a push notification.
+            if decision.intent in ("official_visit", "suspicious_activity", "ride_arrived"):
+                # No button-press decision to make here, just an FYI.
+                # ride_arrived is here because a waiting driver is
+                # time-sensitive the same way food is; visitation
+                # deliberately isn't -- a routine friendly visit doesn't
+                # need to interrupt anyone with a push notification.
                 fallback = {
                     "official_visit": "Someone claiming official business is at the door",
                     "suspicious_activity": "Possibly concerning activity at the door",
                     "ride_arrived": "A rideshare/taxi driver is here for pickup",
-                    "service_appointment": "A technician has arrived for a service appointment",
                 }[decision.intent] + f" (camera: {event.device_id})."
                 summary = self.orchestrator.summarize_for_notification(
                     visitor_event.text, fallback=fallback
                 )
                 await self._notify_household(event.device_id, summary)
+
+            if decision.intent == "service_appointment":
+                # A technician who's arrived and getting no response will
+                # leave, so this carries a single acknowledgement button
+                # (see `_coming_to_door_action`) rather than a plain FYI --
+                # there's no "turn them away" decision since the
+                # appointment is already expected, just a way to tell a
+                # waiting visitor someone's coming.
+                fallback = (
+                    "A technician has arrived for a service appointment "
+                    f"(camera: {event.device_id})."
+                )
+                summary = self.orchestrator.summarize_for_notification(
+                    visitor_event.text, fallback=fallback
+                )
+                await self._notify_household(
+                    event.device_id,
+                    summary,
+                    actions=self._coming_to_door_action(event.device_id),
+                )
 
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
             if decision.escalate or not can_converse or is_last_possible_turn:
@@ -515,7 +537,9 @@ class UnifiBridge:
     async def handle_notification_action(self, action_id: str, device_id: str) -> None:
         """React to a Home Assistant mobile app notification-action tap --
         the "I'm on my way" / "Turn them away" buttons on a
-        signature-required delivery notification (see `handle_event`).
+        signature-required delivery or food-delivery notification, or the
+        single "I'm coming to the door" button on a service_appointment
+        notification (see `handle_event`).
 
         Called by `HomeAssistantActionListener` as its `on_action` callback
         (see `main()`), which has already parsed the device id back out of
@@ -525,6 +549,8 @@ class UnifiBridge:
             await self.speak_to_visitor(device_id, _ON_MY_WAY_PHRASE)
         elif action_id == KNOCK_TURN_AWAY_ACTION:
             await self.speak_to_visitor(device_id, _TURN_AWAY_PHRASE)
+        elif action_id == KNOCK_COMING_TO_DOOR_ACTION:
+            await self.speak_to_visitor(device_id, _COMING_TO_DOOR_PHRASE)
         else:
             logger.warning(
                 "Unrecognized notification action %r for device %s", action_id, device_id

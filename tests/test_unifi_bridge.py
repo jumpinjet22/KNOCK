@@ -420,6 +420,26 @@ def test_handle_notification_action_speaks_turn_away_phrase(tmp_path) -> None:
     assert "isn't able to accept" in spoken[0][1].lower()
 
 
+def test_handle_notification_action_speaks_coming_to_door_phrase(tmp_path) -> None:
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=MagicMock(),
+    )
+    spoken: list[tuple[str, str]] = []
+
+    async def fake_speak(device_id: str, text: str) -> None:
+        spoken.append((device_id, text))
+
+    bridge.speak_to_visitor = fake_speak  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_notification_action("knock_coming_to_door", "cam1"))
+
+    assert len(spoken) == 1
+    assert spoken[0][0] == "cam1"
+    assert "right at the door" in spoken[0][1].lower()
+
+
 def test_handle_notification_action_ignores_an_unrecognized_action(tmp_path) -> None:
     bridge = UnifiBridge(
         config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
@@ -1001,12 +1021,13 @@ def test_handle_event_notifies_home_assistant_on_a_ride_arrival_without_buttons(
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
 
 
-def test_handle_event_notifies_home_assistant_on_a_service_appointment_without_buttons(
+def test_handle_event_notifies_home_assistant_on_a_service_appointment_with_a_coming_button(
     tmp_path,
 ) -> None:
     # Time-sensitive like ride_arrived (a technician waiting at the door
-    # will leave if no one responds), but nothing for the household to
-    # approve, so no action buttons.
+    # will leave if no one responds), but unlike the plain FYI intents this
+    # carries a single "I'm coming to the door" button -- there's no "turn
+    # them away" decision since the appointment is already expected.
     ha_notifier = MagicMock()
     orchestrator = Orchestrator(
         llm_provider=_SequencedLLMProvider(
@@ -1029,7 +1050,10 @@ def test_handle_event_notifies_home_assistant_on_a_service_appointment_without_b
 
     ha_notifier.notify.assert_called_once()
     assert ha_notifier.notify.call_args.args[0] == "A technician has arrived for the AC repair."
-    assert ha_notifier.notify.call_args.kwargs.get("actions") is None
+    actions = ha_notifier.notify.call_args.kwargs["actions"]
+    assert len(actions) == 1
+    assert actions[0]["title"] == "I'm coming to the door"
+    assert actions[0]["action"] == f"knock_coming_to_door{ACTION_DEVICE_ID_SEP}cam1"
 
 
 def test_handle_event_does_not_notify_home_assistant_for_a_visitation(tmp_path) -> None:

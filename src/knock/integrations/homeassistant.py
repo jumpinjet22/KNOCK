@@ -59,6 +59,12 @@ _IGNORED_STATES = {None, "unknown", "unavailable"}
 # round-trip verbatim.
 KNOCK_ON_MY_WAY_ACTION = "knock_on_my_way"
 KNOCK_TURN_AWAY_ACTION = "knock_turn_away"
+# A single-button acknowledgement (not an accept/reject pair like the two
+# above) -- used for a service_appointment notification, where there's no
+# "turn them away" decision to make (the technician is already expected),
+# just a way to tell a waiting visitor someone's coming without needing
+# the app's live-talk feature for something this simple.
+KNOCK_COMING_TO_DOOR_ACTION = "knock_coming_to_door"
 ACTION_DEVICE_ID_SEP = "::"
 
 
