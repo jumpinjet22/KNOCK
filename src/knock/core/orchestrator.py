@@ -34,11 +34,15 @@ _INTENT_DESCRIPTIONS = {
         "delivery can't be accepted or turn the driver away"
     ),
     "food_delivery": (
-        "a food delivery (pizza, takeout, DoorDash/Grubhub/Uber Eats, etc) "
-        "-- unlike a package, food can't just sit at the door: say you'll "
-        "let the homeowner know right away so they can come get it. Don't "
-        "say to leave it by the door, and don't say deliveries aren't "
-        "accepted or expected"
+        "a food delivery (pizza, takeout, DoorDash/Grubhub/Uber Eats, etc). "
+        "Say something like \"Thanks, I'll let them know right away so "
+        "they can come grab it from you\" -- unlike a package, food can't "
+        "just be left at the door. Keep it that simple and direct; don't "
+        "add conditions like \"when they're ready,\" don't say to leave it "
+        "by the door, don't say deliveries aren't accepted or expected, "
+        "and don't mention letting the driver in or opening the door for "
+        "any reason -- the homeowner comes out to the driver, never the "
+        "other way around"
     ),
     "religious_soliciting": "someone doing religious canvassing or solicitation",
     "political_soliciting": "someone doing political canvassing or collecting signatures/votes",
