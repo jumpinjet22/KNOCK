@@ -395,6 +395,25 @@ from the web UI, the way UniFi Protect's own app already does -- without
 needing a separate app. This bypasses the orchestrator/LLM entirely; it's
 raw two-way audio passthrough, not a conversation KNOCK is phrasing.
 
+Two concrete ways this plugs into what's already built:
+
+- **Reachable from a notification.** The signature-required/food-delivery
+  notifications already carry action buttons ("I'm on my way" / "Turn them
+  away") that embed the camera's device id in the action identifier itself
+  (see `HomeAssistantActionListener`/`ACTION_DEVICE_ID_SEP`). A "Talk now"
+  action is the same mechanism pointed at a live session instead of a
+  canned phrase -- tap the notification, get a live connection to that
+  camera immediately.
+- **KNOCK's main fallback for "I don't know what to do."** Today an intent
+  the LLM can't confidently resolve just gets a canned brush-off ("Sorry, I
+  can't help with that right now"). A much better fallback is KNOCK telling
+  the visitor "Hold on, let me get someone," firing a notification with a
+  "Talk now" action, and handing the actual conversation to a human in real
+  time -- rather than leaving the visitor stuck with a dead-end line. This
+  is probably the strongest argument for building this sooner rather than
+  later: it upgrades every current "I can't help with that" moment into a
+  real human handoff, not just a nicety on top of the AI path.
+
 Technically this is a different problem than the request-response
 talkback already built (`speak_to_visitor`/`_capture_rtsp_audio`): those
 are batch capture-then-respond, not a continuous live stream. Live audio
