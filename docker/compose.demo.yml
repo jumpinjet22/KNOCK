@@ -1,0 +1,94 @@
+# A complete, self-contained KNOCK stack for anyone who wants to try the
+# conversational pipeline without already owning UniFi Protect/Frigate/Home
+# Assistant hardware -- every provider KNOCK talks to (LLM, vision, speech-
+# to-text, text-to-speech) is included here, pulled from public registries.
+# Nothing is built from source and no camera bridge is configured, so this
+# is meant to be explored through the web UI's Debug page: the Conversation
+# Simulator exercises the full policy/intent/LLM pipeline by typing what a
+# visitor might say, and the Vision/LLM/STT/TTS panels talk to the real
+# providers below directly -- no physical doorbell required.
+#
+# Usage:
+#   docker compose -f docker/compose.demo.yml up -d
+#   docker compose -f docker/compose.demo.yml logs -f ollama-pull   # first run only
+#   open http://localhost:8080 and finish the first-run admin setup
+#
+# `ollama-pull` is a one-shot service: it downloads the two models KNOCK
+# uses by default (llama3.2 for text, moondream for vision) the first time
+# the stack comes up, then exits -- `ollama pull` skips a model that's
+# already present in the ollama-data volume, so re-running `up` later does
+# nothing extra. KNOCK itself starts immediately either way; only the
+# LLM/Vision debug panels need that pull to finish first.
+
+name: knock-demo
+
+services:
+  knock:
+    image: ghcr.io/jumpinjet22/knock:0.2.0-alpha
+    restart: unless-stopped
+    ports:
+      - "8080:8000"
+    environment:
+      KNOCK_OLLAMA_HOST: ollama
+      KNOCK_OLLAMA_PORT: "11434"
+      KNOCK_VISION_HOST: ollama
+      KNOCK_VISION_PORT: "11434"
+      KNOCK_VISION_MODEL: moondream
+      KNOCK_WHISPER_HOST: whisper
+      KNOCK_WHISPER_PORT: "10300"
+      KNOCK_KOKORO_HOST: kokoro
+      KNOCK_KOKORO_PORT: "10210"
+    volumes:
+      - knock-data:/root/.local/share/knock
+    depends_on:
+      - ollama
+      - whisper
+      - kokoro
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: "ollama:11434"
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until ollama list >/dev/null 2>&1; do sleep 2; done &&
+       ollama pull llama3.2 &&
+       ollama pull moondream"
+    restart: "no"
+
+  # Wyoming-protocol speech-to-text (https://github.com/rhasspy/wyoming-faster-whisper).
+  # tiny-int8 is the smallest/fastest model -- fine for trying things out;
+  # swap the `command:` model name for better accuracy once this is working.
+  whisper:
+    image: rhasspy/wyoming-whisper:latest
+    restart: unless-stopped
+    command: ["--model", "tiny-int8", "--language", "en"]
+    ports:
+      - "10300:10300"
+    volumes:
+      - whisper-data:/data
+
+  # Wyoming-protocol text-to-speech (https://github.com/nordwestt/kokoro-wyoming).
+  # No voice is set here, so it uses the server's own default -- once this
+  # is running, Settings > Text-to-Speech in the web UI lists every voice
+  # it actually offers to pick from.
+  kokoro:
+    image: ghcr.io/relvacode/kokoro-wyoming:latest
+    restart: unless-stopped
+    ports:
+      - "10210:10210"
+
+volumes:
+  knock-data:
+  ollama-data:
+  whisper-data:
