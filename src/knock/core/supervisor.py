@@ -57,6 +57,8 @@ _CONFIG_CLASSES: dict[BridgeName, Any] = {
     "unifi": UnifiConfig,
 }
 
+_AUTOSTART_SECTION = "supervisor_autostart"
+
 _MAX_LOG_LINES = 500
 _BACKOFF_BASE_SECONDS = 2.0
 _BACKOFF_MAX_SECONDS = 60.0
@@ -128,6 +130,7 @@ class BridgeInfo:
     status: BridgeStatus
     restart_count: int
     pid: int | None
+    autostart: bool
 
 
 class BridgeSupervisor:
@@ -163,10 +166,33 @@ class BridgeSupervisor:
         with self._lock:
             rt = self._bridges[name]
             pid = rt.process.pid if rt.process is not None else None
-            return BridgeInfo(name=name, status=rt.status, restart_count=rt.restart_count, pid=pid)
+            return BridgeInfo(
+                name=name,
+                status=rt.status,
+                restart_count=rt.restart_count,
+                pid=pid,
+                autostart=self.get_autostart(name),
+            )
 
     def describe_all(self) -> list[BridgeInfo]:
         return [self.describe(name) for name in self._bridges]
+
+    def get_autostart(self, name: BridgeName) -> bool:
+        return bool(self.store.get_section(_AUTOSTART_SECTION).get(name, False))
+
+    def set_autostart(self, name: BridgeName, enabled: bool) -> None:
+        self.store.update_section(_AUTOSTART_SECTION, {name: enabled})
+
+    def start_autostart_enabled(self) -> None:
+        """Start whichever bridges are marked autostart -- meant to be
+        called once, right after the supervisor is constructed at API
+        startup, so a redeployed/recreated container comes back up with the
+        same bridges running instead of requiring a manual Start click on
+        every single restart.
+        """
+        for name in self._bridges:
+            if self.get_autostart(name):
+                self.start(name)
 
     def tail(self, name: BridgeName, after: int = 0) -> tuple[list[str], int]:
         with self._lock:

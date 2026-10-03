@@ -36,6 +36,7 @@ class BridgeState(BaseModel):
     status: str
     restart_count: int
     pid: int | None = None
+    autostart: bool = False
 
 
 class BridgeLogsResponse(BaseModel):
@@ -43,10 +44,18 @@ class BridgeLogsResponse(BaseModel):
     next_after: int
 
 
+class AutostartRequest(BaseModel):
+    enabled: bool
+
+
 def _state(supervisor: BridgeSupervisor, name: BridgeName) -> BridgeState:
     info = supervisor.describe(name)
     return BridgeState(
-        name=info.name, status=info.status, restart_count=info.restart_count, pid=info.pid
+        name=info.name,
+        status=info.status,
+        restart_count=info.restart_count,
+        pid=info.pid,
+        autostart=info.autostart,
     )
 
 
@@ -89,6 +98,19 @@ def restart_bridge(
 ) -> BridgeState:
     bridge_name = _require_bridge(name)
     supervisor.restart(bridge_name)
+    return _state(supervisor, bridge_name)
+
+
+@router.put("/{name}/autostart", response_model=BridgeState)
+def set_bridge_autostart(
+    name: str,
+    body: AutostartRequest,
+    current_user: CurrentUserDep,
+    *,
+    supervisor: BridgeSupervisorDep,
+) -> BridgeState:
+    bridge_name = _require_bridge(name)
+    supervisor.set_autostart(bridge_name, body.enabled)
     return _state(supervisor, bridge_name)
 
 

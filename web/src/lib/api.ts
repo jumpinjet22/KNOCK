@@ -177,6 +177,7 @@ export interface BridgeState {
   status: "stopped" | "starting" | "running" | "crashed"
   restart_count: number
   pid: number | null
+  autostart: boolean
 }
 
 export interface BridgeLogsResponse {
@@ -198,6 +199,11 @@ export const supervisorApi = {
   stop: (name: string) => apiFetch<BridgeState>(`/api/supervisor/${name}/stop`, { method: "POST" }),
   restart: (name: string) =>
     apiFetch<BridgeState>(`/api/supervisor/${name}/restart`, { method: "POST" }),
+  setAutostart: (name: string, enabled: boolean) =>
+    apiFetch<BridgeState>(`/api/supervisor/${name}/autostart`, {
+      method: "PUT",
+      body: { enabled },
+    }),
   logs: (name: string, after = 0) =>
     apiFetch<BridgeLogsResponse>(`/api/supervisor/${name}/logs?after=${after}`),
 }

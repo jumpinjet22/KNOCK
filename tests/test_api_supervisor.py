@@ -63,6 +63,14 @@ def _post(client: TestClient, url: str):
     return client.post(url, headers=headers)
 
 
+def _put(client: TestClient, url: str, json: dict):
+    headers = {}
+    token = client.cookies.get("csrftoken")
+    if token:
+        headers["x-csrftoken"] = token
+    return client.put(url, json=json, headers=headers)
+
+
 def _login(client: TestClient) -> None:
     headers = {}
     token = client.cookies.get("csrftoken")
@@ -99,6 +107,7 @@ def test_list_bridges_returns_all_four_stopped_initially(client) -> None:
     body = resp.json()
     assert {item["name"] for item in body} == {"mqtt", "frigate", "homeassistant", "unifi"}
     assert all(item["status"] == "stopped" for item in body)
+    assert all(item["autostart"] is False for item in body)
 
 
 def test_unknown_bridge_name_is_404(client) -> None:
@@ -135,6 +144,31 @@ def test_restart_bridge_changes_pid(client, supervisor) -> None:
     assert resp.status_code == 200
     assert _wait_until(lambda: supervisor.describe("mqtt").status == "running")
     assert supervisor.describe("mqtt").pid != pid_before
+
+
+# -- autostart --------------------------------------------------------------------
+
+
+def test_set_autostart_requires_authentication(client) -> None:
+    resp = client.put("/api/supervisor/mqtt/autostart", json={"enabled": True})
+    assert resp.status_code == 401
+
+
+def test_set_autostart_updates_and_persists(client, supervisor) -> None:
+    _login(client)
+    resp = _put(client, "/api/supervisor/mqtt/autostart", {"enabled": True})
+    assert resp.status_code == 200
+    assert resp.json()["autostart"] is True
+    assert supervisor.get_autostart("mqtt") is True
+
+    resp = client.get("/api/supervisor/mqtt")
+    assert resp.json()["autostart"] is True
+
+
+def test_set_autostart_on_an_unknown_bridge_is_404(client) -> None:
+    _login(client)
+    resp = _put(client, "/api/supervisor/not-a-bridge/autostart", {"enabled": True})
+    assert resp.status_code == 404
 
 
 # -- logs -----------------------------------------------------------------------------

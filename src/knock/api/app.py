@@ -59,6 +59,10 @@ def _get_or_create_secret(env_var: str, filename: str) -> str:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Bring back whichever bridges are marked autostart -- a redeployed
+    # container otherwise comes up with every bridge stopped until someone
+    # manually starts each one again from the Processes page.
+    get_bridge_supervisor().start_autostart_enabled()
     yield
     # Terminate every bridge subprocess on API shutdown -- paired with the
     # Dockerfile's `tini` entrypoint, since without an init process as PID 1,

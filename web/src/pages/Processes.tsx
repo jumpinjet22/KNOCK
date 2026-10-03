@@ -55,7 +55,16 @@ export function Processes() {
       )}
 
       <div className="mt-6 space-y-3">
-        {(bridges ?? BRIDGE_ORDER.map((name) => ({ name, status: "stopped" as const, restart_count: 0, pid: null }))).map(
+        {(
+          bridges ??
+          BRIDGE_ORDER.map((name) => ({
+            name,
+            status: "stopped" as const,
+            restart_count: 0,
+            pid: null,
+            autostart: false,
+          }))
+        ).map(
           (bridge) => (
             <BridgeCard
               key={bridge.name}
@@ -88,6 +97,7 @@ function BridgeCard({
   onError: (message: string) => void
 }) {
   const [busy, setBusy] = useState(false)
+  const [autostartBusy, setAutostartBusy] = useState(false)
 
   async function run(action: "start" | "stop" | "restart") {
     setBusy(true)
@@ -98,6 +108,18 @@ function BridgeCard({
       onError(errorMessage(err))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function toggleAutostart(enabled: boolean) {
+    setAutostartBusy(true)
+    try {
+      await supervisorApi.setAutostart(bridge.name, enabled)
+      onChanged()
+    } catch (err) {
+      onError(errorMessage(err))
+    } finally {
+      setAutostartBusy(false)
     }
   }
 
@@ -121,6 +143,16 @@ function BridgeCard({
             {bridge.pid !== null ? `pid ${bridge.pid}` : "not running"}
             {bridge.restart_count > 0 && ` · ${bridge.restart_count} restart(s)`}
           </p>
+          <label className="mt-2 flex items-center gap-1.5 text-xs text-steel">
+            <input
+              type="checkbox"
+              checked={bridge.autostart}
+              disabled={autostartBusy}
+              onChange={(e) => void toggleAutostart(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-steel/40 accent-porch"
+            />
+            Start automatically
+          </label>
         </div>
         <div className="flex items-center gap-2">
           <button

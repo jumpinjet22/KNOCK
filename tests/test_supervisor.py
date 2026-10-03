@@ -204,3 +204,58 @@ def test_mqtt_config_from_sources_is_used_by_build_bridge_env(tmp_path) -> None:
     resolved = MqttConfig.from_sources(store)
     env = build_bridge_env("mqtt", store)
     assert env["KNOCK_MQTT_HOST"] == resolved.host
+
+
+# -- autostart --------------------------------------------------------------------
+
+
+def test_autostart_defaults_to_false(tmp_path) -> None:
+    supervisor = BridgeSupervisor(
+        ConfigStore(tmp_path / "config.json"), commands={"mqtt": _sleepy_command()}
+    )
+    assert supervisor.get_autostart("mqtt") is False
+    assert supervisor.describe("mqtt").autostart is False
+
+
+def test_set_autostart_persists_across_supervisor_instances(tmp_path) -> None:
+    store_path = tmp_path / "config.json"
+    first = BridgeSupervisor(ConfigStore(store_path), commands={"mqtt": _sleepy_command()})
+    first.set_autostart("mqtt", True)
+
+    second = BridgeSupervisor(ConfigStore(store_path), commands={"mqtt": _sleepy_command()})
+    assert second.get_autostart("mqtt") is True
+    assert second.describe("mqtt").autostart is True
+
+
+def test_set_autostart_only_affects_the_named_bridge(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    supervisor = BridgeSupervisor(
+        store, commands={"mqtt": _sleepy_command(), "unifi": _sleepy_command()}
+    )
+    supervisor.set_autostart("mqtt", True)
+
+    assert supervisor.get_autostart("mqtt") is True
+    assert supervisor.get_autostart("unifi") is False
+
+
+def test_start_autostart_enabled_starts_only_flagged_bridges(tmp_path) -> None:
+    supervisor = BridgeSupervisor(
+        ConfigStore(tmp_path / "config.json"),
+        commands={"mqtt": _sleepy_command(), "unifi": _sleepy_command()},
+    )
+    supervisor.set_autostart("mqtt", True)
+
+    supervisor.start_autostart_enabled()
+
+    assert _wait_until(lambda: supervisor.describe("mqtt").status == "running")
+    assert supervisor.describe("unifi").status == "stopped"
+    supervisor.shutdown_all()
+
+
+def test_start_autostart_enabled_is_a_no_op_when_nothing_is_flagged(tmp_path) -> None:
+    supervisor = BridgeSupervisor(
+        ConfigStore(tmp_path / "config.json"), commands={"mqtt": _sleepy_command()}
+    )
+    supervisor.start_autostart_enabled()
+    time.sleep(0.1)
+    assert supervisor.describe("mqtt").status == "stopped"
