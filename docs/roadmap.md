@@ -397,14 +397,13 @@ mature community-run local protocol (`eufy-security-ws`).
 See Phase 7's notes -- the short wake window also conflicts with KNOCK's
 multi-turn conversation design, independent of which battery brand is used.
 
-### Per-camera trigger selection
+### Per-camera trigger selection ✅ Done
 
-Today a smart-detect trigger (e.g. "person") fires from any camera on the
-console that reports it, not just the doorbell. A real setup usually has
-several cameras (driveway, backyard, side yard, etc.) that shouldn't start
-a conversation every time they detect motion. Needs a camera picker in
-Settings so smart alerts can be scoped to specific camera(s) instead of
-the whole console.
+`UnifiConfig.trigger_camera_ids` scopes which camera(s) actually start a
+conversation -- empty (the default) means every camera on the console,
+matching the original behavior. Settings > UniFi Protect renders a real
+camera picker (checkboxes with each camera's actual name, pulled live from
+the console) rather than a raw device-id text field.
 
 ---
 

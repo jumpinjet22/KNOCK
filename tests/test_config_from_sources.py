@@ -216,3 +216,23 @@ def test_unifi_from_sources_falls_back_to_default_when_unset(tmp_path) -> None:
     config = UnifiConfig.from_sources(_store(tmp_path))
     assert config.rtsp_quality == "high"
     assert config.trigger_on == ["ring"]
+    assert config.trigger_camera_ids == []
+
+
+def test_unifi_from_sources_uses_stored_trigger_camera_ids(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.set_section("unifi", {"trigger_camera_ids": ["doorbell-cam"]})
+
+    config = UnifiConfig.from_sources(store)
+
+    assert config.trigger_camera_ids == ["doorbell-cam"]
+
+
+def test_unifi_from_sources_env_var_wins_for_trigger_camera_ids(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    store.set_section("unifi", {"trigger_camera_ids": ["stored-cam"]})
+    monkeypatch.setenv("KNOCK_UNIFI_TRIGGER_CAMERA_IDS", "env-cam")
+
+    config = UnifiConfig.from_sources(store)
+
+    assert config.trigger_camera_ids == ["env-cam"]

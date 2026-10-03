@@ -325,6 +325,12 @@ class UnifiConfig(BaseModel):
     api_key: SecretStr = SecretStr("")
     verify_ssl: bool = False
     trigger_on: list[str] = Field(default_factory=lambda: ["ring"])
+    # Which camera(s) a matching trigger_on event actually reacts to.
+    # Empty (the default) means every camera on the console -- a smart-
+    # detect trigger like "person" otherwise fires from *any* camera that
+    # reports it, not just the doorbell, which starts a full conversation
+    # every time a driveway or backyard camera sees someone walk by.
+    trigger_camera_ids: list[str] = Field(default_factory=list)
     rtsp_quality: str = "high"
     listen_seconds: float = 10.0
     # A physical doorbell chime takes a couple of seconds to finish playing
@@ -362,6 +368,12 @@ class UnifiConfig(BaseModel):
             if trigger_on_raw is not None
             else ["ring"]
         )
+        trigger_camera_ids_raw = os.environ.get("KNOCK_UNIFI_TRIGGER_CAMERA_IDS")
+        trigger_camera_ids = (
+            [item.strip() for item in trigger_camera_ids_raw.split(",") if item.strip()]
+            if trigger_camera_ids_raw is not None
+            else []
+        )
         verify_ssl_raw = os.environ.get("KNOCK_UNIFI_VERIFY_SSL", "false").strip().lower()
 
         return cls(
@@ -370,6 +382,7 @@ class UnifiConfig(BaseModel):
             api_key=os.environ.get("KNOCK_UNIFI_API_KEY", ""),
             verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
             trigger_on=trigger_on,
+            trigger_camera_ids=trigger_camera_ids,
             rtsp_quality=os.environ.get("KNOCK_UNIFI_RTSP_QUALITY", "high"),
             listen_seconds=float(os.environ.get("KNOCK_UNIFI_LISTEN_SECONDS", "10.0")),
             ring_chime_delay_seconds=float(
@@ -387,6 +400,7 @@ class UnifiConfig(BaseModel):
     def from_sources(cls, store: ConfigStore) -> UnifiConfig:
         s = store.get_section("unifi")
         trigger_on_env = _csv(os.environ.get("KNOCK_UNIFI_TRIGGER_ON"))
+        trigger_camera_ids_env = _csv(os.environ.get("KNOCK_UNIFI_TRIGGER_CAMERA_IDS"))
 
         return cls(
             host=_resolve("KNOCK_UNIFI_HOST", s, "host", "127.0.0.1"),
@@ -395,6 +409,11 @@ class UnifiConfig(BaseModel):
             verify_ssl=_resolve("KNOCK_UNIFI_VERIFY_SSL", s, "verify_ssl", False, _bool),
             trigger_on=(
                 trigger_on_env if trigger_on_env is not None else s.get("trigger_on", ["ring"])
+            ),
+            trigger_camera_ids=(
+                trigger_camera_ids_env
+                if trigger_camera_ids_env is not None
+                else s.get("trigger_camera_ids", [])
             ),
             rtsp_quality=_resolve("KNOCK_UNIFI_RTSP_QUALITY", s, "rtsp_quality", "high"),
             listen_seconds=_resolve("KNOCK_UNIFI_LISTEN_SECONDS", s, "listen_seconds", 10.0, float),

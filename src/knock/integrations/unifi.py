@@ -249,6 +249,9 @@ class UnifiBridge:
     # -- pure logic: directly testable without a real console -----------------
 
     def should_trigger(self, event: _ProtectEventLike) -> bool:
+        if self.config.trigger_camera_ids and event.device_id not in self.config.trigger_camera_ids:
+            return False
+
         event_type = str(event.type)
         if event_type in self.config.trigger_on:
             return True

@@ -100,6 +100,33 @@ def test_should_trigger_ignores_unmatched_smart_detect_type(tmp_path) -> None:
     assert bridge.should_trigger(event) is False
 
 
+def test_should_trigger_with_no_camera_restriction_allows_any_camera(tmp_path) -> None:
+    # The default (empty trigger_camera_ids) -- every camera on the console
+    # can trigger, matching behavior before this setting existed.
+    bridge = _bridge(tmp_path)
+    assert bridge.should_trigger(_event(event_type="ring", device_id="any-camera")) is True
+
+
+def test_should_trigger_ignores_a_camera_not_in_the_allow_list(tmp_path) -> None:
+    bridge = _bridge(tmp_path, trigger_camera_ids=["doorbell-cam"])
+    event = _event(event_type="ring", device_id="driveway-cam")
+    assert bridge.should_trigger(event) is False
+
+
+def test_should_trigger_allows_a_camera_in_the_allow_list(tmp_path) -> None:
+    bridge = _bridge(tmp_path, trigger_camera_ids=["doorbell-cam", "side-door-cam"])
+    event = _event(event_type="ring", device_id="side-door-cam")
+    assert bridge.should_trigger(event) is True
+
+
+def test_should_trigger_camera_restriction_applies_to_smart_detect_too(tmp_path) -> None:
+    bridge = _bridge(tmp_path, trigger_on=["ring", "person"], trigger_camera_ids=["doorbell-cam"])
+    event = _event(
+        event_type="smartDetectZone", device_id="driveway-cam", smart_detect_types=("person",)
+    )
+    assert bridge.should_trigger(event) is False
+
+
 # -- build_event --------------------------------------------------------------
 
 
@@ -217,12 +244,14 @@ def test_unifi_config_defaults() -> None:
     assert config.port == 443
     assert config.verify_ssl is False
     assert config.trigger_on == ["ring"]
+    assert config.trigger_camera_ids == []
 
 
 def test_unifi_config_from_env(monkeypatch) -> None:
     monkeypatch.setenv("KNOCK_UNIFI_HOST", "protect.local")
     monkeypatch.setenv("KNOCK_UNIFI_API_KEY", "abc123")
     monkeypatch.setenv("KNOCK_UNIFI_TRIGGER_ON", "ring, person")
+    monkeypatch.setenv("KNOCK_UNIFI_TRIGGER_CAMERA_IDS", "doorbell-cam, side-door-cam")
     monkeypatch.setenv("KNOCK_UNIFI_VERIFY_SSL", "true")
 
     config = UnifiConfig.from_env()
@@ -230,6 +259,7 @@ def test_unifi_config_from_env(monkeypatch) -> None:
     assert config.host == "protect.local"
     assert config.api_key.get_secret_value() == "abc123"
     assert config.trigger_on == ["ring", "person"]
+    assert config.trigger_camera_ids == ["doorbell-cam", "side-door-cam"]
     assert config.verify_ssl is True
 
 

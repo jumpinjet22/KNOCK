@@ -7,9 +7,11 @@ import {
   oauthApi,
   SETTINGS_SECTIONS,
   settingsApi,
+  videoApi,
   webauthnApi,
   type PasskeyInfo,
   type SectionSettings,
+  type UnifiCameraInfo,
 } from "../lib/api"
 
 const ACRONYMS = new Set(["api", "url", "ssl", "mqtt", "id", "http", "rtsp"])
@@ -100,6 +102,7 @@ function SettingsSectionForm({ section }: { section: string }) {
   const [settings, setSettings] = useState<SectionSettings | null>(null)
   const [values, setValues] = useState<Record<string, unknown>>({})
   const [voiceOptions, setVoiceOptions] = useState<string[] | undefined>(undefined)
+  const [cameraOptions, setCameraOptions] = useState<UnifiCameraInfo[] | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -133,6 +136,14 @@ function SettingsSectionForm({ section }: { section: string }) {
       .kokoroVoices()
       .then((result) => setVoiceOptions(result.error ? undefined : result.voices))
       .catch(() => setVoiceOptions(undefined))
+  }, [section])
+
+  useEffect(() => {
+    if (section !== "unifi") return
+    videoApi
+      .unifiCameras()
+      .then(setCameraOptions)
+      .catch(() => setCameraOptions(undefined))
   }, [section])
 
   async function handleSubmit(event: React.FormEvent) {
@@ -213,6 +224,7 @@ function SettingsSectionForm({ section }: { section: string }) {
               value={values[field.name]}
               onChange={(value) => setValues((prev) => ({ ...prev, [field.name]: value }))}
               voiceOptions={field.name === "voice" ? voiceOptions : undefined}
+              cameraOptions={field.name === "trigger_camera_ids" ? cameraOptions : undefined}
             />
             {field.shadowed_by_env && (
               <p className="mt-1 text-xs text-steel">
