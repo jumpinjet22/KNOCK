@@ -33,8 +33,21 @@ from knock.core.orchestrator import (
 )
 
 DEFAULT_TRAINING_REVIEWS_ENV_VAR = "KNOCK_TRAINING_REVIEWS"
+TRAINING_MODE_ENV_VAR = "KNOCK_TRAINING_MODE"
 
 ReviewStatus = Literal["pending", "approved", "rejected"]
+
+
+def training_mode_enabled() -> bool:
+    """Whether this deployment should collapse the web UI to just the
+    Training page (`web/src/lib/uiMode.tsx`) and skip login entirely
+    (`require_auth` in `knock.api.auth_routes`) -- a single-purpose local
+    deployment, e.g. a scratch machine only ever used to review synthetic
+    training data. Set via `KNOCK_TRAINING_MODE=1` in the environment.
+    """
+    truthy = {"1", "true", "yes", "on"}
+    return os.environ.get(TRAINING_MODE_ENV_VAR, "").strip().lower() in truthy
+
 
 # The classification prompt only ever offers these labels (plus
 # "unknown") as valid choices -- see `_classification_prompt`. Used to

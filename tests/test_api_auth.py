@@ -143,3 +143,29 @@ def test_existing_respond_endpoint_still_requires_no_auth(client) -> None:
         },
     )
     assert resp.status_code == 200
+
+
+# -- KNOCK_TRAINING_MODE bypasses login entirely ---------------------------
+
+
+def test_me_requires_no_authentication_in_training_mode(client, monkeypatch) -> None:
+    monkeypatch.setenv("KNOCK_TRAINING_MODE", "1")
+
+    resp = client.get("/api/auth/me")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"username": "training-mode"}
+
+
+def test_a_real_session_cookie_is_not_required_in_training_mode(client, monkeypatch) -> None:
+    monkeypatch.setenv("KNOCK_TRAINING_MODE", "1")
+    client.cookies.clear()
+
+    resp = client.get("/api/auth/me")
+
+    assert resp.status_code == 200
+
+
+def test_training_mode_does_not_affect_normal_auth_when_unset(client) -> None:
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 401

@@ -20,7 +20,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { state, logout } = useAuth()
   const { trainingOnly } = useUIMode()
   const navigate = useNavigate()
-  const username = state.status === "logged_in" ? state.username : null
+  // Training mode skips login entirely (see require_auth in
+  // knock.api.auth_routes) -- no real session to sign out of, so hide the
+  // username/sign-out UI rather than show a button that leads to a
+  // confusing dead-end login form.
+  const username = state.status === "logged_in" && !trainingOnly ? state.username : null
   const [menuOpen, setMenuOpen] = useState(false)
   const navLinks = trainingOnly ? TRAINING_ONLY_NAV_LINKS : FULL_NAV_LINKS
 

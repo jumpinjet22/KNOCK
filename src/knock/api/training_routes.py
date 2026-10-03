@@ -8,7 +8,6 @@ itself does -- this can contain raw visitor speech.
 
 from __future__ import annotations
 
-import os
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,6 +23,7 @@ from knock.core.training import (
     TrainingReviewStore,
     example_key,
     export_training_jsonl,
+    training_mode_enabled,
 )
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -65,14 +65,18 @@ def get_ui_mode() -> UIMode:
     Deliberately unauthenticated (fetched before login to decide nav/
     routing, same timing as `/api/auth/status`) and reveals nothing
     sensitive -- just a UI-shape flag for a single-purpose local
-    deployment (e.g. a scratch machine only ever used to review
-    synthetic training data), set via `KNOCK_TRAINING_MODE=1` in the
-    environment. Not a security boundary: every other route still
-    requires the same login as always, this only changes what the web
-    UI shows/links to.
+    deployment (e.g. a scratch machine only ever used to review synthetic
+    training data), set via `KNOCK_TRAINING_MODE=1` in the environment.
+
+    This *is* a security-relevant flag, unlike the name of this one field
+    alone suggests: `require_auth` (`knock.api.auth_routes`) skips login
+    entirely under the same env var, since a single-user local scratch
+    box doesn't need a login screen standing between it and the one
+    person who can already reach it. Anyone who can reach this port with
+    `KNOCK_TRAINING_MODE=1` set can use the whole app, including triggering
+    the script runner below -- don't set this on anything network-exposed.
     """
-    truthy = {"1", "true", "yes", "on"}
-    return UIMode(training_only=os.environ.get("KNOCK_TRAINING_MODE", "").strip().lower() in truthy)
+    return UIMode(training_only=training_mode_enabled())
 
 
 class IntentOptions(BaseModel):

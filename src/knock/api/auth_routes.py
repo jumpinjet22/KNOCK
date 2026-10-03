@@ -14,10 +14,12 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from knock.core.auth import SESSION_COOKIE_NAME, SESSION_LIFETIME, AuthStore, WebSessionStore
+from knock.core.training import training_mode_enabled
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 MIN_PASSWORD_LENGTH = 8
+TRAINING_MODE_USERNAME = "training-mode"
 
 
 def get_auth_store() -> AuthStore:
@@ -42,7 +44,17 @@ def require_auth(
     Returns the logged-in username on success; raises 401 otherwise. A
     missing/expired/unknown token are all the same 401 to the caller --
     the distinction only matters server-side (see `WebSessionStore.get`).
+
+    Skipped entirely under `KNOCK_TRAINING_MODE=1`: that flag is meant for
+    a single-purpose local scratch machine (see `knock.core.training`'s
+    own docstring), where a login screen standing between the one person
+    who can already reach the machine and the app is pure friction, not a
+    real security boundary. This is a genuine, deliberate removal of
+    authentication for every route gated behind `CurrentUserDep` -- never
+    set this env var on anything network-exposed.
     """
+    if training_mode_enabled():
+        return TRAINING_MODE_USERNAME
     if knock_session is None:
         raise HTTPException(status_code=401, detail="not authenticated")
     session = session_store.get(knock_session)
