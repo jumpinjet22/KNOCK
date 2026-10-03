@@ -292,6 +292,28 @@ def test_notifier_calls_the_configured_service_with_a_bearer_token() -> None:
     }
 
 
+@respx.mock
+def test_notifier_includes_action_buttons_when_given() -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.notify(
+        "A delivery needs a signature.",
+        actions=[
+            {"action": "knock_on_my_way", "title": "I'm on my way"},
+            {"action": "knock_turn_away", "title": "Turn them away"},
+        ],
+    )
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["data"]["actions"] == [
+        {"action": "knock_on_my_way", "title": "I'm on my way"},
+        {"action": "knock_turn_away", "title": "Turn them away"},
+    ]
+
+
 def test_notifier_is_a_no_op_without_a_configured_service() -> None:
     notifier = HomeAssistantNotifier(_notifier_config(notify_service=None))
     notifier.notify("should not be sent anywhere")  # should not raise

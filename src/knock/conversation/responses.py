@@ -1,8 +1,6 @@
 RESPONSES = {
     "delivery": "Thanks. You can leave the package by the door.",
-    "delivery_signature_required": (
-        "Thanks for letting us know. I'll let the homeowner know they'll need to come sign for it."
-    ),
+    "delivery_signature_required": "Okay, I'll let the homeowner know. Give me a sec.",
     "emergency": "If this is an emergency, call local emergency services now.",
     "religious_soliciting": "Thanks, but we're not interested in religious materials today.",
     "political_soliciting": (

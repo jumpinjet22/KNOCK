@@ -257,6 +257,20 @@ class UnifiBridge:
             return SessionState(session_id=session_id, updated_at=timestamp)
         return existing
 
+    async def _notify_household(
+        self, device_id: str, message: str, *, actions: list[dict[str, str]] | None = None
+    ) -> None:
+        """Best-effort, off the event loop (the HTTP call itself is
+        synchronous) -- a down or unconfigured Home Assistant never affects
+        the rest of the response.
+        """
+        if self.ha_notifier is None:
+            return
+        try:
+            await asyncio.to_thread(self.ha_notifier.notify, message, actions=actions)
+        except Exception as exc:  # noqa: BLE001 - notification is best-effort
+            logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
+
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if not self.should_trigger(event):
             return None
@@ -315,19 +329,30 @@ class UnifiBridge:
             )
             self.session_store.save(state)
 
-            if decision.intent == "delivery_signature_required" and self.ha_notifier is not None:
-                try:
-                    await asyncio.to_thread(
-                        self.ha_notifier.notify,
-                        f"A delivery at the door needs a signature (camera: {event.device_id}).",
-                    )
-                except Exception as exc:  # noqa: BLE001 - notification is best-effort
-                    logger.warning(
-                        "Home Assistant notify failed for device %s: %s", event.device_id, exc
-                    )
+            # An emergency alert goes out immediately -- ahead of speaking,
+            # since TTS synthesis/streaming takes real seconds an urgent
+            # notification shouldn't wait on. A signature-required delivery
+            # isn't urgent the same way: speak the "give me a sec"
+            # acknowledgement first, *then* actually go notify, matching
+            # what was just said out loud.
+            if decision.escalate:
+                await self._notify_household(
+                    event.device_id,
+                    f'Possible emergency at the door: "{visitor_event.text}"',
+                )
 
             if self.tts_provider is not None:
                 await self.speak_to_visitor(event.device_id, decision.text)
+
+            if decision.intent == "delivery_signature_required":
+                await self._notify_household(
+                    event.device_id,
+                    f"A delivery at the door needs a signature (camera: {event.device_id}).",
+                    actions=[
+                        {"action": "knock_on_my_way", "title": "I'm on my way"},
+                        {"action": "knock_turn_away", "title": "Turn them away"},
+                    ],
+                )
 
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
             if decision.escalate or not can_converse or is_last_possible_turn:

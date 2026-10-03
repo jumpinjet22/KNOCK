@@ -74,16 +74,26 @@ class HomeAssistantNotifier:
             headers={"Authorization": f"Bearer {config.token.get_secret_value()}"},
         )
 
-    def notify(self, message: str) -> None:
+    def notify(self, message: str, *, actions: list[dict[str, str]] | None = None) -> None:
         """No-op if `notify_service` isn't configured -- callers don't need
         to check that themselves before calling this.
+
+        `actions` adds interactive buttons to the notification (the Home
+        Assistant mobile app's own notification-actions feature -- each is
+        `{"action": "<identifier>", "title": "<button label>"}`). KNOCK only
+        *sends* them here; reacting to which one was tapped is a Home
+        Assistant automation on the `mobile_app_notification_action` event,
+        not something this call waits for or knows about.
         """
         if not self.config.notify_service:
             return
         domain, _, name = self.config.notify_service.partition(".")
+        payload: dict[str, Any] = {"message": message}
+        if actions:
+            payload["data"] = {"actions": actions}
         response = self._http_client.post(
             f"{self.config.base_url}/api/services/{domain}/{name}",
-            json={"message": message},
+            json=payload,
         )
         response.raise_for_status()
 

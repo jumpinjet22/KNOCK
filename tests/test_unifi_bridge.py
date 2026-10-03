@@ -644,7 +644,7 @@ def test_handle_event_continues_the_conversation_while_the_visitor_keeps_talking
     responses = [text for text in tts_text_log if text not in (GREETING, _THINKING_PHRASE)]
     assert len(responses) == 2
     assert "leave the package" in responses[0].lower()
-    assert "sign" in responses[1].lower()
+    assert "homeowner" in responses[1].lower()
 
     final_state = bridge.session_store.load("unifi-cam1")
     assert final_state is not None
@@ -702,6 +702,29 @@ def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
 
     ha_notifier.notify.assert_called_once()
     assert "signature" in ha_notifier.notify.call_args.args[0].lower()
+    actions = ha_notifier.notify.call_args.kwargs["actions"]
+    titles = {action["title"] for action in actions}
+    assert titles == {"I'm on my way", "Turn them away"}
+
+
+def test_handle_event_notifies_home_assistant_on_an_emergency(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["there's a fire, help!"],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    assert decision.escalate is True
+    ha_notifier.notify.assert_called_once()
+    message = ha_notifier.notify.call_args.args[0]
+    assert "emergency" in message.lower()
+    # An emergency alert isn't something to "approve" -- no action buttons.
+    assert ha_notifier.notify.call_args.kwargs.get("actions") is None
 
 
 def test_handle_event_does_not_notify_home_assistant_for_a_plain_delivery(tmp_path) -> None:

@@ -39,7 +39,7 @@ def test_response_decision_carries_the_classified_intent() -> None:
 
 def test_delivery_signature_required_intent() -> None:
     decision = Orchestrator().respond(_event("I have a package that needs a signature"))
-    assert "sign" in decision.text.lower()
+    assert "homeowner" in decision.text.lower()
     assert "leave the package" not in decision.text.lower()
     assert decision.escalate is False
 
