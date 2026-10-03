@@ -228,6 +228,8 @@ export const videoApi = {
 export interface AuditEntry {
   timestamp: string
   text: string
+  response_text: string
+  session_id: string | null
   matched_flags: Record<string, number>
   matched_rule_ids: string[]
   allowed: boolean

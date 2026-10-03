@@ -79,8 +79,17 @@ function AuditTab() {
           key={index}
           className="rounded-lg border border-steel/20 bg-paper px-4 py-3 dark:bg-dusk"
         >
-          <div className="flex items-center justify-between gap-4">
-            <p className="text-sm text-ink dark:text-mist">{entry.text}</p>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 space-y-1">
+              <p className="text-sm text-ink dark:text-mist">
+                <span className="font-medium text-steel">Visitor:</span> {entry.text}
+              </p>
+              {entry.response_text && (
+                <p className="text-sm text-ink dark:text-mist">
+                  <span className="font-medium text-steel">KNOCK:</span> {entry.response_text}
+                </p>
+              )}
+            </div>
             <span className="shrink-0 text-xs text-steel">
               {formatTimestamp(entry.timestamp)}
             </span>
@@ -88,6 +97,11 @@ function AuditTab() {
           <div className="mt-2 flex flex-wrap gap-2 text-xs">
             <Badge label={entry.reason} tone={entry.allowed ? "neutral" : "warning"} />
             {entry.intent && <Badge label={entry.intent} tone="neutral" />}
+            {entry.session_id && (
+              <span className="rounded-full bg-steel/15 px-2 py-0.5 font-mono text-[10px] text-steel">
+                {entry.session_id}
+              </span>
+            )}
             {entry.matched_rule_ids.map((id) => (
               <Badge key={id} label={id} tone="warning" />
             ))}

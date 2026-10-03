@@ -12,10 +12,19 @@ DEFAULT_AUDIT_LOG_ENV_VAR = "KNOCK_AUDIT_LOG"
 
 
 class AuditEntry(BaseModel):
-    """One record of a policy/response decision, for the local audit trail."""
+    """One record of a policy/response decision, for the local audit trail.
+
+    `text` and `response_text` together are a full transcript line -- what
+    the visitor said and what KNOCK actually said back for that same turn.
+    `response_text` defaults to "" so an older audit log written before
+    this field existed still parses (`model_validate_json` on a JSON line
+    missing the key just gets the default, not a validation error).
+    """
 
     timestamp: datetime
     text: str
+    response_text: str = ""
+    session_id: str | None = None
     matched_flags: dict[str, float] = {}
     matched_rule_ids: list[str] = []
     allowed: bool

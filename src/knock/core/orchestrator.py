@@ -291,6 +291,8 @@ class Orchestrator:
             AuditEntry(
                 timestamp=event.timestamp,
                 text=event.text,
+                response_text=response.text,
+                session_id=state.session_id if state is not None else None,
                 matched_flags=decision.confidence,
                 matched_rule_ids=decision.matched_rule_ids,
                 allowed=decision.allowed,

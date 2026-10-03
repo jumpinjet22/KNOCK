@@ -212,6 +212,32 @@ def test_respond_records_an_audit_entry() -> None:
     assert entry.intent == "delivery"
 
 
+def test_respond_records_the_response_text_in_the_audit_entry() -> None:
+    # The actual ask: a full transcript line needs both sides -- what the
+    # visitor said (already recorded) and what KNOCK actually said back.
+    audit_log = _FakeAuditLog()
+    decision = Orchestrator(audit_log=audit_log).respond(_event("Hi, I have an Amazon package"))
+
+    entry = audit_log.entries[0]
+    assert entry.response_text == decision.text
+    assert "leave the package" in entry.response_text.lower()
+
+
+def test_respond_records_the_session_id_in_the_audit_entry() -> None:
+    audit_log = _FakeAuditLog()
+    state = _new_state("visit-123")
+    Orchestrator(audit_log=audit_log).respond(_event("Hi, I have an Amazon package"), state=state)
+
+    assert audit_log.entries[0].session_id == "visit-123"
+
+
+def test_respond_leaves_session_id_none_without_a_session() -> None:
+    audit_log = _FakeAuditLog()
+    Orchestrator(audit_log=audit_log).respond(_event("Hi, I have an Amazon package"))
+
+    assert audit_log.entries[0].session_id is None
+
+
 def test_respond_accepts_a_per_call_audit_log_override() -> None:
     default_log = _FakeAuditLog()
     override_log = _FakeAuditLog()
