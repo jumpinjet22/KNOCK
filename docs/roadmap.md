@@ -360,6 +360,16 @@ SIP matters for two different reasons here, worth keeping separate:
   on, let me get someone" fallback (see Phase 7's live intercom mode) --
   so answering doesn't require the app, just picking up a ringing call.
 
+  No separate SIP trunk/provider account is strictly needed if there's
+  already a home VoIP box in the house (e.g. Ooma): its base station
+  outputs a standard analog phone line on an RJ11 jack, same as an old
+  landline. An ATA (Analog Telephone Adapter -- e.g. a Grandstream
+  HT801/HT802) wired into that output turns the existing line into a SIP
+  endpoint KNOCK's own code can place/answer calls on and read DTMF from,
+  the same way a cordless phone or answering machine already can. The
+  provider's own cloud/app isn't part of this at all -- it's just the
+  phone line underneath, same as any other phone plugged into that jack.
+
 ### Battery-powered doorbells
 
 Battery doorbells (most Ring, Blink, Arlo, and Eufy/Reolink's battery
@@ -513,8 +523,26 @@ just another settings field.
 - Bridge plugin architecture
 - Model distillation / LoRA training workflow
 - Installable web app (PWA / "Chrome app")
+- Self-hosted OIDC sign-in (Authentik, etc.)
 
 ## Definitions
+
+### Self-hosted OIDC sign-in (Authentik, etc.)
+
+KNOCK's existing OAuth sign-in (`oauth_routes.py`) is scoped to Google
+specifically, since Google's OpenID Connect discovery document
+(`server_metadata_url`) lets Authlib auto-configure the
+authorization/token/JWKS endpoints for free -- the code's own docstring
+calls out a second, non-OIDC provider as real, separate work (hand
+specifying every endpoint).
+
+Authentik turns out to be the easy case, not the hard one: it's fully
+OIDC-compliant with its own discovery document, so a self-hosted Authentik
+instance should fit the same `server_metadata_url` pattern already built
+for Google, not the "hand-specify everything" work a non-OIDC provider
+like plain GitHub OAuth2 would need. It also fits KNOCK's local-first
+stance better than Google does -- sign in through a self-hosted identity
+provider instead of a cloud one.
 
 ### Installable web app
 
