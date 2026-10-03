@@ -1,4 +1,3 @@
-import array
 import asyncio
 import wave
 from datetime import UTC, datetime, timedelta
@@ -15,9 +14,11 @@ from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
 from knock.integrations.unifi import (
+    _ERROR_SOUND,
+    _THINKING_SOUND,
     UnifiBridge,
     _default_session_id,
-    _generate_thinking_tone,
+    _load_bundled_wav,
     _rms,
 )
 from knock.providers.tts.base import SynthesizedAudio
@@ -1255,34 +1256,31 @@ def test_listen_to_visitor_transcribes_captured_audio(tmp_path) -> None:
     )
 
 
-# -- _generate_thinking_tone ----------------------------------------------------------
+# -- _load_bundled_wav ------------------------------------------------------------
 
 
-def test_generate_thinking_tone_produces_nonempty_pcm() -> None:
-    audio = _generate_thinking_tone()
+def test_load_bundled_wav_reads_the_thinking_sound() -> None:
+    audio = _load_bundled_wav(_THINKING_SOUND)
     assert audio.audio
     assert audio.width == 2
-    assert audio.channels == 1
-    assert audio.rate > 0
+    assert audio.channels == 2
+    assert audio.rate == 48000
+    # 2.25s at 48kHz/16-bit/stereo
+    assert len(audio.audio) == 432000
 
 
-def test_generate_thinking_tone_duration_matches_the_configured_notes() -> None:
-    from knock.integrations.unifi import _THINKING_TONE_NOTES
-
-    audio = _generate_thinking_tone()
-    expected_samples = sum(int(audio.rate * duration) for _, duration in _THINKING_TONE_NOTES)
-    # 2 bytes/sample (width=2), mono
-    assert len(audio.audio) == expected_samples * 2
+def test_load_bundled_wav_reads_the_error_sound() -> None:
+    audio = _load_bundled_wav(_ERROR_SOUND)
+    assert audio.audio
+    # 1.00s at 48kHz/16-bit/stereo
+    assert len(audio.audio) == 192000
 
 
-def test_generate_thinking_tone_stays_within_16_bit_range() -> None:
-    samples = array.array("h")
-    audio = _generate_thinking_tone()
-    samples.frombytes(audio.audio)
-    assert all(-32768 <= s <= 32767 for s in samples)
-    # Comfortably under full scale (0.6 amplitude headroom baked in), not silent
-    assert max(abs(s) for s in samples) > 1000
-    assert max(abs(s) for s in samples) < 32767
+def test_load_bundled_wav_is_cached() -> None:
+    # Same object identity on a second call -- confirms @cache is actually
+    # applied, not just "returns equal data" (which frombytes()-rebuilt
+    # SynthesizedAudio instances would do anyway).
+    assert _load_bundled_wav(_THINKING_SOUND) is _load_bundled_wav(_THINKING_SOUND)
 
 
 # -- _rms ---------------------------------------------------------------------------
@@ -1416,6 +1414,30 @@ def test_listen_to_visitor_survives_capture_failure(tmp_path) -> None:
 
     assert asyncio.run(bridge.listen_to_visitor("cam1")) == ""
     stt_provider.transcribe.assert_not_awaited()
+
+
+def test_listen_to_visitor_plays_error_sound_on_capture_failure(tmp_path) -> None:
+    mock_client = MagicMock()
+    fake_camera = MagicMock()
+    fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high")
+    _with_bootstrap_camera(mock_client, "cam1", fake_camera)
+
+    stt_provider = MagicMock()
+    stt_provider.transcribe = AsyncMock()
+    capture = MagicMock(side_effect=RuntimeError("stream unavailable"))
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=mock_client,
+        stt_provider=stt_provider,
+        rtsp_audio_capture=capture,
+    )
+    bridge._play_error_sound = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(bridge.listen_to_visitor("cam1"))
+
+    bridge._play_error_sound.assert_awaited_once_with("cam1")
 
 
 def test_handle_event_uses_transcript_as_event_text_when_available(tmp_path) -> None:

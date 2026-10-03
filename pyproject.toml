@@ -50,7 +50,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-knock = ["conversation/rules.json"]
+knock = ["conversation/rules.json", "sounds/*.wav"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

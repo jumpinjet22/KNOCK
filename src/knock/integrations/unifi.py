@@ -39,14 +39,16 @@ from __future__ import annotations
 
 import array
 import asyncio
+import io
 import logging
-import math
 import re
 import tempfile
 import time
 import wave
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from functools import cache
+from importlib import resources
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -109,11 +111,15 @@ _MAX_CONVERSATION_TURNS = 5
 # Played right after listening ends and before the (sometimes slow --
 # vision description, an LLM fallback call) processing that decides the
 # actual reply, so the visitor gets some acknowledgement instead of dead
-# air while that runs. A tone rather than a spoken placeholder phrase --
-# no TTS round-trip needed just to say "one moment," and no particular
-# wording to get wrong.
-_THINKING_TONE_SAMPLE_RATE = 16000
-_THINKING_TONE_NOTES = [(440.0, 0.15), (554.37, 0.15)]  # A4 -> C#5, 150ms each
+# air while that runs. A real sound file rather than a spoken placeholder
+# phrase -- no TTS round-trip needed just to say "one moment," and no
+# particular wording to get wrong. Both this and the error sound below are
+# bundled under knock/sounds/ (see `_load_bundled_wav`).
+_THINKING_SOUND = "thinking.wav"
+# Played when speech capture itself fails outright (not the much more
+# common "no reply" case of a visitor just going quiet) -- some audio
+# feedback that something went wrong, instead of dead air.
+_ERROR_SOUND = "error.wav"
 
 # Spoken back to the visitor once someone at the Home Assistant end taps an
 # action button on a signature-required delivery notification (see
@@ -144,23 +150,23 @@ def _rms(pcm: bytes) -> float:
     return (sum(s * s for s in samples) / sample_count) ** 0.5
 
 
-def _generate_thinking_tone() -> SynthesizedAudio:
-    """A short two-note chime, synthesized directly (no TTS server
-    involved) -- see `_THINKING_TONE_NOTES`.
+@cache
+def _load_bundled_wav(filename: str) -> SynthesizedAudio:
+    """Read a WAV file bundled under `knock/sounds/` into a `SynthesizedAudio`.
+
+    Cached since the same couple of files get played repeatedly over a
+    process's lifetime and their content never changes -- cheap either
+    way (these are a few hundred KB each), but no reason to re-read and
+    re-decode from disk every single play.
     """
-    rate = _THINKING_TONE_SAMPLE_RATE
-    samples = array.array("h")
-    for freq, duration in _THINKING_TONE_NOTES:
-        count = int(rate * duration)
-        fade_samples = max(1, int(count * 0.1))
-        for i in range(count):
-            # A short fade in/out (first/last ~10% of each note) avoids the
-            # audible click a sine wave starting/stopping abruptly would
-            # otherwise produce.
-            fade = min(i / fade_samples, 1.0, (count - i) / fade_samples)
-            value = math.sin(2 * math.pi * freq * i / rate) * fade * 0.6
-            samples.append(int(value * 32767))
-    return SynthesizedAudio(audio=samples.tobytes(), rate=rate, width=2, channels=1)
+    wav_bytes = resources.files("knock").joinpath("sounds", filename).read_bytes()
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+        return SynthesizedAudio(
+            audio=wav_file.readframes(wav_file.getnframes()),
+            rate=wav_file.getframerate(),
+            width=wav_file.getsampwidth(),
+            channels=wav_file.getnchannels(),
+        )
 
 
 def _write_wav(path: Path, audio: SynthesizedAudio) -> None:
@@ -568,6 +574,7 @@ class UnifiBridge:
             return transcript
         except Exception as exc:  # noqa: BLE001 - speech capture is best-effort
             logger.warning("Speech capture failed for device %s: %s", device_id, exc)
+            await self._play_error_sound(device_id)
             return ""
 
     async def speak_to_visitor(self, device_id: str, text: str) -> None:
@@ -593,12 +600,18 @@ class UnifiBridge:
         just to say "one moment," and nothing tying it to any particular
         wording.
         """
-        await self._play_audio(device_id, _generate_thinking_tone())
+        await self._play_audio(device_id, _load_bundled_wav(_THINKING_SOUND))
+
+    async def _play_error_sound(self, device_id: str) -> None:
+        """Played when speech capture itself fails outright -- some audio
+        feedback that something went wrong, instead of dead air.
+        """
+        await self._play_audio(device_id, _load_bundled_wav(_ERROR_SOUND))
 
     async def _play_audio(self, device_id: str, audio: SynthesizedAudio) -> None:
         """Stream already-synthesized PCM audio to `device_id`'s speaker,
-        best-effort -- shared by `speak_to_visitor` (TTS output) and
-        `_play_thinking_tone` (a generated tone, no TTS involved).
+        best-effort -- shared by `speak_to_visitor` (TTS output) and the
+        bundled-sound playback above (thinking/error cues, no TTS involved).
 
         Any failure here (no speaker on this camera, streaming error) is
         logged and swallowed -- talkback is an enhancement, never a
