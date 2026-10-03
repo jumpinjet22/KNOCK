@@ -415,6 +415,21 @@ def test_suspicious_activity_intent() -> None:
     assert decision.intent == "suspicious_activity"
 
 
+def test_ride_arrived_intent_via_keyword() -> None:
+    # "uber" is a keyword match, so this never consults the LLM at all.
+    decision = Orchestrator().respond(_event("Your Uber is here"))
+    assert decision.intent == "ride_arrived"
+    assert "ride" in decision.text.lower()
+
+
+def test_visitation_intent_via_llm_refinement() -> None:
+    # No keyword list for this one at all -- recognizing a casual social
+    # visit depends entirely on the LLM refinement step.
+    llm = _SequencedLLMProvider(["visitation", "Thanks, I'll let them know you're here!"])
+    decision = Orchestrator(llm_provider=llm).respond(_event("Hey it's me, just came by to say hi"))
+    assert decision.intent == "visitation"
+
+
 def test_llm_refinement_recovers_a_delivery_phrasing_keywords_missed() -> None:
     # The actual production bug: "I came to drop some food off" matches no
     # food/delivery keyword, so classify_intent() alone would call it

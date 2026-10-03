@@ -63,6 +63,20 @@ _INTENT_DESCRIPTIONS = {
         'anything." Keep it brief and firm; never imply anyone is home, '
         "away, inside, or available later"
     ),
+    "ride_arrived": (
+        "a rideshare or taxi driver announcing they've arrived to pick "
+        "someone up -- say something like \"Thanks, I'll let them know "
+        'their ride is here." Keep it brief; never confirm whether the '
+        "person is currently home or ready, just that you'll pass the "
+        "message along"
+    ),
+    "visitation": (
+        "a personal or social visit -- a friend, family member, or "
+        "neighbor stopping by (not a stranger asking for someone by name, "
+        'not a delivery or solicitor) -- say something like "Thanks, '
+        "I'll let them know you're here!\" Keep it warm, not transactional; "
+        "never confirm whether anyone is currently home or available"
+    ),
     "service_appointment": (
         "a contractor or technician arriving for a scheduled service "
         "appointment -- acknowledge they're expected and that the right "
@@ -116,15 +130,43 @@ _LLM_CLASSIFIABLE_INTENTS = [
     "religious_soliciting",
     "political_soliciting",
     "soliciting",
+    "ride_arrived",
+    "visitation",
     "service_appointment",
     "person_lookup",
     "official_visit",
     "suspicious_activity",
 ]
 
+# Short glosses shown alongside each label in `_classification_prompt` --
+# a bare category name (e.g. "visitation") alone isn't always enough for
+# the model to confidently recognize when it applies, especially next to
+# an instruction that deliberately biases toward "unknown." These are
+# intentionally terse; `_INTENT_DESCRIPTIONS` above carries the full
+# phrasing instructions for the separate _response_prompt step.
+_INTENT_CLASSIFICATION_HINTS = {
+    "delivery": "a package delivery",
+    "delivery_signature_required": "a delivery that needs a signature",
+    "food_delivery": "a food delivery (pizza, takeout, etc)",
+    "religious_soliciting": "religious canvassing",
+    "political_soliciting": "political canvassing",
+    "soliciting": "a door-to-door salesperson",
+    "ride_arrived": "a rideshare/taxi driver arriving for pickup",
+    "visitation": "a casual personal visit from a friend or family member",
+    "service_appointment": "a contractor/technician for a scheduled appointment",
+    "person_lookup": "someone asking for a specific person by name",
+    "official_visit": "police, a government official, or a utility worker",
+    "suspicious_activity": "concerning but non-emergency behavior",
+}
+
 
 def _classification_prompt(visitor_text: str) -> str:
-    labels = ", ".join([*_LLM_CLASSIFIABLE_INTENTS, "unknown"])
+    labels = (
+        ", ".join(
+            f"{name} ({_INTENT_CLASSIFICATION_HINTS[name]})" for name in _LLM_CLASSIFIABLE_INTENTS
+        )
+        + ", unknown"
+    )
     return (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
         "The system's keyword rules found no match. Decide whether this "
@@ -134,7 +176,7 @@ def _classification_prompt(visitor_text: str) -> str:
         "small talk, vague chatter, irrelevant questions, or anything that "
         'does not clearly match, reply exactly "unknown". When in doubt, '
         'reply "unknown".\n'
-        "Reply with only one word, lowercase, nothing else."
+        "Reply with only the matching category's name (one word, lowercase), nothing else."
     )
 
 

@@ -37,6 +37,19 @@ def test_classifies_deliver_as_generic_delivery() -> None:
     assert classify_intent("I need you to deliver this") == "delivery"
 
 
+def test_classifies_ride_keywords_as_ride_arrived() -> None:
+    assert classify_intent("Your Uber is here") == "ride_arrived"
+    assert classify_intent("I'm here for your Lyft") == "ride_arrived"
+    assert classify_intent("Your ride is here") == "ride_arrived"
+
+
+def test_uber_eats_is_food_delivery_not_ride_arrived() -> None:
+    # "uber eats" matches _FOOD_KEYWORDS and is checked first -- a bare
+    # "uber"/"lyft" only ever reaches the ride check once food/delivery
+    # keywords have already ruled themselves out.
+    assert classify_intent("I'm your Uber Eats driver") == "food_delivery"
+
+
 def test_classifies_help_keywords_as_emergency() -> None:
     assert classify_intent("help!") == "emergency"
     assert classify_intent("medical emergency") == "emergency"

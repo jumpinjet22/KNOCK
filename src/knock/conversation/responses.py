@@ -8,6 +8,8 @@ RESPONSES = {
         "Thanks, but we don't discuss politics or take campaign materials at the door."
     ),
     "soliciting": "Sorry, we don't accept solicitations here. Please don't leave anything.",
+    "ride_arrived": "Thanks, I'll let them know their ride is here.",
+    "visitation": "Thanks, I'll let them know you're here!",
     "service_appointment": "Thanks, I'll let them know you're here for your appointment.",
     "person_lookup": "I'll pass along that you're looking for them.",
     "official_visit": "I'll make sure the household is aware you're here.",

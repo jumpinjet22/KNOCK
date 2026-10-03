@@ -43,6 +43,14 @@ _FOOD_KEYWORDS = [
     "takeout",
     "take-out",
 ]
+_RIDE_KEYWORDS = [
+    "uber",
+    "lyft",
+    "rideshare",
+    "your ride",
+    "ride is here",
+    "here for your ride",
+]
 
 
 def classify_intent(text: str) -> str:
@@ -60,6 +68,11 @@ def classify_intent(text: str) -> str:
         if "sign" in lowered:
             return "delivery_signature_required"
         return "delivery"
+    # Checked after food/delivery on purpose: "uber eats" already matches
+    # _FOOD_KEYWORDS above and returns food_delivery first, so by the time a
+    # bare "uber"/"lyft" reaches this check, it only ever means an actual ride.
+    if any(k in lowered for k in _RIDE_KEYWORDS):
+        return "ride_arrived"
     if any(k in lowered for k in ["help", "emergency", "fire", "medical"]):
         return "emergency"
     if any(k in lowered for k in ["are you home", "anyone home"]):
