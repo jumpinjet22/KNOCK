@@ -1,9 +1,10 @@
 import { useState, type ReactNode } from "react"
 import { NavLink, useNavigate } from "react-router-dom"
 import { useAuth } from "../lib/auth"
+import { useUIMode } from "../lib/uiMode"
 import { Mark } from "./Wordmark"
 
-const NAV_LINKS = [
+const FULL_NAV_LINKS = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/cameras", label: "Cameras", end: false },
   { to: "/processes", label: "Processes", end: false },
@@ -13,11 +14,15 @@ const NAV_LINKS = [
   { to: "/settings", label: "Settings", end: false },
 ]
 
+const TRAINING_ONLY_NAV_LINKS = [{ to: "/training", label: "Training", end: false }]
+
 export function AppShell({ children }: { children: ReactNode }) {
   const { state, logout } = useAuth()
+  const { trainingOnly } = useUIMode()
   const navigate = useNavigate()
   const username = state.status === "logged_in" ? state.username : null
   const [menuOpen, setMenuOpen] = useState(false)
+  const navLinks = trainingOnly ? TRAINING_ONLY_NAV_LINKS : FULL_NAV_LINKS
 
   async function handleLogout() {
     await logout()
@@ -41,7 +46,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </span>
             </div>
             <nav className="hidden items-center gap-4 md:flex">
-              {NAV_LINKS.map((link) => (
+              {navLinks.map((link) => (
                 <NavLink key={link.to} to={link.to} end={link.end} className={navLinkClassName}>
                   {link.label}
                 </NavLink>
@@ -93,7 +98,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         {menuOpen && (
           <nav className="mt-3 flex flex-col gap-3 border-t border-steel/20 pt-3 dark:border-steel/30 md:hidden">
-            {NAV_LINKS.map((link) => (
+            {navLinks.map((link) => (
               <NavLink
                 key={link.to}
                 to={link.to}

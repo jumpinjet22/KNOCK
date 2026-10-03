@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react"
 import { Navigate, useLocation } from "react-router-dom"
 import { ApiError, authApi } from "./api"
+import { useUIMode } from "./uiMode"
 
 type AuthState =
   | { status: "loading" }
@@ -80,6 +81,7 @@ export function useAuth(): AuthContextValue {
 /** Gates a route behind login, redirecting to /setup or /login as needed. */
 export function ProtectedRoute({ children }: { children: ReactNode }) {
   const { state } = useAuth()
+  const { trainingOnly } = useUIMode()
   const location = useLocation()
 
   if (state.status === "loading") {
@@ -90,6 +92,14 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   }
   if (state.status === "logged_out") {
     return <Navigate to="/login" replace state={{ from: location }} />
+  }
+  // A single-purpose deployment (KNOCK_TRAINING_MODE=1, e.g. a scratch
+  // machine only ever used to review synthetic training data) collapses
+  // every other route down to /training -- not a security boundary
+  // (every route still requires the same login as always), just a UI
+  // simplification so there's nothing else to navigate to by mistake.
+  if (trainingOnly && location.pathname !== "/training") {
+    return <Navigate to="/training" replace />
   }
   return <>{children}</>
 }

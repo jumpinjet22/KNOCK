@@ -371,7 +371,12 @@ export interface TrainingIntentOptions {
   intents: string[]
 }
 
+export interface UIMode {
+  training_only: boolean
+}
+
 export const trainingApi = {
+  uiMode: () => apiFetch<UIMode>("/api/training/ui-mode"),
   intents: () => apiFetch<TrainingIntentOptions>("/api/training/intents"),
   queue: (limit = 200) => apiFetch<TrainingQueueItem[]>(`/api/training/queue?limit=${limit}`),
   review: (

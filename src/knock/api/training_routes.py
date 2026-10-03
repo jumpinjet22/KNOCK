@@ -8,6 +8,7 @@ itself does -- this can contain raw visitor speech.
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,6 +44,27 @@ class TrainingQueueItem(BaseModel):
     key: str
     entry: AuditEntry
     review: TrainingReview
+
+
+class UIMode(BaseModel):
+    training_only: bool
+
+
+@router.get("/ui-mode", response_model=UIMode)
+def get_ui_mode() -> UIMode:
+    """Whether this deployment should show only the Training page.
+
+    Deliberately unauthenticated (fetched before login to decide nav/
+    routing, same timing as `/api/auth/status`) and reveals nothing
+    sensitive -- just a UI-shape flag for a single-purpose local
+    deployment (e.g. a scratch machine only ever used to review
+    synthetic training data), set via `KNOCK_TRAINING_MODE=1` in the
+    environment. Not a security boundary: every other route still
+    requires the same login as always, this only changes what the web
+    UI shows/links to.
+    """
+    truthy = {"1", "true", "yes", "on"}
+    return UIMode(training_only=os.environ.get("KNOCK_TRAINING_MODE", "").strip().lower() in truthy)
 
 
 class IntentOptions(BaseModel):

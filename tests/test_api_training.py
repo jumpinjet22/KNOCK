@@ -187,6 +187,33 @@ def test_put_review_rejects_an_invalid_intent_override(client) -> None:
     assert resp.status_code == 400
 
 
+# -- ui-mode ----------------------------------------------------------------
+
+
+def test_ui_mode_requires_no_authentication(client) -> None:
+    resp = client.get("/api/training/ui-mode")
+    assert resp.status_code == 200
+
+
+def test_ui_mode_defaults_to_full_ui(client, monkeypatch) -> None:
+    monkeypatch.delenv("KNOCK_TRAINING_MODE", raising=False)
+    resp = client.get("/api/training/ui-mode")
+    assert resp.json() == {"training_only": False}
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "yes", "on"])
+def test_ui_mode_recognizes_truthy_env_values(client, monkeypatch, value) -> None:
+    monkeypatch.setenv("KNOCK_TRAINING_MODE", value)
+    resp = client.get("/api/training/ui-mode")
+    assert resp.json() == {"training_only": True}
+
+
+def test_ui_mode_treats_empty_string_as_false(client, monkeypatch) -> None:
+    monkeypatch.setenv("KNOCK_TRAINING_MODE", "0")
+    resp = client.get("/api/training/ui-mode")
+    assert resp.json() == {"training_only": False}
+
+
 # -- intents ----------------------------------------------------------------
 
 
