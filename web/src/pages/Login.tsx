@@ -14,6 +14,7 @@ export function Login() {
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [googleConfigured, setGoogleConfigured] = useState(false)
+  const [authentikConfigured, setAuthentikConfigured] = useState(false)
   const [passkeysSupported] = useState(() => window.isSecureContext && browserSupportsWebAuthn())
   const [passkeyBusy, setPasskeyBusy] = useState(false)
 
@@ -22,6 +23,10 @@ export function Login() {
       .googleStatus()
       .then((status) => setGoogleConfigured(status.configured))
       .catch(() => setGoogleConfigured(false))
+    oauthApi
+      .authentikStatus()
+      .then((status) => setAuthentikConfigured(status.configured))
+      .catch(() => setAuthentikConfigured(false))
   }, [])
 
   function goToDestination() {
@@ -94,7 +99,7 @@ export function Login() {
           <SubmitButton disabled={submitting}>{submitting ? "Signing in…" : "Sign in"}</SubmitButton>
         </div>
       </form>
-      {(googleConfigured || passkeysSupported) && (
+      {(googleConfigured || authentikConfigured || passkeysSupported) && (
         <div className="mt-4 space-y-2 border-t border-steel/20 pt-4">
           {passkeysSupported && (
             <button
@@ -112,6 +117,14 @@ export function Login() {
               className="flex w-full items-center justify-center rounded-md border border-steel/30 px-4 py-2 text-sm font-medium text-ink transition hover:border-porch hover:text-porch dark:border-steel/40 dark:text-mist"
             >
               Sign in with Google
+            </a>
+          )}
+          {authentikConfigured && (
+            <a
+              href={oauthApi.authentikLoginUrl}
+              className="flex w-full items-center justify-center rounded-md border border-steel/30 px-4 py-2 text-sm font-medium text-ink transition hover:border-porch hover:text-porch dark:border-steel/40 dark:text-mist"
+            >
+              Sign in with Authentik
             </a>
           )}
         </div>

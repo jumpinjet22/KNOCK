@@ -265,6 +265,18 @@ export interface GoogleOAuthConfig {
   configured: boolean
 }
 
+export interface AuthentikOAuthStatus {
+  configured: boolean
+}
+
+export interface AuthentikOAuthConfig {
+  issuer_url: string
+  client_id: string
+  has_client_secret: boolean
+  allowed_email: string
+  configured: boolean
+}
+
 export const oauthApi = {
   googleStatus: () => apiFetch<GoogleOAuthStatus>("/api/oauth/google/status"),
   googleConfig: () => apiFetch<GoogleOAuthConfig>("/api/oauth/google/config"),
@@ -275,6 +287,19 @@ export const oauthApi = {
   }) =>
     apiFetch<GoogleOAuthConfig>("/api/oauth/google/config", { method: "PUT", body: values }),
   googleLoginUrl: "/api/oauth/google/login",
+  authentikStatus: () => apiFetch<AuthentikOAuthStatus>("/api/oauth/authentik/status"),
+  authentikConfig: () => apiFetch<AuthentikOAuthConfig>("/api/oauth/authentik/config"),
+  updateAuthentikConfig: (values: {
+    issuer_url?: string
+    client_id?: string
+    client_secret?: string
+    allowed_email?: string
+  }) =>
+    apiFetch<AuthentikOAuthConfig>("/api/oauth/authentik/config", {
+      method: "PUT",
+      body: values,
+    }),
+  authentikLoginUrl: "/api/oauth/authentik/login",
 }
 
 export interface PasskeyInfo {
