@@ -35,6 +35,7 @@ WebSessionStoreDep = Annotated[WebSessionStore, Depends(get_web_session_store)]
 
 
 def require_auth(
+    response: Response,
     *,
     knock_session: Annotated[str | None, Cookie()] = None,
     session_store: WebSessionStoreDep,
@@ -52,8 +53,20 @@ def require_auth(
     real security boundary. This is a genuine, deliberate removal of
     authentication for every route gated behind `CurrentUserDep` -- never
     set this env var on anything network-exposed.
+
+    A stale `knock_session` cookie left over from before training mode
+    was enabled (e.g. a real login from an earlier session) is actively
+    cleared here rather than just ignored: `CSRFMiddleware`'s
+    `sensitive_cookies` check only looks at whether that cookie is
+    *present*, never whether it's actually valid, so a stale leftover
+    cookie would silently re-enable CSRF enforcement on every unsafe
+    request -- and since that cookie was signed by a now-irrelevant
+    session, nothing the frontend sends can ever satisfy it, a confusing
+    403 on every POST/PUT with no obvious cause.
     """
     if training_mode_enabled():
+        if knock_session is not None:
+            response.delete_cookie(SESSION_COOKIE_NAME, path="/")
         return TRAINING_MODE_USERNAME
     if knock_session is None:
         raise HTTPException(status_code=401, detail="not authenticated")

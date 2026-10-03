@@ -169,3 +169,28 @@ def test_a_real_session_cookie_is_not_required_in_training_mode(client, monkeypa
 def test_training_mode_does_not_affect_normal_auth_when_unset(client) -> None:
     resp = client.get("/api/auth/me")
     assert resp.status_code == 401
+
+
+def test_training_mode_clears_a_stale_session_cookie(client, monkeypatch) -> None:
+    # A stale knock_session cookie left over from before training mode was
+    # enabled (e.g. a real login from an earlier session) must be actively
+    # cleared, not just ignored -- CSRFMiddleware's sensitive_cookies check
+    # only looks at whether this cookie is *present*, never whether it's
+    # valid, so a stale leftover would silently re-enable CSRF enforcement
+    # on every subsequent unsafe request with no way to satisfy it.
+    #
+    # A real, server-issued cookie (not one injected directly into the
+    # jar) so it's attributed to the same domain `delete_cookie` targets --
+    # exactly what a real browser carrying a cookie from an earlier,
+    # non-training-mode session would have.
+    _setup(client)
+    assert "knock_session" in client.cookies
+
+    monkeypatch.setenv("KNOCK_TRAINING_MODE", "1")
+    resp = client.get("/api/auth/me")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"username": "training-mode"}
+    # The TestClient's cookie jar reflects the Set-Cookie the server sent --
+    # a deleted cookie no longer shows up here.
+    assert "knock_session" not in client.cookies
