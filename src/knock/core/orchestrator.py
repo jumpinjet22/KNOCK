@@ -79,9 +79,12 @@ _INTENT_DESCRIPTIONS = {
     ),
     "service_appointment": (
         "a contractor or technician arriving for a scheduled service "
-        "appointment -- acknowledge they're expected and that the right "
-        "person will be with them; don't confirm whether anyone is "
-        "currently home"
+        "appointment. Say something like \"Thanks, I'll let them know "
+        "you're here for the appointment.\" The visitor IS the expected "
+        "technician -- don't imply someone else (a separate tech, a "
+        "representative) is coming to meet them or is still on the way; "
+        "just acknowledge them and say you'll let the homeowner know "
+        "they've arrived. Don't confirm whether anyone is currently home"
     ),
     "person_lookup": (
         "someone asking for a specific person by name, not asking in "
