@@ -617,12 +617,27 @@ That could eventually include:
 
 # Current Priority
 
-Right now the focus is:
+Phases 1-5 are done: clean architecture, the local text harness, the
+deterministic safety engine, session/state management (minus cooldown
+handling), and the full provider system -- all with real test coverage,
+not just scaffolding.
 
-1. Clean architecture
-2. Stable foundation
-3. Local text harness
-4. Safety system
-5. Provider interfaces
+Phase 6 (Integration Layer) and Phase 7 (Audio Pipeline) are mostly done
+and proven against real hardware: MQTT, Home Assistant, Frigate, and
+UniFi Protect bridges, live two-way talkback, speech recognition, and the
+web UI (settings, process supervision, debug tools, Google/Authentik
+sign-in) all actually work today, not just on paper.
 
-The project should become stable and understandable before adding advanced AI features.
+What's left is genuinely the "advanced features" tier now, not
+foundation-building:
+
+- Phase 6 gaps: ONVIF, ESPHome (dedicated), SIP/VoIP, per-camera trigger
+  selection
+- Phase 7 gaps: live intercom mode, real multi-voice switching
+- Phase 8 gaps: known visitor recognition, structured vision detection
+  (today's vision is one generic description, not separate categories)
+- Phase 9: everything except self-hosted OIDC sign-in (done)
+
+The project has moved past "stabilize the foundation" into "pick which
+advanced feature earns its slot next" -- see each phase's Definitions for
+the reasoning behind what's still open and why.
