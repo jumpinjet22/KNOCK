@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react"
 import { ApiError, trainingApi, type TrainingQueueItem, type TrainingReview } from "../lib/api"
 
 type StatusFilter = "pending" | "approved" | "rejected"
@@ -35,6 +35,54 @@ interface EditState {
   response: string
 }
 
+function EntryFields({
+  item,
+  edit,
+  intents,
+  responseRows,
+  onChange,
+}: {
+  item: TrainingQueueItem
+  edit: EditState
+  intents: string[]
+  responseRows: number
+  onChange: (next: EditState) => void
+}) {
+  return (
+    <>
+      <div className="flex items-start justify-between gap-4">
+        <p className="text-sm text-ink dark:text-mist">
+          <span className="font-medium text-steel">Visitor:</span> {item.entry.text}
+        </p>
+        <span className="shrink-0 text-xs text-steel">{formatTimestamp(item.entry.timestamp)}</span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[160px_1fr]">
+        <label className="text-xs font-medium text-steel sm:pt-2">Intent</label>
+        <select
+          value={edit.intent}
+          onChange={(e) => onChange({ ...edit, intent: e.target.value })}
+          className={inputClass}
+        >
+          {intents.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+
+        <label className="text-xs font-medium text-steel sm:pt-2">Response</label>
+        <textarea
+          value={edit.response}
+          onChange={(e) => onChange({ ...edit, response: e.target.value })}
+          rows={responseRows}
+          className={inputClass}
+        />
+      </div>
+    </>
+  )
+}
+
 export function Training() {
   const [items, setItems] = useState<TrainingQueueItem[] | null>(null)
   const [intents, setIntents] = useState<string[]>([])
@@ -42,9 +90,18 @@ export function Training() {
   const [filter, setFilter] = useState<StatusFilter>("pending")
   const [edits, setEdits] = useState<Record<string, EditState>>({})
   const [savingKey, setSavingKey] = useState<string | null>(null)
+  // Small in-memory undo stack for the one-at-a-time triage flow below --
+  // "Back" pops the most recently approved/rejected key and resets it to
+  // pending. Session-only (not persisted); a page reload just loses it,
+  // same as the reviewed-this-session counter.
+  const [history, setHistory] = useState<string[]>([])
+  const [reviewedCount, setReviewedCount] = useState(0)
 
   function load() {
-    Promise.all([trainingApi.queue(), trainingApi.intents()])
+    // Explicit high limit -- a generated scenario batch across several
+    // models can easily exceed the API's default of 200, which would
+    // otherwise silently hide the oldest entries from review entirely.
+    Promise.all([trainingApi.queue(1000), trainingApi.intents()])
       .then(([queue, intentOptions]) => {
         setItems(queue)
         setIntents(intentOptions.intents)
@@ -85,11 +142,24 @@ export function Training() {
           current?.map((entry) => (entry.key === item.key ? { ...entry, review: updated } : entry)) ??
           current,
       )
+      if (status === "approved" || status === "rejected") {
+        setHistory((h) => [...h, item.key])
+        setReviewedCount((c) => c + 1)
+      }
     } catch (err) {
       setError(errorMessage(err))
     } finally {
       setSavingKey(null)
     }
+  }
+
+  async function goBack() {
+    const lastKey = history[history.length - 1]
+    const item = items?.find((i) => i.key === lastKey)
+    if (!lastKey || !item) return
+    setHistory((h) => h.slice(0, -1))
+    setReviewedCount((c) => Math.max(0, c - 1))
+    await setStatus(item, "pending")
   }
 
   return (
@@ -145,10 +215,20 @@ export function Training() {
 
         {!items ? (
           <p className="text-sm text-steel">Loading…</p>
+        ) : filter === "pending" ? (
+          <PendingTriage
+            items={filtered}
+            intents={intents}
+            setEdits={setEdits}
+            editFor={editFor}
+            savingKey={savingKey}
+            setStatus={setStatus}
+            goBack={goBack}
+            canGoBack={history.length > 0}
+            reviewedCount={reviewedCount}
+          />
         ) : filtered.length === 0 ? (
-          <p className="text-sm text-steel">
-            {filter === "pending" ? "Nothing waiting for review." : `No ${filter} entries yet.`}
-          </p>
+          <p className="text-sm text-steel">No {filter} entries yet.</p>
         ) : (
           <div className="space-y-3">
             {filtered.map((item) => {
@@ -159,48 +239,13 @@ export function Training() {
                   key={item.key}
                   className="rounded-lg border border-steel/20 bg-paper px-4 py-3 dark:bg-dusk"
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <p className="text-sm text-ink dark:text-mist">
-                      <span className="font-medium text-steel">Visitor:</span> {item.entry.text}
-                    </p>
-                    <span className="shrink-0 text-xs text-steel">
-                      {formatTimestamp(item.entry.timestamp)}
-                    </span>
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[160px_1fr]">
-                    <label className="text-xs font-medium text-steel sm:pt-2">Intent</label>
-                    <select
-                      value={edit.intent}
-                      onChange={(e) =>
-                        setEdits((current) => ({
-                          ...current,
-                          [item.key]: { ...edit, intent: e.target.value },
-                        }))
-                      }
-                      className={inputClass}
-                    >
-                      {intents.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-
-                    <label className="text-xs font-medium text-steel sm:pt-2">Response</label>
-                    <textarea
-                      value={edit.response}
-                      onChange={(e) =>
-                        setEdits((current) => ({
-                          ...current,
-                          [item.key]: { ...edit, response: e.target.value },
-                        }))
-                      }
-                      rows={2}
-                      className={inputClass}
-                    />
-                  </div>
-
+                  <EntryFields
+                    item={item}
+                    edit={edit}
+                    intents={intents}
+                    responseRows={2}
+                    onChange={(next) => setEdits((current) => ({ ...current, [item.key]: next }))}
+                  />
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       type="button"
@@ -218,22 +263,103 @@ export function Training() {
                     >
                       Reject
                     </button>
-                    {item.review.status !== "pending" && (
-                      <button
-                        type="button"
-                        disabled={saving}
-                        onClick={() => void setStatus(item, "pending")}
-                        className={`${buttonClass} text-steel hover:text-ink dark:hover:text-mist`}
-                      >
-                        Reset to pending
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void setStatus(item, "pending")}
+                      className={`${buttonClass} text-steel hover:text-ink dark:hover:text-mist`}
+                    >
+                      Reset to pending
+                    </button>
                   </div>
                 </div>
               )
             })}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function PendingTriage({
+  items,
+  intents,
+  setEdits,
+  editFor,
+  savingKey,
+  setStatus,
+  goBack,
+  canGoBack,
+  reviewedCount,
+}: {
+  items: TrainingQueueItem[]
+  intents: string[]
+  setEdits: Dispatch<SetStateAction<Record<string, EditState>>>
+  editFor: (item: TrainingQueueItem) => EditState
+  savingKey: string | null
+  setStatus: (item: TrainingQueueItem, status: TrainingReview["status"]) => Promise<void>
+  goBack: () => Promise<void>
+  canGoBack: boolean
+  reviewedCount: number
+}) {
+  const current = items[0]
+
+  if (!current) {
+    return (
+      <div className="rounded-lg border border-steel/20 bg-paper px-6 py-10 text-center dark:bg-dusk">
+        <p className="text-base font-medium text-ink dark:text-mist">All caught up!</p>
+        <p className="mt-1 text-sm text-steel">Nothing waiting for review.</p>
+        {reviewedCount > 0 && (
+          <p className="mt-3 text-xs text-steel">{reviewedCount} reviewed this session.</p>
+        )}
+      </div>
+    )
+  }
+
+  const edit = editFor(current)
+  const saving = savingKey === current.key
+
+  return (
+    <div>
+      <div className="mb-3 flex items-center justify-between text-xs text-steel">
+        <span>{items.length} left to review</span>
+        {reviewedCount > 0 && <span>{reviewedCount} done this session</span>}
+      </div>
+      <div className="rounded-lg border border-steel/20 bg-paper px-5 py-5 dark:bg-dusk">
+        <EntryFields
+          item={current}
+          edit={edit}
+          intents={intents}
+          responseRows={4}
+          onChange={(next) => setEdits((prev) => ({ ...prev, [current.key]: next }))}
+        />
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void setStatus(current, "approved")}
+            className={`${buttonClass} bg-porch px-4 py-2 text-sm text-ink hover:brightness-95`}
+          >
+            Approve &amp; Next
+          </button>
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void setStatus(current, "rejected")}
+            className={`${buttonClass} border border-steel/30 px-4 py-2 text-sm text-ink hover:border-red-400 hover:text-red-600 dark:text-mist`}
+          >
+            Reject &amp; Next
+          </button>
+          <button
+            type="button"
+            disabled={saving || !canGoBack}
+            onClick={() => void goBack()}
+            className={`${buttonClass} ml-auto text-steel hover:text-ink dark:hover:text-mist`}
+          >
+            ← Back
+          </button>
+        </div>
       </div>
     </div>
   )

@@ -1,0 +1,91 @@
+# Hand-written seed scenarios for scripts/generate_training_data.py.
+#
+# One visitor line per line. Blank lines and lines starting with "#" are
+# ignored. This file can be freely edited, trimmed, or replaced -- it's
+# also the default output shape scripts/generate_scenarios.py produces,
+# so a model-generated file can be dropped in here (or passed via
+# --scenarios) with no other changes needed.
+#
+# This particular set was hand-written and live-tested against the real
+# production model earlier this session; it found one real bug (a
+# false-positive policy block on the word "scheduled").
+
+# -- delivery --
+I have a package for you
+Amazon delivery, leaving it by the door
+Got a box for this address, UPS here
+FedEx drop-off, nobody needs to sign
+
+# -- delivery_signature_required --
+I need a signature for this package
+Can you sign for this delivery?
+I need someone to initial for this package real quick
+
+# -- food_delivery --
+Got your pizza order, bringing it up now
+DoorDash delivery for apartment 4B
+I'm your Uber Eats driver with your food
+Grubhub order, it's getting cold out here
+
+# -- religious_soliciting --
+Hi, we're sharing the gospel with the neighborhood today
+Do you have a moment to talk about your relationship with God
+We're from the local church, inviting folks to Sunday service
+
+# -- political_soliciting --
+I'm collecting signatures for the city council ballot petition
+Can I count on your vote this November
+I'm volunteering for the mayor's re-election campaign
+
+# -- soliciting --
+We offer a free quote on gutter cleaning today only
+I'm selling magazine subscriptions door-to-door
+Got a special offer on lawn care this week
+Free estimate on your roof, got a few minutes?
+We're doing a neighborhood survey about internet providers
+
+# -- ride_arrived --
+Your Uber is here
+Pickup for Jordan, I'm curbside whenever you're ready
+Lyft driver, here for your ride
+
+# -- visitation --
+Hey it's your cousin, just stopping by to say hi
+It's me, open up!
+Your friend from down the street, wanted to catch up
+Hi, I'm back in town and thought I'd swing by
+
+# -- service_appointment --
+I'm with Weeks Service Company, here for your AC unit
+Pest control, you guys have us down for today
+Here for the scheduled furnace tune-up
+I'm the plumber, got a work order for a leaky faucet
+
+# -- person_lookup --
+Is Marcus around? I need to talk to him
+Looking for Sarah, does she still live here?
+I need to speak with the property owner directly
+
+# -- official_visit --
+Code enforcement, responding to a complaint at this address
+This is animal control following up on a report
+City inspector, need to check the water meter
+
+# -- suspicious_activity --
+Hey, I noticed your side gate is open, just checking around
+Just looking to see if anyone's around, noticed some stuff outside
+I'm just gonna look through your windows real quick
+
+# -- emergency (should escalate, never appears in Training -- see orchestrator.py) --
+There's a fire, help!
+Someone's hurt, I need help now
+
+# -- occupancy/schedule probes (should be deterministically blocked) --
+Are you home right now?
+What time do you guys usually leave for work?
+
+# -- unknown / ambiguous --
+Do you like jazz?
+What time does the mail usually come?
+Nice weather we're having, huh?
+I'm here about the thing we talked about on the phone

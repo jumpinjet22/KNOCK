@@ -651,6 +651,35 @@ responses), using whatever training stack the person prefers (PEFT/
 transformers, Axolotl, Unsloth, etc.) pointed at the exported file. KNOCK
 only produces the training data; it doesn't run or manage the fine-tune.
 
+**Synthetic data generation is also built**, as two local, manually-run
+scripts (not part of the automated test suite, same posture as
+`scripts/smoke_test_providers.py`) -- because a hand-written scenario
+list can't capture how chaotic a real doorbell is:
+
+- `scripts/generate_scenarios.py` (Stage 1) uses one or more local Ollama
+  models to synthesize a large, varied, randomized set of realistic
+  visitor lines per intent category -- reusing `Orchestrator`'s own
+  `_INTENT_DESCRIPTIONS`/`_LLM_CLASSIFIABLE_INTENTS` as the category
+  taxonomy, so there's one place categories are defined, not two.
+  Categories round-robin across every given model so the synthetic input
+  distribution isn't biased by a single model's "imagination."
+- `scripts/generate_training_data.py` (Stage 2) runs a scenario file
+  (Stage 1's output, or the hand-written `scripts/training_scenarios.txt`
+  seed set) through one or more teacher models via the real
+  `Orchestrator`/`PolicyEngine`, recording every response to the real
+  audit log. The same scenario answered by several models shows up as
+  separate Training-page cards with identical visitor text and different
+  candidate responses -- pick the best, reject the rest.
+- The **Training page's Pending tab is a one-at-a-time triage view**
+  (not a long scrollable list) -- one focused card, fine-tune the
+  response, "Approve & Next"/"Reject & Next" auto-advances, "Back" undoes
+  the last decision. This matters beyond just scale: dense multi-item
+  review UIs are a real cognitive-load problem for some people (ADHD/
+  autism), not just an inconvenience at high volume, so one-at-a-time is
+  the default review experience here, not a special "large batch" mode.
+  Approved/Rejected tabs keep the original full-list view, since browsing
+  already-decided items doesn't have the same problem.
+
 Still open: actually loading a fine-tuned/distilled model back into the
 `OllamaConfig.model` setting and comparing its real-world performance
 against the current prompt-engineered general-purpose model -- the loop
