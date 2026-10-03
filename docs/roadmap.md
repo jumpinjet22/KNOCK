@@ -323,6 +323,7 @@ Connect KNOCK to external systems.
 - UniFi Protect
 - ONVIF cameras
 - ESPHome
+- SIP / VoIP
 
 ## Definitions
 
@@ -343,6 +344,21 @@ Home Assistant is a local smart home automation platform.
 ONVIF is a common camera communication standard. A single ONVIF-generic
 bridge can cover a wide range of budget/no-name doorbells at once, the same
 way Reolink and Amcrest also expose ONVIF alongside their own local APIs.
+
+### SIP / VoIP
+
+SIP matters for two different reasons here, worth keeping separate:
+
+- **As a bridge, like UniFi/ONVIF.** A lot of apartment/commercial door
+  entry hardware (2N, Akuvox, Fermax, Doorbird) is SIP-based rather than a
+  consumer IP camera -- a SIP bridge would let KNOCK answer those systems
+  too, which matters for the long-term goal's churches/offices/community
+  centers beyond a single-family home.
+- **As a transport for live intercom's human handoff.** Instead of (or
+  alongside) a push notification needing the web app open, KNOCK could
+  place an actual SIP/VoIP call to a real phone number during the "hold
+  on, let me get someone" fallback (see Phase 7's live intercom mode) --
+  so answering doesn't require the app, just picking up a ringing call.
 
 ### Battery-powered doorbells
 
@@ -421,6 +437,11 @@ in a browser means real-time streaming (WebRTC or similar) in both
 directions, which is the audio counterpart to the live video preview
 already flagged as future work -- true WebRTC/HLS restreaming was
 explicitly called out as out of scope for the first version of that.
+
+SIP (Phase 6) is the other transport option for this same handoff -- a
+real phone call instead of a web UI session, so answering doesn't need
+the app open. The two aren't exclusive; which one a given household wants
+is a settings choice, not an either/or architecture decision.
 
 ## Notes
 
