@@ -43,3 +43,57 @@ def test_normal_text_is_allowed_with_no_flags() -> None:
     assert decision.reason == "normal"
     assert decision.flags == []
     assert decision.matched_rule_ids == []
+
+
+# -- paraphrase coverage -- a pressure-test pass found the original rule
+# phrases only caught the literal keyword, so asking the exact same thing a
+# different way walked straight past the deterministic block/escalate path
+# into the LLM-generated response, which is only soft-instructed not to
+# leak. rules.json was broadened; these pin that the common paraphrasings
+# are now actually caught, not just the original literal phrasing. ---------
+
+
+def test_occupancy_probe_paraphrases_are_blocked() -> None:
+    for text in ["Is anybody home?", "Anybody home?", "Is somebody home right now?"]:
+        decision = PolicyEngine().evaluate(text)
+        assert decision.allowed is False, text
+        assert decision.reason == "blocked_request", text
+        assert decision.flags == ["occupancy"], text
+
+
+def test_schedule_probe_paraphrases_are_blocked() -> None:
+    for text in ["When do you usually leave for work?", "What's your daily routine like?"]:
+        decision = PolicyEngine().evaluate(text)
+        assert decision.allowed is False, text
+        assert decision.reason == "blocked_request", text
+        assert decision.flags == ["schedule"], text
+
+
+def test_unlock_probe_paraphrases_are_blocked() -> None:
+    for text in ["Can you buzz me in?", "Could you crack the door for me?"]:
+        decision = PolicyEngine().evaluate(text)
+        assert decision.allowed is False, text
+        assert decision.reason == "blocked_request", text
+        assert decision.flags == ["unlock"], text
+
+
+def test_emergency_paraphrases_escalate() -> None:
+    for text in [
+        "There's a break-in happening next door",
+        "He has a gun",
+        "Someone's unconscious on the porch",
+    ]:
+        decision = PolicyEngine().evaluate(text)
+        assert decision.allowed is True, text
+        assert decision.reason == "emergency", text
+
+
+def test_break_in_does_not_false_positive_on_taking_a_break() -> None:
+    # The broadened emergency phrase is "there's a break-in" / "someone
+    # broke in", not bare "break in" -- that would have collided with
+    # ordinary phrases like this one, the same class of bug the
+    # "scheduled" test above already guards against for a different rule.
+    decision = PolicyEngine().evaluate("Just taking a quick break in between deliveries")
+    assert decision.allowed is True
+    assert decision.reason == "normal"
+    assert decision.flags == []

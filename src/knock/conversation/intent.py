@@ -92,6 +92,16 @@ def classify_intent(text: str) -> str:
     # bare "uber"/"lyft" reaches this check, it only ever means an actual ride.
     if any(k in lowered for k in _RIDE_KEYWORDS):
         return "ride_arrived"
+    # Via Orchestrator.respond(), PolicyEngine's rules.json already matches
+    # (and now, after a pressure-test pass, matches more broadly than) the
+    # two checks below, so text reaching here through that path never
+    # contains a bare phrase these two already caught -- see policy.py.
+    # They're kept anyway: classify_intent() is a public function other
+    # callers can use directly without going through PolicyEngine first,
+    # and both have their own direct unit tests pinning this exact
+    # behavior (test_classifies_help_keywords_as_emergency,
+    # test_classifies_occupancy_probes) as part of its contract, not just
+    # Orchestrator's.
     if any(k in lowered for k in ["help", "emergency", "fire", "medical"]):
         return "emergency"
     if any(k in lowered for k in ["are you home", "anyone home"]):
