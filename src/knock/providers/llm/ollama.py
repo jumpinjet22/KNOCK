@@ -1,9 +1,31 @@
 from __future__ import annotations
 
+import re
+
 import httpx
 
 from knock.config import OllamaConfig
 from knock.conversation.prompts import SYSTEM_PROMPT
+
+# Some reasoning models (e.g. deepseek-r1) always emit a literal <think>...
+# </think> block ahead of their real answer, ignoring the "think": False
+# request below -- that option only suppresses hidden reasoning for models
+# Ollama has a dedicated toggle for (e.g. qwen3.5). Left unstripped, a long
+# reasoning block routinely overruns PolicyEngine.apply_style()'s 140-char
+# cap before the real answer even starts, so every response comes out as
+# truncated chain-of-thought instead of an actual reply.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    text = _THINK_BLOCK_RE.sub("", text)
+    # An unterminated <think> means the model was cut off mid-reasoning and
+    # never produced a real answer -- discard it rather than leak the
+    # dangling reasoning fragment. Callers already treat an empty result as
+    # "no usable response" and fall back to a safe default.
+    if "<think>" in text:
+        text = text.split("<think>", 1)[0]
+    return text.strip()
 
 
 class OllamaProvider:
@@ -38,7 +60,7 @@ class OllamaProvider:
         )
         response.raise_for_status()
         data = response.json()
-        return str(data.get("response", "")).strip()
+        return _strip_thinking(str(data.get("response", "")))
 
     def close(self) -> None:
         self._client.close()

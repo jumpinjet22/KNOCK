@@ -43,3 +43,37 @@ def test_generate_raises_on_http_error() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         OllamaProvider(config=config).generate("hi")
+
+
+@respx.mock
+def test_generate_strips_a_completed_think_block() -> None:
+    config = OllamaConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "response": "<think>\nreasoning about the reply\n</think>\n\nLeave it by the door."
+            },
+        )
+    )
+
+    result = OllamaProvider(config=config).generate("hi")
+
+    assert result == "Leave it by the door."
+
+
+@respx.mock
+def test_generate_drops_an_unterminated_think_block() -> None:
+    # A model cut off mid-reasoning (e.g. deepseek-r1 hitting PolicyEngine's
+    # length cap before closing </think>) never produced a real answer --
+    # the result should be empty, not the dangling reasoning fragment.
+    config = OllamaConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(
+            200, json={"response": "<think>\nokay so I need to figure out how to"}
+        )
+    )
+
+    result = OllamaProvider(config=config).generate("hi")
+
+    assert result == ""
