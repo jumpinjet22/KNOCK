@@ -35,12 +35,39 @@ _ENTRY_INVITATION_PHRASES = (
     "go ahead and come",
 )
 
+# "I'll let them/the homeowner know you're here" (or any variant: "you
+# stopped by", "you arrived", "you need a signature") confirms to the
+# visitor that a specific person exists and is being told, in real time,
+# that they're present -- exactly the occupancy-confirmation this whole
+# system exists to prevent. This is not a one-off: it was the single
+# dominant rejection reason across an entire night's worth of synthetic
+# training-data review (every teacher model produced it, not just one),
+# and live-verification after tightening the prompt's suggested example
+# text reproduced it again -- a model's own default phrasing tendency for
+# this kind of reply is strong enough that prompt wording alone isn't
+# reliable. "I'll pass that along" (addressed generically, not "to them")
+# is the safe relay pattern and is NOT caught by this list.
+_OCCUPANCY_CONFIRMATION_PHRASES = (
+    "let them know you",
+    "let him know you",
+    "let her know you",
+    "let the homeowner know",
+    "they'll come",
+    "they will come",
+    "come down",
+    "come grab",
+    "come sign",
+)
+
 SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."
 
 
-def _contains_entry_invitation(text: str) -> bool:
+def _contains_unsafe_disclosure(text: str) -> bool:
     lowered = text.lower()
-    return any(phrase in lowered for phrase in _ENTRY_INVITATION_PHRASES)
+    return any(
+        phrase in lowered
+        for phrase in (*_ENTRY_INVITATION_PHRASES, *_OCCUPANCY_CONFIRMATION_PHRASES)
+    )
 
 
 class PolicyDecision(BaseModel):
@@ -94,8 +121,8 @@ class PolicyEngine:
 
     def apply_style(self, response: str) -> str:
         styled = response.strip()[:140]
-        if _contains_entry_invitation(styled):
-            logger.warning("Response flagged as inviting entry, suppressing: %r", styled)
+        if _contains_unsafe_disclosure(styled):
+            logger.warning("Response flagged as an unsafe disclosure, suppressing: %r", styled)
             return SAFE_RESPONSE_FALLBACK
         return styled
 

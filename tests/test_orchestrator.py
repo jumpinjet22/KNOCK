@@ -377,9 +377,7 @@ def test_summarize_for_notification_falls_back_on_a_blank_llm_reply() -> None:
 
 
 def test_unknown_message_gets_refined_by_the_llm_into_a_specific_intent() -> None:
-    llm = _SequencedLLMProvider(
-        ["service_appointment", "Thanks, I'll let them know you're here for your appointment."]
-    )
+    llm = _SequencedLLMProvider(["service_appointment", "Thanks, I'll pass that along."])
     decision = Orchestrator(llm_provider=llm).respond(
         _event("I'm here to fix the water heater, I have an appointment")
     )
@@ -387,7 +385,7 @@ def test_unknown_message_gets_refined_by_the_llm_into_a_specific_intent() -> Non
     assert decision.intent == "service_appointment"
     assert len(llm.prompts) == 2
     assert "Pick the single" not in llm.prompts[0]  # sanity: not asserting exact wording
-    assert decision.text == "Thanks, I'll let them know you're here for your appointment."
+    assert decision.text == "Thanks, I'll pass that along."
 
 
 def test_llm_refinement_is_never_consulted_when_keywords_already_matched() -> None:

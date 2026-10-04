@@ -45,7 +45,7 @@ def test_normal_text_is_allowed_with_no_flags() -> None:
     assert decision.matched_rule_ids == []
 
 
-# -- apply_style's entry-invitation backstop ---------------------------------
+# -- apply_style's unsafe-disclosure backstop --------------------------------
 #
 # Found via adversarial testing: a visitor phrasing an entry request in a
 # way that dodges PolicyEngine's exact "let me in" rule (e.g. "mind letting
@@ -75,6 +75,24 @@ def test_apply_style_catches_several_invitation_phrasings() -> None:
 def test_apply_style_leaves_a_normal_response_unchanged() -> None:
     styled = PolicyEngine().apply_style("Thanks, I'll pass that along.")
     assert styled == "Thanks, I'll pass that along."
+
+
+def test_apply_style_suppresses_occupancy_confirming_phrasing() -> None:
+    # Found via live verification after the entry-invitation fix: this
+    # "let them know you're here" pattern is the model's own strong
+    # default tendency for this kind of reply, independent of what the
+    # prompt's example text suggests -- it was the dominant rejection
+    # reason across an entire night's worth of synthetic training-data
+    # review, across every teacher model, not a one-off slip.
+    engine = PolicyEngine()
+    for phrase in [
+        "I'll let them know you're here for a signature.",
+        "Sure, I'll let them know you stopped by.",
+        "I'll let the homeowner know you've arrived.",
+        "They'll come down in a minute.",
+        "Someone will come grab it from you shortly.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 
 
 def test_apply_style_still_truncates_to_140_chars() -> None:
