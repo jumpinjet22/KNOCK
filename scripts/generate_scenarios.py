@@ -24,11 +24,14 @@ Usage:
 
 Reuses the same category descriptions Orchestrator itself uses to phrase
 responses (`_INTENT_DESCRIPTIONS`) so there's one taxonomy, not two.
-Categories round-robin across every given model, so the synthetic input
-distribution isn't biased by a single model's "imagination." Minimal
-automated hygiene only (dedup, drop degenerate lines) -- real judgment-
-based filtering happens later, in the Training page's human review step,
-not here.
+Every category gets a share of each given model's output, so the synthetic
+input distribution isn't biased by a single model's "imagination" -- but
+each model is loaded once and runs through every category before handing
+off to the next, instead of swapping models on every batch call, since
+Ollama only keeps one model resident in VRAM at a time. Minimal automated
+hygiene only (dedup, drop degenerate lines) -- real judgment-based
+filtering happens later, in the Training page's human review step, not
+here.
 """
 
 from __future__ import annotations
@@ -95,51 +98,64 @@ def generate_batch(provider: OllamaProvider, description: str, batch_size: int) 
     return [line.strip(" \t-*0123456789.") for line in text.splitlines() if line.strip()]
 
 
-def generate_category(
+def _split_evenly(total: int, parts: int) -> list[int]:
+    """Splits `total` into `parts` near-equal non-negative ints that sum to it."""
+    base, remainder = divmod(total, parts)
+    return [base + 1] * remainder + [base] * (parts - remainder)
+
+
+def generate_all_categories(
     models: list[str],
-    category: str,
+    categories: list[str],
     count: int,
     batch_size: int,
     *,
     host: str,
     port: int,
     timeout: float,
-) -> list[tuple[str, str]]:
-    """Returns (model_name, scenario_text) pairs, deduped case-insensitively,
-    dropping degenerate (<3-word) lines, round-robining across models
-    batch-by-batch until `count` unique lines are collected or models stop
-    producing anything new within a generous attempt budget.
+) -> dict[str, list[tuple[str, str]]]:
+    """Returns {category: [(model_name, scenario_text), ...]}, each list deduped
+    case-insensitively and dropping degenerate (<3-word) lines.
+
+    Each model is loaded once and generates its full quota across every
+    category before the next model is loaded, rather than round-robining
+    model-by-model on every batch call: Ollama only keeps one model resident
+    in VRAM, so swapping per batch means reloading large models from disk
+    over and over for no benefit. Categories still mix contributions from
+    every model (in model-major chunks) so the synthetic distribution isn't
+    biased by a single model's "imagination."
     """
-    description = _category_description(category)
-    collected: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    providers = {
-        model: OllamaProvider(
+    collected: dict[str, list[tuple[str, str]]] = {category: [] for category in categories}
+    seen: dict[str, set[str]] = {category: set() for category in categories}
+    model_quotas = _split_evenly(count, len(models))
+
+    for model, quota in zip(models, model_quotas, strict=True):
+        if quota <= 0:
+            continue
+        provider = OllamaProvider(
             config=OllamaConfig(host=host, port=port, model=model, timeout=timeout)
         )
-        for model in models
-    }
-    try:
-        attempts = 0
-        max_attempts = max(10, (count // batch_size + 2) * len(models) * 2)
-        while len(collected) < count and attempts < max_attempts:
-            model = models[attempts % len(models)]
-            attempts += 1
-            lines = generate_batch(providers[model], description, batch_size)
-            for line in lines:
-                if len(line.split()) < 3:
-                    continue
-                key = line.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                collected.append((model, line))
-                if len(collected) >= count:
-                    break
-    finally:
-        for provider in providers.values():
+        try:
+            for category in categories:
+                target = min(count, len(collected[category]) + quota)
+                description = _category_description(category)
+                attempts = 0
+                max_attempts = max(5, (quota // batch_size + 2) * 2)
+                while len(collected[category]) < target and attempts < max_attempts:
+                    attempts += 1
+                    for line in generate_batch(provider, description, batch_size):
+                        if len(line.split()) < 3:
+                            continue
+                        key = line.lower()
+                        if key in seen[category]:
+                            continue
+                        seen[category].add(key)
+                        collected[category].append((model, line))
+                        if len(collected[category]) >= target:
+                            break
+        finally:
             provider.close()
-    return collected[:count]
+    return collected
 
 
 def write_output(path: Path, by_category: dict[str, list[tuple[str, str]]]) -> None:
@@ -195,19 +211,18 @@ def main() -> int:
     if unknown_categories:
         parser.error(f"unknown categories: {unknown_categories}; choose from {_ALL_CATEGORIES}")
 
-    by_category: dict[str, list[tuple[str, str]]] = {}
+    by_category = generate_all_categories(
+        models,
+        categories,
+        args.count_per_category,
+        args.batch_size,
+        host=args.ollama_host,
+        port=args.ollama_port,
+        timeout=args.ollama_timeout,
+    )
     total_written = 0
     for category in categories:
-        pairs = generate_category(
-            models,
-            category,
-            args.count_per_category,
-            args.batch_size,
-            host=args.ollama_host,
-            port=args.ollama_port,
-            timeout=args.ollama_timeout,
-        )
-        by_category[category] = pairs
+        pairs = by_category[category]
         total_written += len(pairs)
         print(f"{category}: {len(pairs)}/{args.count_per_category} unique scenarios generated")
         if len(pairs) < args.count_per_category:
