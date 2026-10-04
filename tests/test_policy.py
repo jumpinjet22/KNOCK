@@ -95,6 +95,23 @@ def test_apply_style_suppresses_occupancy_confirming_phrasing() -> None:
         assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 
 
+def test_apply_style_catches_a_weaker_models_bare_and_person_variants() -> None:
+    # A second, weaker model (llama3.1:8b) found still more variants the
+    # first pass of this backstop missed -- "I'll let them know." with no
+    # trailing clause at all, and "the person"/"the person inside" used in
+    # place of "them"/"the homeowner". Confirms this backstop is
+    # best-effort, not a one-time-complete list -- same stated philosophy
+    # as providers/vision/safety.py's own alarming-language filter.
+    engine = PolicyEngine()
+    for phrase in [
+        "Thanks, I'll let them know.",
+        "I'll let the person know to expect a signature.",
+        "I'll let the person inside know you're here.",
+        "I'll let the person in the house know you're here.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
 def test_apply_style_still_truncates_to_140_chars() -> None:
     styled = PolicyEngine().apply_style("x" * 200)
     assert len(styled) == 140

@@ -48,15 +48,24 @@ _ENTRY_INVITATION_PHRASES = (
 # reliable. "I'll pass that along" (addressed generically, not "to them")
 # is the safe relay pattern and is NOT caught by this list.
 _OCCUPANCY_CONFIRMATION_PHRASES = (
-    "let them know you",
-    "let him know you",
-    "let her know you",
+    # Deliberately bare "let them/him/her know" -- not just "...know
+    # you're here" -- since live testing on a second (weaker) model
+    # showed "I'll let them know." alone is a common enough shorthand for
+    # the same disclosure that requiring a trailing "you" let it through.
+    "let them know",
+    "let him know",
+    "let her know",
     "let the homeowner know",
+    "let the person know",
     "they'll come",
     "they will come",
     "come down",
     "come grab",
     "come sign",
+    "person inside",
+    "someone inside",
+    "in the house",
+    "in the home",
 )
 
 SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."
