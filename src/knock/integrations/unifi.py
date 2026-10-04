@@ -45,7 +45,7 @@ import re
 import tempfile
 import time
 import wave
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from importlib import resources
@@ -58,6 +58,7 @@ from uiprotect.stream import TalkbackStream
 
 from knock.config import (
     HomeAssistantConfig,
+    KnockConfig,
     KokoroConfig,
     OllamaConfig,
     UnifiConfig,
@@ -70,7 +71,14 @@ from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
+from knock.core.snapshot_store import SnapshotStore
 from knock.core.state import SessionState
+from knock.core.systems_check import (
+    is_systems_check_trigger,
+    run_systems_check,
+    summarize_systems_check,
+)
+from knock.core.tool_calling_detection import resolve_tool_calling
 from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
     KNOCK_COMING_TO_DOOR_ACTION,
@@ -254,6 +262,8 @@ class UnifiBridge:
         talkback_stream_factory: Any = TalkbackStream,
         rtsp_audio_capture: Callable[[str, float, int, bool], bytes] = _capture_rtsp_audio,
         ha_notifier: HomeAssistantNotifier | None = None,
+        snapshot_store: SnapshotStore | None = None,
+        public_base_url: str | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -269,6 +279,13 @@ class UnifiBridge:
         # Assistant); notify() itself is already a no-op without a
         # configured notify_service, so this stays harmless either way.
         self.ha_notifier = ha_notifier
+        self.snapshot_store = snapshot_store or SnapshotStore()
+        # None (the default) means notifications go out without a photo
+        # attachment -- see _build_snapshot_url. Needs to be an externally-
+        # reachable URL since Home Assistant's mobile app fetches it
+        # directly from the household's phone, not through KNOCK's own
+        # session system.
+        self.public_base_url = public_base_url
         self.client = client or ProtectApiClient(
             host=self.config.host,
             port=self.config.port,
@@ -361,6 +378,7 @@ class UnifiBridge:
         *,
         actions: list[dict[str, str]] | None = None,
         category: NotificationCategory = "fyi",
+        image_url: str | None = None,
     ) -> None:
         """Best-effort, off the event loop (the HTTP call itself is
         synchronous) -- a down or unconfigured Home Assistant never affects
@@ -370,10 +388,66 @@ class UnifiBridge:
             return
         try:
             await asyncio.to_thread(
-                self.ha_notifier.notify, message, actions=actions, category=category
+                self.ha_notifier.notify,
+                message,
+                actions=actions,
+                category=category,
+                image=image_url,
             )
         except Exception as exc:  # noqa: BLE001 - notification is best-effort
             logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
+
+    async def _build_snapshot_url(self, device_id: str, *, package: bool = False) -> str | None:
+        """Best-effort: None (no photo attached, notification still sent)
+        if `public_base_url` isn't configured, the snapshot fetch fails, or
+        the camera has no snapshot available. `package` selects the
+        doorbell's package camera (a separate, downward-angled lens) over
+        the main view -- a far more useful photo for a delivery than seeing
+        the front of the house.
+        """
+        if not self.public_base_url:
+            return None
+        try:
+            snapshot = await self.client.get_public_api_camera_snapshot(device_id, package=package)
+        except Exception as exc:  # noqa: BLE001 - photo attachment is best-effort
+            logger.warning("Snapshot fetch failed for device %s: %s", device_id, exc)
+            return None
+        if snapshot is None:
+            return None
+        token = self.snapshot_store.put(snapshot)
+        return f"{self.public_base_url.rstrip('/')}/api/snapshot/{token}"
+
+    async def _run_systems_check_and_reply(self, device_id: str) -> None:
+        """Voice-triggered diagnostic (see core/systems_check.py) -- tests
+        whatever's actually configured on this bridge and speaks back a
+        short result. Called by handle_event before orchestrator.respond()
+        is ever reached, so this never touches PolicyEngine/classification.
+        """
+        vision_provider = self.vision_provider
+        ha_notifier = self.ha_notifier
+
+        snapshot_fetcher: Callable[[], Awaitable[bytes | None]] | None = None
+        if vision_provider is not None:
+
+            async def snapshot_fetcher() -> bytes | None:
+                return await self.client.get_public_api_camera_snapshot(device_id)
+
+        notify: Callable[[str], None] | None = None
+        if ha_notifier is not None:
+
+            def notify(message: str) -> None:
+                ha_notifier.notify(message, category="fyi")
+
+        results = await run_systems_check(
+            llm_provider=self.orchestrator.llm_provider,
+            vision_provider=vision_provider,
+            snapshot_fetcher=snapshot_fetcher,
+            notify=notify,
+        )
+        summary = summarize_systems_check(results)
+        logger.info("Systems check for %s: %s", device_id, summary)
+        if self.tts_provider is not None:
+            await self.speak_to_visitor(device_id, summary)
 
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if not self.should_trigger(event):
@@ -408,6 +482,15 @@ class UnifiBridge:
             transcript = await self.listen_to_visitor(event.device_id)
             if transcript:
                 visitor_event = visitor_event.model_copy(update={"text": transcript})
+                # Checked before anything else touches this transcript --
+                # before vision enrichment, before PolicyEngine, before
+                # orchestrator.respond() is ever called. This is an operator
+                # diagnostic command, not a visitor-behavior classification,
+                # so it's handled entirely here rather than through
+                # rules.json/PolicyEngine.
+                if is_systems_check_trigger(transcript):
+                    await self._run_systems_check_and_reply(event.device_id)
+                    return None
             if self.tts_provider is not None:
                 await self._play_thinking_tone(event.device_id)
 
@@ -456,7 +539,38 @@ class UnifiBridge:
             if self.tts_provider is not None:
                 await self.speak_to_visitor(event.device_id, decision.text)
 
-            if decision.intent in ("delivery_signature_required", "food_delivery"):
+            intent = decision.intent or "unknown"
+
+            if decision.needs_review:
+                # Closes the gap where a visitor's phrasing matched neither
+                # the keyword rules nor a confident LLM category: previously
+                # this silently fell through as "unknown" with zero
+                # notification (see Orchestrator._refine_unknown_intent_via_tools
+                # for how "uncertain" is decided). Mutually exclusive with
+                # the intent-specific branches below -- this is already the
+                # richer notification (summary, top-3 guesses, photo), so
+                # sending both would double-notify the household for one visit.
+                candidate_text = (
+                    ", ".join(decision.review_candidates)
+                    if decision.review_candidates
+                    else "unclear"
+                )
+                fallback = f"Unsure what a visitor at the door wants (camera: {event.device_id})."
+                details = self.orchestrator.extract_notification_details(
+                    visitor_event.text, intent, fallback=fallback
+                )
+                summary = decision.review_summary or details.summary
+                # Main camera, not the package camera -- the uncertain case
+                # is "who/what is this," not a known delivery.
+                image_url = await self._build_snapshot_url(event.device_id, package=False)
+                await self._notify_household(
+                    event.device_id,
+                    f"{summary} (best guesses: {candidate_text})",
+                    category="review",
+                    image_url=image_url,
+                )
+
+            elif intent in ("delivery_signature_required", "food_delivery"):
                 # Both are time-sensitive in a way a plain delivery isn't
                 # (can't just be left indefinitely), so the household gets
                 # "I'm on my way" / "Turn them away" buttons, not just an
@@ -464,20 +578,25 @@ class UnifiBridge:
                 # along embedded in the action identifier itself.
                 fallback = (
                     f"A delivery at the door needs a signature (camera: {event.device_id})."
-                    if decision.intent == "delivery_signature_required"
+                    if intent == "delivery_signature_required"
                     else f"A food delivery is at the door (camera: {event.device_id})."
                 )
-                summary = self.orchestrator.summarize_for_notification(
-                    visitor_event.text, fallback=fallback
+                details = self.orchestrator.extract_notification_details(
+                    visitor_event.text, intent, fallback=fallback
                 )
+                # The doorbell's package camera (a separate, downward-angled
+                # lens from the main view) shows the actual package instead
+                # of just the front of the house.
+                image_url = await self._build_snapshot_url(event.device_id, package=True)
                 await self._notify_household(
                     event.device_id,
-                    summary,
+                    details.summary,
                     actions=self._approval_actions(event.device_id),
                     category="approval",
+                    image_url=image_url,
                 )
 
-            if decision.intent in ("official_visit", "suspicious_activity", "ride_arrived"):
+            elif intent in ("official_visit", "suspicious_activity", "ride_arrived"):
                 # No button-press decision to make here, just an FYI.
                 # ride_arrived is here because a waiting driver is
                 # time-sensitive the same way food is; visitation
@@ -487,13 +606,14 @@ class UnifiBridge:
                     "official_visit": "Someone claiming official business is at the door",
                     "suspicious_activity": "Possibly concerning activity at the door",
                     "ride_arrived": "A rideshare/taxi driver is here for pickup",
-                }[decision.intent] + f" (camera: {event.device_id})."
-                summary = self.orchestrator.summarize_for_notification(
-                    visitor_event.text, fallback=fallback
+                }[intent] + f" (camera: {event.device_id})."
+                details = self.orchestrator.extract_notification_details(
+                    visitor_event.text, intent, fallback=fallback
                 )
-                await self._notify_household(event.device_id, summary)
+                image_url = await self._build_snapshot_url(event.device_id, package=False)
+                await self._notify_household(event.device_id, details.summary, image_url=image_url)
 
-            if decision.intent == "service_appointment":
+            elif intent == "service_appointment":
                 # A technician who's arrived and getting no response will
                 # leave, so this carries a single acknowledgement button
                 # (see `_coming_to_door_action`) rather than a plain FYI --
@@ -504,14 +624,16 @@ class UnifiBridge:
                     "A technician has arrived for a service appointment "
                     f"(camera: {event.device_id})."
                 )
-                summary = self.orchestrator.summarize_for_notification(
-                    visitor_event.text, fallback=fallback
+                details = self.orchestrator.extract_notification_details(
+                    visitor_event.text, intent, fallback=fallback
                 )
+                image_url = await self._build_snapshot_url(event.device_id, package=False)
                 await self._notify_household(
                     event.device_id,
-                    summary,
+                    details.summary,
                     actions=self._coming_to_door_action(event.device_id),
                     category="approval",
+                    image_url=image_url,
                 )
 
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
@@ -726,8 +848,13 @@ async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistant
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    ollama_config = OllamaConfig.from_env()
+    orchestrator = Orchestrator(
+        llm_provider=OllamaProvider(config=ollama_config),
+        use_tool_calling=resolve_tool_calling(ollama_config),
+    )
     ha_config = HomeAssistantConfig.from_env()
+    knock_config = KnockConfig.from_env()
     bridge = UnifiBridge(
         config=UnifiConfig.from_env(),
         orchestrator=orchestrator,
@@ -742,6 +869,7 @@ def main() -> None:
         # audit.jsonl / the web UI's History page -- the CLI and web API
         # already construct a real JSONLAuditLog() the same way.
         audit_log=JSONLAuditLog(),
+        public_base_url=knock_config.public_base_url,
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import httpx
+from pydantic import BaseModel, Field
 
 from knock.config import OllamaConfig
 from knock.conversation.prompts import SYSTEM_PROMPT
@@ -26,6 +28,23 @@ def _strip_thinking(text: str) -> str:
     if "<think>" in text:
         text = text.split("<think>", 1)[0]
     return text.strip()
+
+
+class ToolCall(BaseModel):
+    """One function call Ollama's `/api/chat` asked the caller to run."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatToolResult(BaseModel):
+    """Result of a `chat_with_tools` call -- any tool calls the model made,
+    plus whatever plain text it answered with (often empty when it called a
+    tool instead of replying directly).
+    """
+
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    content: str = ""
 
 
 class OllamaProvider:
@@ -61,6 +80,37 @@ class OllamaProvider:
         response.raise_for_status()
         data = response.json()
         return _strip_thinking(str(data.get("response", "")))
+
+    def chat_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]]
+    ) -> ChatToolResult:
+        """Structured tool-calling via Ollama's `/api/chat`, unlike `generate()`'s
+        plain `/api/generate` -- used where a caller needs a reliably-shaped
+        answer (e.g. a classification from a fixed set of categories) instead
+        of free text to exact-match against.
+        """
+        response = self._client.post(
+            f"{self.config.base_url}/api/chat",
+            json={
+                "model": self.config.model,
+                "messages": messages,
+                "tools": tools,
+                "stream": False,
+                "think": False,
+            },
+        )
+        response.raise_for_status()
+        message = response.json().get("message") or {}
+        tool_calls = [
+            ToolCall(
+                name=str((call.get("function") or {}).get("name", "")),
+                arguments=(call.get("function") or {}).get("arguments") or {},
+            )
+            for call in message.get("tool_calls") or []
+        ]
+        return ChatToolResult(
+            tool_calls=tool_calls, content=_strip_thinking(str(message.get("content", "")))
+        )
 
     def close(self) -> None:
         self._client.close()

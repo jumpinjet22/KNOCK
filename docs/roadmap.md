@@ -547,6 +547,8 @@ just another settings field.
 - Installable web app (PWA / "Chrome app")
 - Self-hosted OIDC sign-in (Authentik, etc.)
 - Calendar integration
+- Structured tool-calling classification + rich notifications
+- Per-task model routing ("model load balancing")
 
 ## Definitions
 
@@ -684,6 +686,95 @@ Still open: actually loading a fine-tuned/distilled model back into the
 `OllamaConfig.model` setting and comparing its real-world performance
 against the current prompt-engineered general-purpose model -- the loop
 isn't closed until someone's actually run it and compared.
+
+### Structured tool-calling classification + rich notifications ✅ Done
+
+Classification moved from plain-text generation + exact-string-match
+(`OllamaProvider.generate()`) onto real Ollama tool-calling
+(`chat_with_tools()`, Ollama's `/api/chat` + a `tools` schema) when the
+configured model supports it -- `classify_intent` returns a ranked top-3
+list with confidence instead of one guessed word, structurally unable to
+hallucinate a category outside the fixed list.
+
+This closed a real gap found while auto-reviewing a night's worth of
+synthetic training data: household notifications were only wired up for a
+fixed intent whitelist, so the catch-all `unknown` intent had **no
+notification path at all** -- a visitor's phrasing that matched neither
+the keyword rules nor a confident LLM category silently vanished with zero
+alert. Now, when confidence is genuinely low (a deterministic floor/margin
+check on the model's own reported confidence, not "whichever tool the
+model happened to call"), a `"review"` notification fires with a summary,
+the top-3 guesses, and a camera photo -- a `flag_for_review` tool call is
+only an additional OR'd signal into that check, never the sole trigger, so
+a model that under- or over-reports its own uncertainty still gets caught.
+
+A second tool call, `extract_notification_details`, replaced the old
+single-sentence `summarize_for_notification()` across *every* notification
+branch (not just the uncertain one) -- same call site, same cost, richer
+output: a natural summary plus structured fields (visitor name,
+organization, stated purpose, reference number) when the visitor actually
+stated them. Every notification also gets a photo now, not just uncertain
+ones, picking the doorbell's package camera for delivery-shaped intents
+and the main camera for everything else -- delivered via a short-lived,
+single-use, unguessable-token link (`core/snapshot_store.py` +
+`api/snapshot_routes.py`), since the phone fetches it directly, outside
+KNOCK's own session system, and a disk-backed store is required (not an
+in-memory dict) because `UnifiBridge` runs as its own OS subprocess,
+separate from the FastAPI process serving that route.
+
+`OllamaConfig.use_tool_calling` is tri-state (`bool | None`), not a plain
+flag: unset ("auto") runs a two-stage capability check at bridge
+startup -- Ollama's own reported model capabilities, then a live
+functional smoke test, since a model can claim `"tools"` support without
+reliably producing a well-formed call in practice. An explicit `True`/
+`False` is a sticky operator override that skips detection entirely, and
+an explicit `False` is never silently re-enabled by a later restart's
+auto-detection -- only the operator changing it back does that.
+
+A related, lower-stakes voice command landed alongside this: saying
+"systems check" at the door (`core/systems_check.py`) runs a real
+functional test of whatever's actually configured on that bridge -- pings
+the LLM, fetches a real camera snapshot and describes it, sends a real
+test notification -- and speaks back "All systems operational" or what's
+down. Handled entirely at the bridge level, before `PolicyEngine` or
+`orchestrator.respond()` ever sees the transcript, since it's an operator
+diagnostic command, not a visitor-behavior classification.
+
+Building this also surfaced and fixed a pre-existing production bug,
+unrelated to tool-calling itself: the response-phrasing templates for
+several intents (`delivery_signature_required`, `food_delivery`,
+`ride_arrived`, `visitation`, `service_appointment`) literally instructed
+"I'll let them/the homeowner know you're here" as the example wording --
+the same occupancy-confirming pattern that turned out to be the dominant
+rejection reason across that night's entire training-data review, except
+baked into live production output, not just something models drifted
+into on their own. Reworded to relay-style phrasing ("I'll pass that
+along") that doesn't confirm anyone's actually home to act on it right
+now, in both `conversation/responses.py`'s static fallback text and
+`orchestrator.py`'s `_INTENT_DESCRIPTIONS` LLM-prompt hints.
+
+Hard safety constraint preserved throughout: `PolicyEngine.evaluate()`
+still makes every block/allow/escalate decision deterministically, before
+the LLM is ever touched -- tool-calling only affects classification labels
+and notification content, never `PolicyDecision`/`ResponseDecision.escalate`
+or anything that could unlock/open a door.
+
+### Per-task model routing ("model load balancing")
+
+Right now every LLM call `Orchestrator` makes -- classification, response
+phrasing, notification-detail extraction -- goes through one globally
+configured model (`OllamaConfig.model`). But different local models turned
+out to have meaningfully different strengths and failure modes on
+different *specific* jobs, not uniformly better-or-worse overall (e.g. one
+model's structured tool-calling was more reliable while another phrased
+more natural responses; a reasoning model's raw `<think>` leakage was a
+problem for response phrasing specifically). Idea: let each distinct call
+-- classification, response phrasing, notification extraction, vision
+description -- be configured to use whichever model is actually best at
+that job, instead of forcing one model to do everything. Likely shaped as
+a per-task model override on top of the existing global default (fall
+back to `OllamaConfig.model` when a task-specific override isn't set),
+rather than a new standalone config system.
 
 ---
 

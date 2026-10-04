@@ -39,7 +39,9 @@ def test_response_decision_carries_the_classified_intent() -> None:
 
 def test_delivery_signature_required_intent() -> None:
     decision = Orchestrator().respond(_event("I have a package that needs a signature"))
-    assert "homeowner" in decision.text.lower()
+    # "pass that along" rather than "the homeowner will come sign" --
+    # never confirms anyone's actually home to act on it right now.
+    assert "pass that along" in decision.text.lower()
     assert "leave the package" not in decision.text.lower()
     assert decision.escalate is False
 
@@ -445,7 +447,7 @@ def test_ride_arrived_intent_via_keyword() -> None:
     # "uber" is a keyword match, so this never consults the LLM at all.
     decision = Orchestrator().respond(_event("Your Uber is here"))
     assert decision.intent == "ride_arrived"
-    assert "ride" in decision.text.lower()
+    assert "pass that along" in decision.text.lower()
 
 
 def test_visitation_intent_via_llm_refinement() -> None:

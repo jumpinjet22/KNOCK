@@ -44,6 +44,31 @@ class KnockConfig(BaseModel):
 
     app_name: str = "KNOCK"
     short_response_limit: int = Field(default=140, ge=20, le=500)
+    # Externally-reachable base URL for KNOCK's own web API (e.g. behind a
+    # reverse proxy or a tunnel) -- needed so a notification's photo
+    # attachment URL (see unifi.py's _build_snapshot_url) is fetchable from
+    # the household's phone, not just from localhost. None (the default)
+    # means notifications go out without a photo attachment.
+    public_base_url: str | None = None
+
+    @classmethod
+    def from_env(cls) -> KnockConfig:
+        return cls(
+            app_name=os.environ.get("KNOCK_APP_NAME", "KNOCK"),
+            short_response_limit=int(os.environ.get("KNOCK_SHORT_RESPONSE_LIMIT", "140")),
+            public_base_url=os.environ.get("KNOCK_PUBLIC_BASE_URL"),
+        )
+
+    @classmethod
+    def from_sources(cls, store: ConfigStore) -> KnockConfig:
+        s = store.get_section("knock")
+        return cls(
+            app_name=_resolve("KNOCK_APP_NAME", s, "app_name", "KNOCK"),
+            short_response_limit=_resolve(
+                "KNOCK_SHORT_RESPONSE_LIMIT", s, "short_response_limit", 140, int
+            ),
+            public_base_url=_resolve("KNOCK_PUBLIC_BASE_URL", s, "public_base_url", None),
+        )
 
 
 class OllamaConfig(BaseModel):
@@ -53,6 +78,20 @@ class OllamaConfig(BaseModel):
     port: int = 11434
     model: str = "llama3.2"
     timeout: float = 30.0
+    # Tri-state, not a plain bool: None ("auto") means a bridge should
+    # capability-detect at startup (see core/tool_calling_detection.py)
+    # rather than trusting a hardcoded default -- not every local model
+    # handles Ollama tool-calling reliably. An explicit True/False is a
+    # sticky operator override that skips detection entirely; in
+    # particular, an explicit False is never silently re-enabled by
+    # detection on a later restart, only by the operator changing it back.
+    use_tool_calling: bool | None = None
+    # Below this top-candidate confidence, or when the top two candidates'
+    # confidences are within this margin of each other, classify_intent's
+    # tool-call result is treated as "not a clear single winner" and
+    # flag_for_review fires (see Orchestrator._refine_unknown_intent_via_tools).
+    intent_review_confidence_floor: float = 0.5
+    intent_review_confidence_margin: float = 0.15
 
     @property
     def base_url(self) -> str:
@@ -60,11 +99,21 @@ class OllamaConfig(BaseModel):
 
     @classmethod
     def from_env(cls) -> OllamaConfig:
+        use_tool_calling_raw = os.environ.get("KNOCK_OLLAMA_USE_TOOL_CALLING")
         return cls(
             host=os.environ.get("KNOCK_OLLAMA_HOST", "127.0.0.1"),
             port=int(os.environ.get("KNOCK_OLLAMA_PORT", "11434")),
             model=os.environ.get("KNOCK_OLLAMA_MODEL", "llama3.2"),
             timeout=float(os.environ.get("KNOCK_OLLAMA_TIMEOUT", "30.0")),
+            use_tool_calling=(
+                _bool(use_tool_calling_raw) if use_tool_calling_raw is not None else None
+            ),
+            intent_review_confidence_floor=float(
+                os.environ.get("KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_FLOOR", "0.5")
+            ),
+            intent_review_confidence_margin=float(
+                os.environ.get("KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_MARGIN", "0.15")
+            ),
         )
 
     @classmethod
@@ -75,6 +124,23 @@ class OllamaConfig(BaseModel):
             port=_resolve("KNOCK_OLLAMA_PORT", s, "port", 11434, int),
             model=_resolve("KNOCK_OLLAMA_MODEL", s, "model", "llama3.2"),
             timeout=_resolve("KNOCK_OLLAMA_TIMEOUT", s, "timeout", 30.0, float),
+            use_tool_calling=_resolve(
+                "KNOCK_OLLAMA_USE_TOOL_CALLING", s, "use_tool_calling", None, _bool
+            ),
+            intent_review_confidence_floor=_resolve(
+                "KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_FLOOR",
+                s,
+                "intent_review_confidence_floor",
+                0.5,
+                float,
+            ),
+            intent_review_confidence_margin=_resolve(
+                "KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_MARGIN",
+                s,
+                "intent_review_confidence_margin",
+                0.15,
+                float,
+            ),
         )
 
 

@@ -51,6 +51,30 @@ def test_ollama_from_sources_env_var_wins_over_store(tmp_path, monkeypatch) -> N
     assert config.host == "10.0.0.1"
 
 
+def test_ollama_use_tool_calling_defaults_to_none_for_auto_detect(tmp_path) -> None:
+    config = OllamaConfig.from_sources(_store(tmp_path))
+    assert config.use_tool_calling is None
+
+
+def test_ollama_use_tool_calling_reads_an_explicit_false_from_the_store(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.set_section("ollama", {"use_tool_calling": False})
+
+    config = OllamaConfig.from_sources(store)
+
+    assert config.use_tool_calling is False
+
+
+def test_ollama_use_tool_calling_env_var_overrides_a_stored_value(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    store.set_section("ollama", {"use_tool_calling": False})
+    monkeypatch.setenv("KNOCK_OLLAMA_USE_TOOL_CALLING", "true")
+
+    config = OllamaConfig.from_sources(store)
+
+    assert config.use_tool_calling is True
+
+
 # -- Vision -------------------------------------------------------------------
 
 

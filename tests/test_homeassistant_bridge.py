@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -9,6 +10,7 @@ import respx
 import knock.integrations.homeassistant as homeassistant_module
 from knock.config import HomeAssistantConfig
 from knock.core.audit import JSONLAuditLog
+from knock.core.orchestrator import Orchestrator
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
@@ -18,6 +20,7 @@ from knock.integrations.homeassistant import (
     parse_action_device_id,
     websocket_url,
 )
+from knock.providers.llm.ollama import ChatToolResult, ToolCall
 
 
 class _FakeWebSocket:
@@ -175,6 +178,61 @@ def test_handle_state_changed_uses_the_emergency_category_on_escalation(tmp_path
     body = json.loads(route.calls.last.request.content)
     assert body["data"]["channel"] == "knock_emergency"
     assert body["data"]["push"]["interruption-level"] == "critical"
+
+
+class _FakeToolCallingLLMProvider:
+    """Local duplicate of the fake used in test_orchestrator_tool_calling.py
+    -- matches this repo's existing per-file fake-provider convention."""
+
+    name = "fake-tool-llm"
+
+    def __init__(self, chat_result: ChatToolResult) -> None:
+        self._chat_result = chat_result
+        self.config = SimpleNamespace(
+            intent_review_confidence_floor=0.5, intent_review_confidence_margin=0.15
+        )
+
+    def generate(self, prompt: str) -> str:
+        return "Thanks, noted."
+
+    def chat_with_tools(self, messages: list[dict[str, str]], tools: list[dict]) -> ChatToolResult:
+        return self._chat_result
+
+
+@respx.mock
+def test_handle_state_changed_uses_review_category_and_candidates_when_uncertain(tmp_path) -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    chat_result = ChatToolResult(
+        tool_calls=[
+            ToolCall(
+                name="classify_intent",
+                arguments={"top_3": [{"category": "visitation", "confidence": 0.3}]},
+            )
+        ]
+    )
+    orchestrator = Orchestrator(
+        llm_provider=_FakeToolCallingLLMProvider(chat_result), use_tool_calling=True
+    )
+    config = HomeAssistantConfig(
+        base_url="http://ha.local:8123",
+        token="secret-token",
+        trigger_entity_id="binary_sensor.front_doorbell",
+        notify_service="notify.mobile_app_test",
+    )
+    bridge = HomeAssistantBridge(
+        config=config, orchestrator=orchestrator, session_store=JSONFileSessionStore(tmp_path)
+    )
+    data = _state_changed("binary_sensor.front_doorbell", "off", "on")
+
+    decision = bridge.handle_state_changed(data)
+
+    assert decision is not None
+    assert decision.needs_review is True
+    body = json.loads(route.calls.last.request.content)
+    assert body["data"]["channel"] == "knock_review"
+    assert "visitation" in body["message"]
 
 
 @respx.mock
@@ -336,6 +394,7 @@ def test_notifier_calls_the_configured_service_with_a_bearer_token() -> None:
         ("emergency", "knock_emergency", "critical"),
         ("approval", "knock_approval", "time-sensitive"),
         ("fyi", "knock_fyi", "passive"),
+        ("review", "knock_review", "time-sensitive"),
     ],
 )
 def test_notifier_picks_channel_and_interruption_level_by_category(
@@ -374,6 +433,32 @@ def test_notifier_includes_action_buttons_when_given() -> None:
         {"action": "knock_on_my_way", "title": "I'm on my way"},
         {"action": "knock_turn_away", "title": "Turn them away"},
     ]
+
+
+@respx.mock
+def test_notifier_includes_image_when_given() -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.notify("Someone's here.", image="https://knock.example.com/api/snapshot/abc123")
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["data"]["image"] == "https://knock.example.com/api/snapshot/abc123"
+
+
+@respx.mock
+def test_notifier_omits_image_when_not_given() -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.notify("Someone's here.")
+
+    body = json.loads(route.calls.last.request.content)
+    assert "image" not in body["data"]
 
 
 def test_notifier_is_a_no_op_without_a_configured_service() -> None:

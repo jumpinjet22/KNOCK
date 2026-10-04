@@ -23,6 +23,7 @@ from knock.integrations.unifi import (
     _load_bundled_wav,
     _rms,
 )
+from knock.providers.llm.ollama import ChatToolResult, ToolCall
 from knock.providers.tts.base import SynthesizedAudio
 
 
@@ -823,13 +824,20 @@ def _conversational_bridge(
     tts_text_log: list[str],
     ha_notifier=None,
     orchestrator=None,
+    mock_client=None,
+    snapshot_store=None,
+    public_base_url=None,
+    vision_provider=None,
 ):
-    mock_client = MagicMock()
+    client_given = mock_client is not None
+    mock_client = mock_client or MagicMock()
     fake_camera = MagicMock()
     fake_camera.feature_flags.has_speaker = True
     fake_camera.rtsps_streams = _fake_rtsp_streams("rtsps://console/high")
     _with_bootstrap_camera(mock_client, "cam1", fake_camera)
     mock_client.create_talkback_session_public = AsyncMock(return_value=None)
+    if not client_given:
+        mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
 
     tts_provider = MagicMock()
 
@@ -857,6 +865,9 @@ def _conversational_bridge(
         rtsp_audio_capture=lambda url, duration, rate, verify_ssl: b"\x01\x02",
         talkback_stream_factory=stream_factory,
         ha_notifier=ha_notifier,
+        vision_provider=vision_provider,
+        snapshot_store=snapshot_store,
+        public_base_url=public_base_url,
     )
 
 
@@ -885,7 +896,7 @@ def test_handle_event_continues_the_conversation_while_the_visitor_keeps_talking
     responses = [text for text in tts_text_log if text != GREETING]
     assert len(responses) == 2
     assert "leave the package" in responses[0].lower()
-    assert "homeowner" in responses[1].lower()
+    assert "pass that along" in responses[1].lower()
 
     final_state = bridge.session_store.load("unifi-cam1")
     assert final_state is not None
@@ -1112,6 +1123,194 @@ def test_handle_event_notifies_home_assistant_on_suspicious_activity_without_but
     assert ha_notifier.notify.call_args.args[0] == "Someone is lingering at the door."
     assert ha_notifier.notify.call_args.kwargs.get("actions") is None
     assert ha_notifier.notify.call_args.kwargs.get("category") == "fyi"
+
+
+# -- review notifications (needs_review / tool-calling) --------------------------
+
+
+class _FakeToolCallingLLMProvider:
+    """Local duplicate matching this repo's existing per-file fake-provider
+    convention (see _SequencedLLMProvider above)."""
+
+    name = "fake-tool-llm"
+
+    def __init__(self, chat_result, phrasing: str = "Thanks, noted.") -> None:
+        self._chat_result = chat_result
+        self._phrasing = phrasing
+        self.config = SimpleNamespace(
+            intent_review_confidence_floor=0.5, intent_review_confidence_margin=0.15
+        )
+
+    def generate(self, prompt: str) -> str:
+        return self._phrasing
+
+    def chat_with_tools(self, messages, tools):
+        return self._chat_result
+
+
+def _low_confidence_chat_result() -> ChatToolResult:
+    return ChatToolResult(
+        tool_calls=[
+            ToolCall(
+                name="classify_intent",
+                arguments={"top_3": [{"category": "visitation", "confidence": 0.3}]},
+            )
+        ]
+    )
+
+
+def test_handle_event_notifies_with_review_category_candidates_and_image(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_FakeToolCallingLLMProvider(_low_confidence_chat_result()),
+        use_tool_calling=True,
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["some unrecognized phrasing", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+        public_base_url="https://knock.example.com",
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.kwargs.get("category") == "review"
+    assert "visitation" in ha_notifier.notify.call_args.args[0]
+    image = ha_notifier.notify.call_args.kwargs.get("image")
+    assert image is not None
+    assert image.startswith("https://knock.example.com/api/snapshot/")
+
+
+def test_handle_event_review_notification_has_no_image_without_public_base_url(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_FakeToolCallingLLMProvider(_low_confidence_chat_result()),
+        use_tool_calling=True,
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["some unrecognized phrasing", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+        public_base_url=None,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.kwargs.get("image") is None
+
+
+def test_handle_event_review_notification_survives_snapshot_fetch_failure(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_FakeToolCallingLLMProvider(_low_confidence_chat_result()),
+        use_tool_calling=True,
+    )
+    mock_client = MagicMock()
+    mock_client.get_public_api_camera_snapshot = AsyncMock(side_effect=RuntimeError("boom"))
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["some unrecognized phrasing", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+        mock_client=mock_client,
+        public_base_url="https://knock.example.com",
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.kwargs.get("category") == "review"
+    assert ha_notifier.notify.call_args.kwargs.get("image") is None
+
+
+def test_handle_event_does_not_use_review_category_for_a_confident_classification(
+    tmp_path,
+) -> None:
+    ha_notifier = MagicMock()
+    chat_result = ChatToolResult(
+        tool_calls=[
+            ToolCall(
+                name="classify_intent",
+                arguments={"top_3": [{"category": "official_visit", "confidence": 0.95}]},
+            )
+        ]
+    )
+    orchestrator = Orchestrator(
+        llm_provider=_FakeToolCallingLLMProvider(chat_result), use_tool_calling=True
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I'm with the city inspector's office", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.kwargs.get("category") != "review"
+
+
+# -- voice-triggered systems check -------------------------------------------------
+
+
+def test_handle_event_systems_check_short_circuits_before_orchestrator(tmp_path) -> None:
+    orchestrator = MagicMock()
+    tts_text_log: list[str] = []
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["systems check"],
+        tts_text_log=tts_text_log,
+        orchestrator=orchestrator,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is None
+    orchestrator.respond.assert_not_called()
+    # The greeting is still spoken (it happens before STT listens), but the
+    # systems-check result should be too.
+    assert any("operational" in text.lower() or "failed" in text.lower() for text in tts_text_log)
+
+
+def test_handle_event_systems_check_speaks_all_operational_when_nothing_configured(
+    tmp_path,
+) -> None:
+    orchestrator = MagicMock()
+    tts_text_log: list[str] = []
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["systems check"],
+        tts_text_log=tts_text_log,
+        orchestrator=orchestrator,
+    )
+    bridge.orchestrator.llm_provider = None
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    assert tts_text_log[-1] == "No systems configured to check."
+
+
+def test_handle_event_normal_speech_does_not_trigger_systems_check(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I have a package for you", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None  # orchestrator.respond() ran normally
 
 
 def test_handle_event_notifies_home_assistant_on_an_emergency(tmp_path) -> None:

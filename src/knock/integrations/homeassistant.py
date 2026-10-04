@@ -43,6 +43,7 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
+from knock.core.tool_calling_detection import resolve_tool_calling
 from knock.providers.llm.ollama import OllamaProvider
 
 logger = logging.getLogger(__name__)
@@ -85,12 +86,13 @@ def _default_session_id(entity_id: str) -> str:
 # Home Assistant app's one-time "Critical Notifications" permission, or
 # iOS silently treats it as a normal alert instead) all the way down to
 # "passive" (no sound/vibration, appears in the notification list only).
-NotificationCategory = Literal["emergency", "approval", "fyi"]
+NotificationCategory = Literal["emergency", "approval", "fyi", "review"]
 
 _CATEGORY_CHANNELS: dict[NotificationCategory, str] = {
     "emergency": "knock_emergency",
     "approval": "knock_approval",
     "fyi": "knock_fyi",
+    "review": "knock_review",
 }
 
 _CATEGORY_PUSH: dict[NotificationCategory, dict[str, Any]] = {
@@ -100,6 +102,13 @@ _CATEGORY_PUSH: dict[NotificationCategory, dict[str, Any]] = {
     },
     "approval": {"interruption-level": "time-sensitive"},
     "fyi": {"interruption-level": "passive"},
+    # Same urgency as "approval" (a human needs to look now, the visitor is
+    # still at the door) but its own channel/category -- "approval"'s
+    # existing meaning throughout this codebase is "there are yes/no action
+    # buttons," which a low-confidence classification notification doesn't
+    # necessarily have, and "fyi" is deliberately passive/silent, which
+    # would defeat the point of surfacing an otherwise-silent "unknown".
+    "review": {"interruption-level": "time-sensitive"},
 }
 
 
@@ -127,6 +136,7 @@ class HomeAssistantNotifier:
         *,
         actions: list[dict[str, str]] | None = None,
         category: NotificationCategory = "fyi",
+        image: str | None = None,
     ) -> None:
         """No-op if `notify_service` isn't configured -- callers don't need
         to check that themselves before calling this.
@@ -143,6 +153,11 @@ class HomeAssistantNotifier:
         needed, and plain-FYI door events can be told apart by sound/
         priority on a phone, not just by the message text. Defaults to the
         least intrusive tier ("fyi") if a caller doesn't specify one.
+
+        `image` is a URL the Home Assistant mobile app fetches directly from
+        the phone (see core/snapshot_store.py/api/snapshot_routes.py for how
+        callers get one) -- not authenticated, since the phone can't present
+        KNOCK's session cookie.
         """
         if not self.config.notify_service:
             return
@@ -154,6 +169,8 @@ class HomeAssistantNotifier:
         }
         if actions:
             data["actions"] = actions
+        if image:
+            data["image"] = image
         payload: dict[str, Any] = {"message": message, "data": data}
         response = self._http_client.post(
             f"{self.config.base_url}/api/services/{domain}/{name}",
@@ -235,9 +252,16 @@ class HomeAssistantBridge:
         self.session_store.save(state)
 
         try:
-            self._notifier.notify(
-                decision.text, category="emergency" if decision.escalate else "fyi"
-            )
+            if decision.escalate:
+                category: NotificationCategory = "emergency"
+            elif decision.needs_review:
+                category = "review"
+            else:
+                category = "fyi"
+            message = decision.text
+            if decision.needs_review and decision.review_candidates:
+                message = f"{message} (best guesses: {', '.join(decision.review_candidates)})"
+            self._notifier.notify(message, category=category)
         except Exception as exc:  # noqa: BLE001 - the notify call is best-effort
             logger.warning("Home Assistant notify service call failed: %s", exc)
 
@@ -375,7 +399,11 @@ class HomeAssistantActionListener:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    ollama_config = OllamaConfig.from_env()
+    orchestrator = Orchestrator(
+        llm_provider=OllamaProvider(config=ollama_config),
+        use_tool_calling=resolve_tool_calling(ollama_config),
+    )
     bridge = HomeAssistantBridge(
         config=HomeAssistantConfig.from_env(),
         orchestrator=orchestrator,
