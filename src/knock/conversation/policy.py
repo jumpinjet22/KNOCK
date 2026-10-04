@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -41,29 +42,33 @@ _ENTRY_INVITATION_PHRASES = (
 # that they're present -- exactly the occupancy-confirmation this whole
 # system exists to prevent. This is not a one-off: it was the single
 # dominant rejection reason across an entire night's worth of synthetic
-# training-data review (every teacher model produced it, not just one),
-# and live-verification after tightening the prompt's suggested example
-# text reproduced it again -- a model's own default phrasing tendency for
-# this kind of reply is strong enough that prompt wording alone isn't
-# reliable. "I'll pass that along" (addressed generically, not "to them")
-# is the safe relay pattern and is NOT caught by this list.
+# training-data review (every teacher model produced it, not just one).
+# "I'll pass that along" (addressed generically, not "to" anyone
+# specific) is the safe relay pattern and is NOT caught by this.
+#
+# A fixed noun list ("them"/"the homeowner"/"the person"...) turned out
+# not to be enough -- cross-model testing surfaced "the resident," "the
+# family," "whoever is inside," "the appropriate person," and there's no
+# reason to believe that list is now complete either. This matches the
+# *structure* instead: "let" ... "know" with a short, bounded gap, which
+# catches any noun phrase in between regardless of wording. Excludes "let
+# you know" specifically -- addressed back to the visitor themselves (e.g.
+# about a future signature), that's the established *safe* relay pattern,
+# not a third-party disclosure.
+_LET_SOMEONE_KNOW_RE = re.compile(r"\blet\s+(?!you\b)(?:\S+\s+){0,4}know\b", re.IGNORECASE)
+
 _OCCUPANCY_CONFIRMATION_PHRASES = (
-    # Deliberately bare "let them/him/her know" -- not just "...know
-    # you're here" -- since live testing on a second (weaker) model
-    # showed "I'll let them know." alone is a common enough shorthand for
-    # the same disclosure that requiring a trailing "you" let it through.
-    "let them know",
-    "let him know",
-    "let her know",
-    "let the homeowner know",
-    "let the person know",
     "they'll come",
     "they will come",
     "come down",
+    "come out",
     "come grab",
     "come sign",
+    "step out",
     "person inside",
     "someone inside",
+    "whoever is inside",
+    "whoever's inside",
     "in the house",
     "in the home",
 )
@@ -73,6 +78,8 @@ SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."
 
 def _contains_unsafe_disclosure(text: str) -> bool:
     lowered = text.lower()
+    if _LET_SOMEONE_KNOW_RE.search(lowered):
+        return True
     return any(
         phrase in lowered
         for phrase in (*_ENTRY_INVITATION_PHRASES, *_OCCUPANCY_CONFIRMATION_PHRASES)

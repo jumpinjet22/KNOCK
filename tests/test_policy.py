@@ -112,6 +112,31 @@ def test_apply_style_catches_a_weaker_models_bare_and_person_variants() -> None:
         assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 
 
+def test_apply_style_catches_any_noun_before_let_someone_know() -> None:
+    # Broadened to a structural regex after testing across 7 different
+    # models in one night surfaced more nouns than any fixed list could
+    # keep up with: "the resident," "the family," "whoever is inside,"
+    # "the appropriate person" -- matching "let" ... "know" with a short
+    # bounded gap catches any of these (and whatever the next model
+    # invents) without needing to enumerate them.
+    engine = PolicyEngine()
+    for phrase in [
+        "I'll let the resident know that a package is here.",
+        "Thanks, I'll let the family know it's here.",
+        "I can't open the door, but I'll let whoever is inside know you're there!",
+        "I'll let the appropriate person know so they can come out to sign for it.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_does_not_flag_let_you_know() -> None:
+    # "I'll let you know" -- addressed back to the visitor themselves, not
+    # a third party -- is the established safe relay pattern and must not
+    # get swept up by the generic "let ... know" regex above.
+    styled = PolicyEngine().apply_style("Thanks, I will let you know when we are ready for pickup.")
+    assert styled == "Thanks, I will let you know when we are ready for pickup."
+
+
 def test_apply_style_still_truncates_to_140_chars() -> None:
     styled = PolicyEngine().apply_style("x" * 200)
     assert len(styled) == 140
