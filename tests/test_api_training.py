@@ -100,7 +100,7 @@ def _wait_until_idle(client: TestClient, *, timeout: float = 5.0) -> dict:
 
 def _entry(
     text: str = "I'm here to work on your AC unit",
-    response_text: str = "Thanks, I'll let them know you're here for the appointment.",
+    response_text: str = "Thanks, I've noted that you're here for the appointment.",
     intent: str | None = "service_appointment",
 ) -> AuditEntry:
     return AuditEntry(

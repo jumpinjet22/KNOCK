@@ -12,7 +12,7 @@ from knock.core.training import (
 
 def _entry(
     text: str = "I'm here to work on your AC unit",
-    response_text: str = "Thanks, I'll let them know you're here for the appointment.",
+    response_text: str = "Thanks, I've noted that you're here for the appointment.",
     intent: str | None = "service_appointment",
     timestamp: datetime | None = None,
 ) -> AuditEntry:
@@ -82,7 +82,7 @@ def test_build_training_records_produces_both_tasks_for_a_normal_entry() -> None
     assert classification.output == "service_appointment"
 
     phrasing = next(r for r in records if r.task == "phrasing")
-    assert phrasing.output == "Thanks, I'll let them know you're here for the appointment."
+    assert phrasing.output == "Thanks, I've noted that you're here for the appointment."
 
 
 def test_build_training_records_returns_nothing_for_emergency_or_blocked_entries() -> None:
@@ -120,6 +120,40 @@ def test_build_training_records_skips_classification_for_an_intent_outside_the_c
 def test_build_training_records_skips_phrasing_when_response_text_is_empty() -> None:
     entry = _entry(response_text="")
     records = build_training_records(entry, TrainingReview(status="approved"))
+
+    assert {r.task for r in records} == {"classification"}
+
+
+def test_build_training_records_skips_phrasing_for_an_approved_but_unsafe_response() -> None:
+    # Found live: a human approving an entry overwhelmingly means "the
+    # category's right," not "I re-read this exact phrasing for safety" --
+    # 19 approved training examples turned out to contain "I'll let <name>
+    # know you're here" verbatim, 18 of them approved with no edit at all.
+    # Training directly on text the production backstop would itself
+    # suppress just teaches a model to reproduce that exact leak. The
+    # classification record is unaffected -- only the phrasing is unsafe
+    # here, not the category.
+    entry = _entry(
+        text="Is John here?",
+        response_text="I'll let John know you stopped by.",
+        intent="person_lookup",
+    )
+    records = build_training_records(entry, TrainingReview(status="approved"))
+
+    assert {r.task for r in records} == {"classification"}
+    assert records[0].output == "person_lookup"
+
+
+def test_build_training_records_skips_phrasing_for_an_unsafe_response_override() -> None:
+    # The filter applies to the *final* response text (after any human
+    # correction), not just the original -- an override can still be
+    # unsafe (one of the 19 live cases was an edited response that still
+    # left the leak in place).
+    entry = _entry(intent="official_visit")
+    review = TrainingReview(
+        status="approved", response_override="I'll let the household know you stopped by."
+    )
+    records = build_training_records(entry, review)
 
     assert {r.task for r in records} == {"classification"}
 

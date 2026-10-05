@@ -25,6 +25,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from knock.conversation.policy import _contains_unsafe_disclosure
 from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.orchestrator import (
     _LLM_CLASSIFIABLE_INTENTS,
@@ -147,7 +148,19 @@ def build_training_records(entry: AuditEntry, review: TrainingReview) -> list[Tr
                 output=intent,
             )
         )
-    if response_text:
+    # A human approving an entry overwhelmingly means "the category's
+    # right," not "I re-read this exact phrasing for safety" -- found live
+    # via a fine-tuning run that kept reproducing "I'll let <name> know
+    # you're here" on person_lookup/official_visit cases: 19 approved
+    # examples contained that exact leak verbatim (18 of them approved
+    # with no edit at all). Training directly on text the production
+    # backstop would itself suppress teaches a model to reproduce the one
+    # failure mode this whole project exists to prevent -- so the same
+    # `apply_style()` check gates what's allowed into the phrasing half of
+    # the export, same as it gates a live response before it ever reaches
+    # a visitor. The classification record above is unaffected -- the
+    # category label on all 19 was correct, only the phrasing was bad.
+    if response_text and not _contains_unsafe_disclosure(response_text):
         records.append(
             TrainingRecord(
                 task="phrasing",
