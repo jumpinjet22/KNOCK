@@ -61,10 +61,15 @@ _ENTRY_INVITATION_PHRASES = (
 # reason to believe that list is now complete either. This matches the
 # *structure* instead: "let" ... "know" with a short, bounded gap, which
 # catches any noun phrase in between regardless of wording. Excludes "let
-# you know" specifically -- addressed back to the visitor themselves (e.g.
-# about a future signature), that's the established *safe* relay pattern,
-# not a third-party disclosure.
-_LET_SOMEONE_KNOW_RE = re.compile(r"\blet\s+(?!you\b)(?:\S+\s+){0,4}know\b", re.IGNORECASE)
+# you/me/us know" -- the visitor and the assistant informing *each other*
+# (e.g. "I'll let you know", "please let me/us know what you need") never
+# discloses a third party's presence, unlike "I'll let THEM know". Found
+# live: "could you please let me know what you need?" -- a natural,
+# useful clarifying-question pattern -- was getting incorrectly
+# suppressed before "me"/"us" were added to the exclusion.
+_LET_SOMEONE_KNOW_RE = re.compile(
+    r"\blet\s+(?!(?:you|me|us)\b)(?:\S+\s+){0,4}know\b", re.IGNORECASE
+)
 
 _OCCUPANCY_CONFIRMATION_PHRASES = (
     "they'll come",
@@ -87,6 +92,27 @@ _OCCUPANCY_CONFIRMATION_PHRASES = (
     "resident is ready",
     "someone is ready",
     "is ready to receive",
+    # The most direct, blunt form of all -- a flat statement of presence
+    # OR absence -- was somehow never actually in this list despite every
+    # softer paraphrase of it being covered. Found live: "no one is home
+    # to receive this delivery" went completely unflagged. Absence is
+    # just as dangerous to reveal as presence (it tells anyone listening
+    # the house is empty right now). Deliberately does NOT catch the safe
+    # hedged form ("I can't confirm whether anyone is home") in most
+    # phrasings, though some overlap is possible -- an over-suppressed
+    # safe decline is the acceptable tradeoff, per this file's stance.
+    "no one is home",
+    "no one's home",
+    "nobody is home",
+    "nobody's home",
+    "someone is home",
+    "somebody is home",
+    "we are home",
+    "we're home",
+    "they are home",
+    "they're home",
+    "is home right now",
+    "not home right now",
 )
 
 SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."

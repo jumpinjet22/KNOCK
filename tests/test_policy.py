@@ -122,6 +122,35 @@ def test_apply_style_suppresses_occupancy_confirming_phrasing() -> None:
         assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 
 
+def test_apply_style_catches_a_direct_occupancy_statement() -> None:
+    # The most severe gap found tonight: every *indirect* phrasing
+    # ("let them know", "they'll come", "someone is ready") was covered,
+    # but a flat, direct statement of presence or absence was somehow
+    # never actually in this list. Found live: "no one is home to
+    # receive this delivery" went completely unflagged. Revealing
+    # absence is just as dangerous as revealing presence.
+    engine = PolicyEngine()
+    for phrase in [
+        "So please know that no one is home to receive this delivery at the moment.",
+        "Yes, someone is home right now.",
+        "Nobody is home at the moment.",
+        "We are home right now, thanks for asking.",
+        "They're home, one moment please.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_does_not_flag_a_hedged_occupancy_decline() -> None:
+    # The safe pattern this backstop must never suppress: explicitly
+    # declining to confirm occupancy, rather than stating it outright.
+    engine = PolicyEngine()
+    for phrase in [
+        "I cannot confirm whether anyone is currently available.",
+        "I am not able to verify occupancy status.",
+    ]:
+        assert engine.apply_style(phrase) == phrase
+
+
 def test_apply_style_catches_a_weaker_models_bare_and_person_variants() -> None:
     # A second, weaker model (llama3.1:8b) found still more variants the
     # first pass of this backstop missed -- "I'll let them know." with no
@@ -162,6 +191,21 @@ def test_apply_style_does_not_flag_let_you_know() -> None:
     # get swept up by the generic "let ... know" regex above.
     styled = PolicyEngine().apply_style("Thanks, I will let you know when we are ready for pickup.")
     assert styled == "Thanks, I will let you know when we are ready for pickup."
+
+
+def test_apply_style_does_not_flag_let_me_or_us_know() -> None:
+    # Found live while testing a clarifying-question conversation flow:
+    # the assistant asking the *visitor* to share info ("could you please
+    # let me/us know what you need?") is exactly as safe as "let you
+    # know" -- it's the visitor and assistant informing each other, never
+    # a third party's presence. Was getting incorrectly suppressed before
+    # "me"/"us" were added alongside "you" in the exclusion.
+    engine = PolicyEngine()
+    for phrase in [
+        "Could you please let me know what you need?",
+        "Could you please let us know what you need?",
+    ]:
+        assert engine.apply_style(phrase) == phrase
 
 
 def test_apply_style_still_truncates_to_140_chars() -> None:
