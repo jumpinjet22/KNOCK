@@ -192,6 +192,39 @@ def test_handle_event_enriches_with_vision_description(tmp_path) -> None:
     vision_provider.describe.assert_called_once_with(b"fake-jpeg-bytes")
 
 
+def test_handle_event_enriches_with_explicit_camera_framing(tmp_path) -> None:
+    # Found live in production: a bare ":" join ("Food delivery.: a man
+    # holding a bag...") reads to the LLM like a label/definition pair
+    # rather than "the same visitor, described two ways" -- the model
+    # sometimes responded as if a third party were reporting a delivery
+    # rather than the visitor *being* the delivery. This asserts the
+    # unambiguous framing that replaced it.
+    class _CapturingLLMProvider:
+        name = "capturing-fake-llm"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def generate(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return "Thanks."
+
+    mock_client = MagicMock()
+    mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
+    llm = _CapturingLLMProvider()
+    bridge = _bridge(tmp_path, mock_client=mock_client)
+    bridge.orchestrator = Orchestrator(llm_provider=llm)
+    vision_provider = MagicMock()
+    vision_provider.describe.return_value = "a man holding a reusable shopping bag"
+    bridge.vision_provider = vision_provider
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    combined = " ".join(llm.prompts)
+    assert "(camera also shows: a man holding a reusable shopping bag)" in combined
+    assert "cam1: a man holding" not in combined  # the old bare ":" join
+
+
 def test_handle_event_skips_vision_when_snapshot_is_none(tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=None)

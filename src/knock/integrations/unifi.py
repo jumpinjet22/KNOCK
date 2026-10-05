@@ -499,8 +499,15 @@ class UnifiBridge:
                 snapshot = await self.client.get_public_api_camera_snapshot(event.device_id)
                 if snapshot is not None:
                     description = await asyncio.to_thread(self.vision_provider.describe, snapshot)
+                    # A bare ":" join (e.g. "Food delivery.: a man holding a
+                    # bag...") reads to the LLM like a label/definition pair
+                    # rather than "the same visitor, described two ways" --
+                    # found live in production: the model sometimes responded
+                    # as if a third party were reporting the delivery rather
+                    # than the visitor *being* the delivery. Explicit
+                    # framing removes the ambiguity.
                     visitor_event = visitor_event.model_copy(
-                        update={"text": f"{visitor_event.text}: {description}"}
+                        update={"text": f"{visitor_event.text} (camera also shows: {description})"}
                     )
             except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
                 logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
