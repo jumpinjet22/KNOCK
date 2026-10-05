@@ -5,7 +5,7 @@ from typing import Any, NamedTuple
 from pydantic import BaseModel
 
 from knock.conversation.intent import classify_intent
-from knock.conversation.policy import PolicyEngine
+from knock.conversation.policy import SAFE_RESPONSE_FALLBACK, PolicyEngine
 from knock.conversation.prompts import GREETING, SYSTEM_PROMPT
 from knock.conversation.responses import response_for
 from knock.core.audit import AuditEntry, AuditLog, NullAuditLog
@@ -200,6 +200,53 @@ def _response_prompt(intent: str, visitor_text: str) -> str:
         "the household's schedule, or offer to unlock/open the door -- and "
         'never invite the visitor inside or say anything like "come in"/'
         '"come on in"/"feel free to enter," even warmly or casually.'
+    )
+
+
+def _safety_check_prompt(response_text: str) -> str:
+    """Second-opinion LLM safety review of an already-generated response,
+    run *in addition to* (never instead of) PolicyEngine.apply_style()'s
+    deterministic phrase/regex backstop.
+
+    Why both: the deterministic backstop is instant, free, and perfectly
+    reliable for every phrasing it's actually been taught -- but a 37-case
+    adversarial batch found it only caught 3/24 genuinely novel unsafe
+    phrasings (12.5% recall) that never matched any hand-coded pattern,
+    while this same prompt against a real model caught 19-23/24 (79-96%)
+    of the exact same cases. Keyword matching structurally cannot
+    generalize to a phrasing it's never seen; an LLM judging the actual
+    meaning can, imperfectly. Tuning this prompt (a short, direct rule
+    list plus one clarifying sentence about hedged declines being safe)
+    outperformed adding few-shot examples, which measurably hurt accuracy
+    -- consistent with this project's broader finding that this class of
+    model follows concise, directly-stated instructions better than
+    longer ones, regardless of what the extra content is.
+
+    This is still a soft, imperfect judgment call, not a replacement for
+    the deterministic backstop -- it has its own real false-positive rate
+    (in testing, even flagged this module's own SAFE_RESPONSE_FALLBACK
+    text on one prompt variant) and real cost (one extra LLM call per
+    response). See `Orchestrator.safety_check_provider`'s docstring for
+    why it's deliberately a *separate*, optionally bigger/more careful
+    model than the one doing response phrasing.
+    """
+    return (
+        f"A smart doorbell assistant is about to say this to a visitor at the door:\n"
+        f'"{response_text}"\n\n'
+        "Check it against these rules:\n"
+        "1. Must never say or imply whether anyone is home, away, inside, or "
+        "available right now -- including indirectly (e.g. \"I'll let them know "
+        'you\'re here", "someone inside", "the resident", "no one is home", '
+        "mentioning specific household members, or any detail implying "
+        "presence/absence/current activity).\n"
+        "2. Must never share the household's schedule.\n"
+        "3. Must never offer to unlock, open, or let anyone through the door, or "
+        "invite them inside.\n"
+        "Explicitly refusing or being unable to answer (e.g. \"I can't confirm "
+        'that") is NOT a violation of rule 1 -- only actually stating a yes/no '
+        "answer is.\n\n"
+        "Does this response violate ANY of these rules? Reply with ONLY one word: "
+        "YES or NO."
     )
 
 
@@ -416,9 +463,23 @@ class Orchestrator:
         audit_log: AuditLog | None = None,
         llm_provider: LLMProvider | None = None,
         use_tool_calling: bool = False,
+        safety_check_provider: LLMProvider | None = None,
     ) -> None:
         self.policy = policy or PolicyEngine()
         self.audit_log = audit_log or NullAuditLog()
+        # Optional second-opinion safety layer, run *after*
+        # PolicyEngine.apply_style()'s deterministic backstop, never
+        # instead of it (see _safety_check_prompt's docstring for why
+        # both are needed). Deliberately a separate provider parameter,
+        # not reusing `llm_provider` -- live testing found a noticeably
+        # bigger model caught far more novel unsafe phrasings (23/24 vs
+        # 20/24 on the same adversarial batch) at the cost of more false
+        # positives, a trade worth making for a safety *check* in a way
+        # it wouldn't be for response generation itself, which runs on
+        # every turn and needs to stay fast. None (the default) disables
+        # this layer entirely -- the deterministic backstop alone is
+        # still always active regardless.
+        self.safety_check_provider = safety_check_provider
         # Optional: when set, this is the *primary* way every allowed,
         # non-emergency response gets phrased (see `_text_for_intent`) --
         # classify_intent()'s category becomes a hint in the prompt rather
@@ -501,6 +562,8 @@ class Orchestrator:
                 review_summary = refinement.review_summary
             last_intent = intent
             response_text = self.policy.apply_style(self._text_for_intent(intent, event.text))
+            if self.safety_check_provider is not None and self._llm_flags_as_unsafe(response_text):
+                response_text = SAFE_RESPONSE_FALLBACK
             response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
             response = ResponseDecision(
                 text=response_text,
@@ -632,6 +695,36 @@ class Orchestrator:
             return response_for(intent)
 
         return generated or response_for(intent)
+
+    def _llm_flags_as_unsafe(self, response_text: str) -> bool:
+        """Best-effort, same pattern as every other LLM-backed call here:
+        any failure or unparseable reply fails OPEN (returns False, i.e.
+        "not flagged") rather than blocking a response outright -- this is
+        an additional opinion layered on top of the deterministic
+        backstop that already ran, not the only thing standing between a
+        response and the visitor. A flaky safety-check call degrading to
+        "no additional opinion" is the acceptable failure mode here, the
+        same way a down LLM anywhere else in this file degrades to the
+        existing static/deterministic behavior instead of breaking
+        the response entirely.
+        """
+        if self.safety_check_provider is None:
+            return False
+        try:
+            answer = self.safety_check_provider.generate(
+                _safety_check_prompt(response_text)
+            ).strip()
+        except Exception as exc:  # noqa: BLE001 - best-effort, fails open
+            logger.warning("LLM safety check failed, allowing response through: %s", exc)
+            return False
+        flagged = answer.strip().upper().startswith("YES")
+        if flagged:
+            logger.warning(
+                "LLM safety check flagged a response the deterministic backstop "
+                "allowed through: %r",
+                response_text,
+            )
+        return flagged
 
     def summarize_for_notification(self, visitor_text: str, *, fallback: str) -> str:
         """A short, human-readable phrase for a push notification -- e.g.

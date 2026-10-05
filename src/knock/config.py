@@ -92,6 +92,15 @@ class OllamaConfig(BaseModel):
     # flag_for_review fires (see Orchestrator._refine_unknown_intent_via_tools).
     intent_review_confidence_floor: float = 0.5
     intent_review_confidence_margin: float = 0.15
+    # Optional second-opinion safety layer (see Orchestrator._llm_flags_as_unsafe).
+    # None (the default) disables it -- the deterministic apply_style()
+    # backstop is always active regardless. Deliberately a separate model
+    # name, not reusing `model`: live testing found a bigger/more careful
+    # model catches more novel unsafe phrasings than the (often smaller,
+    # faster) model used for live response generation, and this call only
+    # runs once per response rather than driving the whole conversation,
+    # so the extra cost is easier to justify here.
+    safety_check_model: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -114,6 +123,7 @@ class OllamaConfig(BaseModel):
             intent_review_confidence_margin=float(
                 os.environ.get("KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_MARGIN", "0.15")
             ),
+            safety_check_model=os.environ.get("KNOCK_OLLAMA_SAFETY_CHECK_MODEL"),
         )
 
     @classmethod
@@ -140,6 +150,9 @@ class OllamaConfig(BaseModel):
                 "intent_review_confidence_margin",
                 0.15,
                 float,
+            ),
+            safety_check_model=_resolve(
+                "KNOCK_OLLAMA_SAFETY_CHECK_MODEL", s, "safety_check_model", None
             ),
         )
 

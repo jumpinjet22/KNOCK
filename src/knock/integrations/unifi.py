@@ -856,9 +856,22 @@ async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistant
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ollama_config = OllamaConfig.from_env()
+    # None (unset) leaves this whole layer off -- the deterministic
+    # apply_style() backstop still applies regardless. When set, this is a
+    # second OllamaProvider pointed at a different model (same host/port/
+    # timeout) so a bigger/more careful model can be used for this one
+    # extra-opinion call without slowing down every-turn response phrasing.
+    safety_check_provider = (
+        OllamaProvider(
+            config=ollama_config.model_copy(update={"model": ollama_config.safety_check_model})
+        )
+        if ollama_config.safety_check_model
+        else None
+    )
     orchestrator = Orchestrator(
         llm_provider=OllamaProvider(config=ollama_config),
         use_tool_calling=resolve_tool_calling(ollama_config),
+        safety_check_provider=safety_check_provider,
     )
     ha_config = HomeAssistantConfig.from_env()
     knock_config = KnockConfig.from_env()

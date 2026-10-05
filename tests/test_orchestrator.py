@@ -473,3 +473,93 @@ def test_llm_refinement_recovers_soliciting_phrasing_keywords_missed() -> None:
         _event("Got a minute to hear about our lawn care service?")
     )
     assert decision.intent == "soliciting"
+
+
+# -- Optional second-opinion LLM safety check (safety_check_provider) --------
+#
+# This is deliberately a *separate* provider from `llm_provider` (see
+# Orchestrator.__init__'s docstring) -- these tests use an unsafe-looking
+# phrase that doesn't match any PolicyEngine.apply_style() backstop phrase
+# ("away on a business trip" isn't in _OCCUPANCY_CONFIRMATION_PHRASES and
+# has no "let ... know"), so it reaches the safety-check layer unmodified.
+# That's the whole point of this layer: catching novel phrasings the
+# deterministic backstop was never taught.
+
+_LEAKY_RESPONSE = "My owner is currently away on a business trip until next week."
+
+
+def test_safety_check_catches_an_unsafe_response_the_backstop_missed() -> None:
+    decision = Orchestrator(
+        llm_provider=_FakeLLMProvider(_LEAKY_RESPONSE),
+        safety_check_provider=_FakeLLMProvider("YES"),
+    ).respond(_event("Do you like jazz?"))
+    assert decision.text == "Thanks, I'll pass that along."
+
+
+def test_safety_check_allows_a_safe_response_through() -> None:
+    response_text = "Thanks, I'll pass that along."
+    decision = Orchestrator(
+        llm_provider=_FakeLLMProvider(response_text),
+        safety_check_provider=_FakeLLMProvider("NO"),
+    ).respond(_event("Do you like jazz?"))
+    assert decision.text == response_text
+
+
+def test_without_a_safety_check_provider_only_the_deterministic_backstop_applies() -> None:
+    # No safety_check_provider configured at all (the default) -- confirms
+    # this layer is strictly opt-in and the leaky phrase above sails
+    # through untouched when it's off, same as before this feature existed.
+    decision = Orchestrator(llm_provider=_FakeLLMProvider(_LEAKY_RESPONSE)).respond(
+        _event("Do you like jazz?")
+    )
+    assert decision.text == _LEAKY_RESPONSE
+
+
+def test_safety_check_failure_fails_open() -> None:
+    decision = Orchestrator(
+        llm_provider=_FakeLLMProvider(_LEAKY_RESPONSE),
+        safety_check_provider=_FailingLLMProvider(),
+    ).respond(_event("Do you like jazz?"))
+    assert decision.text == _LEAKY_RESPONSE
+
+
+def test_safety_check_treats_anything_other_than_yes_as_safe() -> None:
+    response_text = "Thanks, I'll pass that along."
+    decision = Orchestrator(
+        llm_provider=_FakeLLMProvider(response_text),
+        safety_check_provider=_FakeLLMProvider("unsure, maybe"),
+    ).respond(_event("Do you like jazz?"))
+    assert decision.text == response_text
+
+
+def test_safety_check_is_case_insensitive() -> None:
+    decision = Orchestrator(
+        llm_provider=_FakeLLMProvider(_LEAKY_RESPONSE),
+        safety_check_provider=_FakeLLMProvider("yes"),
+    ).respond(_event("Do you like jazz?"))
+    assert decision.text == "Thanks, I'll pass that along."
+
+
+def test_safety_check_is_never_consulted_for_a_blocked_request() -> None:
+    safety = _FakeLLMProvider("YES")
+    Orchestrator(safety_check_provider=safety).respond(_event("Is anyone home right now?"))
+    assert safety.prompts == []
+
+
+def test_safety_check_is_never_consulted_for_an_emergency() -> None:
+    safety = _FakeLLMProvider("YES")
+    Orchestrator(safety_check_provider=safety).respond(_event("Fire emergency, help!"))
+    assert safety.prompts == []
+
+
+def test_safety_check_receives_the_response_text_via_its_own_separate_provider() -> None:
+    response_text = "Thanks, I'll pass that along."
+    llm = _FakeLLMProvider(response_text)
+    safety = _FakeLLMProvider("NO")
+    Orchestrator(llm_provider=llm, safety_check_provider=safety).respond(
+        _event("Do you like jazz?")
+    )
+    assert len(safety.prompts) == 1
+    assert response_text in safety.prompts[0]
+    assert "violate" in safety.prompts[0].lower()
+    assert all("violate" not in prompt.lower() for prompt in llm.prompts)
