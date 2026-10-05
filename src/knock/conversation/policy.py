@@ -34,6 +34,15 @@ _ENTRY_INVITATION_PHRASES = (
     "i will let you in",
     "head on in",
     "go ahead and come",
+    # Found via a 20-trial live batch test: the literal words from the
+    # rule this backstop exists to enforce ("never offer to unlock/open
+    # the door") were never actually in this list -- a model said "we
+    # open the door" outright and nothing caught it. Embarrassing but
+    # worth being honest about: the obvious phrase isn't automatically
+    # covered just because less-obvious paraphrases are.
+    "open the door",
+    "unlock the door",
+    "unlock it",
 )
 
 # "I'll let them/the homeowner know you're here" (or any variant: "you
@@ -71,6 +80,13 @@ _OCCUPANCY_CONFIRMATION_PHRASES = (
     "whoever's inside",
     "in the house",
     "in the home",
+    # Softer than "they'll come"/"let X know", but still confirms a
+    # specific person exists and is actively available right now --
+    # found in the same 20-trial batch ("verify that the resident is
+    # ready", "someone is ready to take your delivery").
+    "resident is ready",
+    "someone is ready",
+    "is ready to receive",
 )
 
 SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."

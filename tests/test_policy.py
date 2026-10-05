@@ -77,6 +77,33 @@ def test_apply_style_leaves_a_normal_response_unchanged() -> None:
     assert styled == "Thanks, I'll pass that along."
 
 
+def test_apply_style_catches_literally_offering_to_open_the_door() -> None:
+    # Found via a 20-trial live batch test: the literal phrase from the
+    # rule this backstop exists to enforce ("never offer to unlock/open
+    # the door") wasn't actually in the list -- only paraphrases of it
+    # were. A model said "we open the door" outright and nothing caught
+    # it until this was added.
+    engine = PolicyEngine()
+    for phrase in [
+        "Thank you for delivering our food, please hold on while we open the door.",
+        "Sure, let me unlock the door for you.",
+        "No problem, I'll unlock it now.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_catches_soft_readiness_confirmations() -> None:
+    # Softer than "they'll come"/"let X know", but still confirms a
+    # specific person exists and is actively available right now -- found
+    # in the same 20-trial batch.
+    engine = PolicyEngine()
+    for phrase in [
+        "Please keep the food outside while I verify that the resident is ready to receive it.",
+        "I'll let you know once someone is ready to take your delivery from here.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
 def test_apply_style_suppresses_occupancy_confirming_phrasing() -> None:
     # Found via live verification after the entry-invitation fix: this
     # "let them know you're here" pattern is the model's own strong
