@@ -32,8 +32,16 @@ from knock.core.orchestrator import (
     _classification_prompt,
     _response_prompt,
 )
+from knock.core.training_correction import CorrectionAttempt
+from knock.core.training_judge import (
+    AggregatedJudgeResult,
+    DpoPair,
+    build_classification_dpo_pairs,
+    build_dpo_pairs,
+)
 
 DEFAULT_TRAINING_REVIEWS_ENV_VAR = "KNOCK_TRAINING_REVIEWS"
+DEFAULT_TRAINING_METADATA_ENV_VAR = "KNOCK_TRAINING_METADATA"
 TRAINING_MODE_ENV_VAR = "KNOCK_TRAINING_MODE"
 
 ReviewStatus = Literal["pending", "approved", "rejected"]
@@ -64,6 +72,13 @@ def _default_training_reviews_path() -> Path:
     if configured:
         return Path(configured)
     return Path.home() / ".local" / "share" / "knock" / "training_reviews.json"
+
+
+def _default_training_metadata_path() -> Path:
+    configured = os.environ.get(DEFAULT_TRAINING_METADATA_ENV_VAR)
+    if configured:
+        return Path(configured)
+    return Path.home() / ".local" / "share" / "knock" / "training_metadata.json"
 
 
 def example_key(entry: AuditEntry) -> str:
@@ -114,6 +129,51 @@ class TrainingReviewStore:
 
     def all(self) -> dict[str, TrainingReview]:
         return {key: TrainingReview.model_validate(value) for key, value in self._read().items()}
+
+
+class TrainingMetadata(BaseModel):
+    """Judge-ensemble and correction-history data for one audit entry --
+    kept separate from `TrainingReview` (a human decision) since this is
+    machine-generated context *for* that decision, not the decision
+    itself. One file, not split further: judge and correction data have a
+    natural parent-child relationship (a correction only exists because of
+    a judge verdict), so splitting them would buy nothing.
+    """
+
+    judge: AggregatedJudgeResult | None = None
+    corrections: list[CorrectionAttempt] = []
+
+
+class TrainingMetadataStore:
+    """One small JSON file: `{"<example_key>": {"judge": ..., "corrections": [...]}}`,
+    same atomic-write pattern as `TrainingReviewStore`.
+    """
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = Path(path) if path is not None else _default_training_metadata_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _read(self) -> dict[str, object]:
+        if not self.path.exists():
+            return {}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write(self, data: dict[str, object]) -> None:
+        tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, self.path)  # atomic on POSIX
+
+    def set(self, key: str, metadata: TrainingMetadata) -> None:
+        data = self._read()
+        data[key] = metadata.model_dump()
+        self._write(data)
+
+    def all(self) -> dict[str, TrainingMetadata]:
+        return {key: TrainingMetadata.model_validate(value) for key, value in self._read().items()}
 
 
 class TrainingRecord(BaseModel):
@@ -182,4 +242,72 @@ def export_training_jsonl(
         if review is None or review.status != "approved":
             continue
         lines.extend(record.model_dump_json() for record in build_training_records(entry, review))
+    return "".join(f"{line}\n" for line in lines)
+
+
+def export_dpo_pairs_jsonl(
+    audit_log: JSONLAuditLog,
+    review_store: TrainingReviewStore,
+    metadata_store: TrainingMetadataStore,
+    *,
+    limit: int = 10000,
+    margin_threshold: float = 2.0,
+) -> str:
+    """Every DPO preference pair derivable from judged entries, one JSON
+    object per line -- plain `{"prompt", "chosen", "rejected"}` triples
+    (trl's standard DPO format).
+
+    The "chosen" side of every pair must come from a human-approved entry
+    (the same `TrainingReview.status == "approved"` gate the SFT export
+    already uses) -- the "rejected" side needs no explicit rejection of
+    its own, since losing the comparison is enough. This mirrors the SFT
+    export's human-in-the-loop stance rather than trusting the judge
+    ensemble alone to certify training data, consistent with this
+    project's own finding that automated review missed real problems a
+    careful human pass caught.
+
+    Only entries with a recorded judge verdict (`TrainingMetadata.judge`)
+    participate -- an un-judged entry simply contributes no pairs, it's
+    not treated as a failure.
+    """
+    reviews = review_store.all()
+    metadata = metadata_store.all()
+
+    judged: list[tuple[AuditEntry, AggregatedJudgeResult]] = []
+    approved_keys: set[str] = set()
+    for entry in audit_log.recent(limit=limit):
+        key = example_key(entry)
+        review = reviews.get(key)
+        if review is not None and review.status == "approved":
+            approved_keys.add(key)
+        meta = metadata.get(key)
+        if meta is not None and meta.judge is not None:
+            judged.append((entry, meta.judge))
+
+    def is_approved(entry: AuditEntry) -> bool:
+        return example_key(entry) in approved_keys
+
+    by_scenario: dict[str, list[tuple[AuditEntry, AggregatedJudgeResult]]] = {}
+    for entry, result in judged:
+        by_scenario.setdefault(entry.text, []).append((entry, result))
+
+    pairs: list[DpoPair] = []
+    for scenario_candidates in by_scenario.values():
+        pairs.extend(
+            build_classification_dpo_pairs(
+                scenario_candidates, margin_threshold=margin_threshold, chosen_allowed=is_approved
+            )
+        )
+        by_intent: dict[str, list[tuple[AuditEntry, AggregatedJudgeResult]]] = {}
+        for entry, result in scenario_candidates:
+            if entry.intent is not None:
+                by_intent.setdefault(entry.intent, []).append((entry, result))
+        for intent_candidates in by_intent.values():
+            pairs.extend(
+                build_dpo_pairs(
+                    intent_candidates, margin_threshold=margin_threshold, chosen_allowed=is_approved
+                )
+            )
+
+    lines = [pair.model_dump_json() for pair in pairs]
     return "".join(f"{line}\n" for line in lines)

@@ -1,13 +1,18 @@
+import json
 from datetime import UTC, datetime
 
 from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.training import (
+    TrainingMetadata,
+    TrainingMetadataStore,
     TrainingReview,
     TrainingReviewStore,
     build_training_records,
     example_key,
+    export_dpo_pairs_jsonl,
     export_training_jsonl,
 )
+from knock.core.training_judge import AggregatedJudgeResult, JudgeAxisScores
 
 
 def _entry(
@@ -189,3 +194,108 @@ def test_export_is_empty_when_nothing_is_approved(tmp_path) -> None:
     audit_log.record(_entry())
 
     assert export_training_jsonl(audit_log, review_store) == ""
+
+
+# -- TrainingMetadataStore ----------------------------------------------------------------
+
+
+def _ok_judge_result(
+    category_correct: float = 9.0, natural_quality: float = 9.0
+) -> AggregatedJudgeResult:
+    return AggregatedJudgeResult(
+        visitor_voice_avg=9.0,
+        category_correct_avg=category_correct,
+        safety_compliant_avg=9.0,
+        natural_quality_avg=natural_quality,
+        voice_veto=False,
+        safety_veto=False,
+        disagreement=0.0,
+        per_judge=[
+            JudgeAxisScores(
+                visitor_voice=9,
+                category_correct=int(category_correct),
+                safety_compliant=9,
+                natural_quality=int(natural_quality),
+                reason="looks good",
+                judge_model="judge-a",
+            )
+        ],
+    )
+
+
+def test_metadata_store_round_trips(tmp_path) -> None:
+    store = TrainingMetadataStore(tmp_path / "metadata.json")
+    metadata = TrainingMetadata(judge=_ok_judge_result())
+    store.set("abc123", metadata)
+
+    reloaded = TrainingMetadataStore(tmp_path / "metadata.json")
+    result = reloaded.all()["abc123"]
+    assert result.judge is not None
+    assert result.judge.category_correct_avg == 9.0
+    assert result.corrections == []
+
+
+def test_metadata_store_returns_empty_before_anything_is_saved(tmp_path) -> None:
+    store = TrainingMetadataStore(tmp_path / "metadata.json")
+    assert store.all() == {}
+
+
+# -- export_dpo_pairs_jsonl ----------------------------------------------------------------
+
+
+def test_export_dpo_pairs_requires_chosen_to_be_approved(tmp_path) -> None:
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    review_store = TrainingReviewStore(tmp_path / "reviews.json")
+    metadata_store = TrainingMetadataStore(tmp_path / "metadata.json")
+
+    good_unapproved = _entry(text="scenario", response_text="Great reply")
+    worse_approved = _entry(text="scenario", response_text="Worse reply")
+    audit_log.record(good_unapproved)
+    audit_log.record(worse_approved)
+
+    review_store.set(example_key(worse_approved), TrainingReview(status="approved"))
+    metadata_store.set(
+        example_key(good_unapproved), TrainingMetadata(judge=_ok_judge_result(10, 10))
+    )
+    metadata_store.set(example_key(worse_approved), TrainingMetadata(judge=_ok_judge_result(2, 2)))
+
+    jsonl = export_dpo_pairs_jsonl(audit_log, review_store, metadata_store, margin_threshold=2.0)
+    # good_unapproved scored higher but was never approved -- it can't be
+    # "chosen", and worse_approved scored too low to win on its own, so no
+    # valid pair exists.
+    assert jsonl == ""
+
+
+def test_export_dpo_pairs_creates_pair_when_chosen_is_approved(tmp_path) -> None:
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    review_store = TrainingReviewStore(tmp_path / "reviews.json")
+    metadata_store = TrainingMetadataStore(tmp_path / "metadata.json")
+
+    good_approved = _entry(text="scenario", response_text="Great reply")
+    bad_unreviewed = _entry(text="scenario", response_text="Bad reply")
+    audit_log.record(good_approved)
+    audit_log.record(bad_unreviewed)
+
+    review_store.set(example_key(good_approved), TrainingReview(status="approved"))
+    metadata_store.set(example_key(good_approved), TrainingMetadata(judge=_ok_judge_result(10, 10)))
+    metadata_store.set(example_key(bad_unreviewed), TrainingMetadata(judge=_ok_judge_result(2, 2)))
+
+    jsonl = export_dpo_pairs_jsonl(audit_log, review_store, metadata_store, margin_threshold=2.0)
+    lines = [line for line in jsonl.strip().splitlines() if line]
+    assert len(lines) == 1
+    pair = json.loads(lines[0])
+    assert pair["chosen"] == "Great reply"
+    assert pair["rejected"] == "Bad reply"
+
+
+def test_export_dpo_pairs_skips_entries_with_no_judge_metadata(tmp_path) -> None:
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    review_store = TrainingReviewStore(tmp_path / "reviews.json")
+    metadata_store = TrainingMetadataStore(tmp_path / "metadata.json")
+
+    entry = _entry()
+    audit_log.record(entry)
+    review_store.set(example_key(entry), TrainingReview(status="approved"))
+    # No metadata_store.set() call -- this entry was never judged.
+
+    assert export_dpo_pairs_jsonl(audit_log, review_store, metadata_store) == ""

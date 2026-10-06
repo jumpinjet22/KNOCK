@@ -32,6 +32,8 @@ export function ScriptRunnerPanel() {
   const [error, setError] = useState<string | null>(null)
   const [scenarioModels, setScenarioModels] = useState("")
   const [responseModels, setResponseModels] = useState("")
+  const [judgeModels, setJudgeModels] = useState("")
+  const [correctorModel, setCorrectorModel] = useState("")
   const [busy, setBusy] = useState(false)
   const [showLogs, setShowLogs] = useState(false)
 
@@ -83,6 +85,47 @@ export function ScriptRunnerPanel() {
     setError(null)
     try {
       setStatus(await scriptsApi.generateTrainingData({ models }))
+      setShowLogs(true)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runJudgeTrainingData() {
+    const judge_models = judgeModels
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean)
+    if (judge_models.length < 2) return
+    setBusy(true)
+    setError(null)
+    try {
+      setStatus(await scriptsApi.judgeTrainingData({ judge_models }))
+      setShowLogs(true)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runCorrectTrainingData() {
+    const judge_models = judgeModels
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean)
+    if (judge_models.length < 2 || !correctorModel.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      setStatus(
+        await scriptsApi.correctTrainingData({
+          corrector_model: correctorModel.trim(),
+          judge_models,
+        }),
+      )
       setShowLogs(true)
     } catch (err) {
       setError(errorMessage(err))
@@ -167,6 +210,61 @@ export function ScriptRunnerPanel() {
               type="button"
               disabled={busy || isRunning || !responseModels.trim()}
               onClick={() => void runGenerateTrainingData()}
+              className={`${buttonClass} shrink-0 bg-porch text-ink hover:brightness-95`}
+            >
+              Run
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-steel">
+            Judge training data -- judge models (comma-separated, 2+)
+          </label>
+          <div className="mt-1 flex gap-2">
+            <input
+              type="text"
+              value={judgeModels}
+              onChange={(e) => setJudgeModels(e.target.value)}
+              placeholder="e.g. qwen2.5:14b,gpt-oss:20b,deepseek-r1:14b"
+              disabled={isRunning}
+              className={inputClass}
+            />
+            <button
+              type="button"
+              disabled={
+                busy || isRunning || judgeModels.split(",").filter((m) => m.trim()).length < 2
+              }
+              onClick={() => void runJudgeTrainingData()}
+              className={`${buttonClass} shrink-0 bg-porch text-ink hover:brightness-95`}
+            >
+              Run
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-steel">
+            Correct flagged entries -- corrector model (uses the same judge models above)
+          </label>
+          <div className="mt-1 flex gap-2">
+            <input
+              type="text"
+              value={correctorModel}
+              onChange={(e) => setCorrectorModel(e.target.value)}
+              placeholder="e.g. qwen2.5:14b"
+              disabled={isRunning}
+              className={inputClass}
+            />
+            <button
+              type="button"
+              disabled={
+                busy ||
+                isRunning ||
+                !correctorModel.trim() ||
+                judgeModels.split(",").filter((m) => m.trim()).length < 2
+              }
+              onClick={() => void runCorrectTrainingData()}
               className={`${buttonClass} shrink-0 bg-porch text-ink hover:brightness-95`}
             >
               Run

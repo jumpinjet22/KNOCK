@@ -109,6 +109,12 @@ def run_model(
                         "intent": decision.intent,
                         "reason": decision.reason,
                         "timestamp": event.timestamp.isoformat(),
+                        # Lets the judge stage compute the same content-hash
+                        # example_key() training.py uses, directly from a
+                        # manifest row -- without this, joining a manifest
+                        # row back to its audit entry means a fragile
+                        # (scenario, timestamp) match instead.
+                        "response_text": decision.text,
                     }
                 )
     finally:

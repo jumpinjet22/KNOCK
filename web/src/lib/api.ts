@@ -361,10 +361,45 @@ export interface TrainingReview {
   response_override: string | null
 }
 
+export interface JudgeAxisScores {
+  visitor_voice: number
+  category_correct: number
+  safety_compliant: number
+  natural_quality: number
+  reason: string
+  judge_model: string
+}
+
+export interface AggregatedJudgeResult {
+  visitor_voice_avg: number
+  category_correct_avg: number
+  safety_compliant_avg: number
+  natural_quality_avg: number
+  voice_veto: boolean
+  safety_veto: boolean
+  disagreement: number
+  per_judge: JudgeAxisScores[]
+}
+
+export interface CorrectionAttempt {
+  attempt: number
+  original_response: string
+  corrected_response: string
+  judge_reason: string
+  rejudged: AggregatedJudgeResult | null
+  accepted: boolean
+}
+
+export interface TrainingMetadata {
+  judge: AggregatedJudgeResult | null
+  corrections: CorrectionAttempt[]
+}
+
 export interface TrainingQueueItem {
   key: string
   entry: AuditEntry
   review: TrainingReview
+  metadata: TrainingMetadata
 }
 
 export interface TrainingIntentOptions {
@@ -388,10 +423,16 @@ export const trainingApi = {
     },
   ) => apiFetch<TrainingReview>(`/api/training/queue/${key}`, { method: "PUT", body }),
   exportUrl: "/api/training/export",
+  exportDpoUrl: "/api/training/export/dpo",
 }
 
 export interface ScriptStatus {
-  script: "generate_scenarios" | "generate_training_data" | null
+  script:
+    | "generate_scenarios"
+    | "generate_training_data"
+    | "judge_training_data"
+    | "correct_training_data"
+    | null
   status: "idle" | "running" | "completed" | "failed" | "stopped"
   exit_code: number | null
   started_at: number | null
@@ -410,6 +451,21 @@ export const scriptsApi = {
     apiFetch<ScriptStatus>("/api/training/scripts/generate-scenarios", { method: "POST", body }),
   generateTrainingData: (body: { models: string[]; scenarios?: string; repeats?: number }) =>
     apiFetch<ScriptStatus>("/api/training/scripts/generate-training-data", {
+      method: "POST",
+      body,
+    }),
+  judgeTrainingData: (body: { judge_models: string[]; limit?: number }) =>
+    apiFetch<ScriptStatus>("/api/training/scripts/judge-training-data", {
+      method: "POST",
+      body,
+    }),
+  correctTrainingData: (body: {
+    corrector_model: string
+    judge_models: string[]
+    max_attempts?: number
+    limit?: number
+  }) =>
+    apiFetch<ScriptStatus>("/api/training/scripts/correct-training-data", {
       method: "POST",
       body,
     }),

@@ -1,7 +1,91 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react"
 import { ScriptRunnerPanel } from "../components/ScriptRunnerPanel"
-import { ApiError, trainingApi, type TrainingQueueItem, type TrainingReview } from "../lib/api"
+import {
+  ApiError,
+  trainingApi,
+  type AggregatedJudgeResult,
+  type TrainingQueueItem,
+  type TrainingReview,
+} from "../lib/api"
 import { useUIMode } from "../lib/uiMode"
+
+const DISAGREEMENT_WARNING_THRESHOLD = 2.5
+
+function AxisBadge({ label, value }: { label: string; value: number }) {
+  const tone =
+    value <= 3
+      ? "bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300"
+      : value <= 6
+        ? "bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+        : "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300"
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs font-medium ${tone}`}>
+      {label} {value.toFixed(1)}
+    </span>
+  )
+}
+
+function JudgePanel({ judge }: { judge: AggregatedJudgeResult }) {
+  return (
+    <div className="mt-3 rounded-md border border-steel/20 bg-white/50 p-3 text-xs dark:bg-black/10">
+      <p className="mb-2 font-medium text-steel">Judge ensemble</p>
+      <div className="flex flex-wrap gap-1.5">
+        <AxisBadge label="visitor voice" value={judge.visitor_voice_avg} />
+        <AxisBadge label="category" value={judge.category_correct_avg} />
+        <AxisBadge label="safety" value={judge.safety_compliant_avg} />
+        <AxisBadge label="quality" value={judge.natural_quality_avg} />
+      </div>
+      {(judge.voice_veto || judge.safety_veto) && (
+        <p className="mt-2 font-medium text-red-700 dark:text-red-300">
+          {judge.voice_veto ? "Vetoed: not genuine visitor speech. " : ""}
+          {judge.safety_veto ? "Vetoed: unsafe phrasing." : ""}
+        </p>
+      )}
+      {judge.disagreement >= DISAGREEMENT_WARNING_THRESHOLD && (
+        <p className="mt-2 text-amber-700 dark:text-amber-300">
+          Judges disagreed on this one (spread {judge.disagreement.toFixed(1)}) -- worth a closer
+          look.
+        </p>
+      )}
+      {judge.per_judge.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-steel">
+          {judge.per_judge.map((j, i) => (
+            <li key={i}>
+              <span className="font-medium">{j.judge_model}:</span> {j.reason}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function CorrectionDiffPanel({ item }: { item: TrainingQueueItem }) {
+  if (item.metadata.corrections.length === 0) return null
+  return (
+    <div className="mt-3 rounded-md border border-steel/20 bg-white/50 p-3 text-xs dark:bg-black/10">
+      <p className="mb-2 font-medium text-steel">Correction attempts</p>
+      <div className="space-y-3">
+        {item.metadata.corrections.map((attempt) => (
+          <div key={attempt.attempt} className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div>
+              <p className="font-medium text-steel">
+                Attempt {attempt.attempt} -- before (flagged: {attempt.judge_reason})
+              </p>
+              <p className="mt-0.5 text-ink dark:text-mist">{attempt.original_response}</p>
+            </div>
+            <div>
+              <p className="font-medium text-steel">
+                After {attempt.accepted ? "(accepted)" : "(still failed)"}
+              </p>
+              <p className="mt-0.5 text-ink dark:text-mist">{attempt.corrected_response}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 type StatusFilter = "pending" | "approved" | "rejected"
 
@@ -81,6 +165,9 @@ function EntryFields({
           className={inputClass}
         />
       </div>
+
+      {item.metadata.judge && <JudgePanel judge={item.metadata.judge} />}
+      <CorrectionDiffPanel item={item} />
     </>
   )
 }
@@ -120,10 +207,14 @@ export function Training() {
   )
 
   function editFor(item: TrainingQueueItem): EditState {
+    const lastCorrection = item.metadata.corrections.at(-1)
     return (
       edits[item.key] ?? {
         intent: item.review.intent_override ?? item.entry.intent ?? "unknown",
-        response: item.review.response_override ?? item.entry.response_text,
+        response:
+          item.review.response_override ??
+          lastCorrection?.corrected_response ??
+          item.entry.response_text,
       }
     )
   }
@@ -178,13 +269,22 @@ export function Training() {
             production.
           </p>
         </div>
-        <a
-          href={trainingApi.exportUrl}
-          download
-          className="shrink-0 rounded-md bg-porch px-4 py-2 text-sm font-semibold text-ink transition hover:brightness-95"
-        >
-          Export training file
-        </a>
+        <div className="flex shrink-0 gap-2">
+          <a
+            href={trainingApi.exportUrl}
+            download
+            className="rounded-md bg-porch px-4 py-2 text-sm font-semibold text-ink transition hover:brightness-95"
+          >
+            Export training file
+          </a>
+          <a
+            href={trainingApi.exportDpoUrl}
+            download
+            className="rounded-md border border-steel/30 px-4 py-2 text-sm font-semibold text-ink transition hover:border-porch dark:text-mist"
+          >
+            Export DPO pairs
+          </a>
+        </div>
       </div>
 
       {trainingOnly && (

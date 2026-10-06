@@ -19,9 +19,12 @@ from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.script_runner import RunState, ScriptName, ScriptRunner
 from knock.core.training import (
     VALID_TRAINING_INTENTS,
+    TrainingMetadata,
+    TrainingMetadataStore,
     TrainingReview,
     TrainingReviewStore,
     example_key,
+    export_dpo_pairs_jsonl,
     export_training_jsonl,
     training_mode_enabled,
 )
@@ -39,12 +42,17 @@ def get_review_store() -> TrainingReviewStore:
     return TrainingReviewStore()
 
 
+def get_metadata_store() -> TrainingMetadataStore:
+    return TrainingMetadataStore()
+
+
 def get_script_runner() -> ScriptRunner:
     return _script_runner
 
 
 AuditLogDep = Annotated[JSONLAuditLog, Depends(get_audit_log)]
 ReviewStoreDep = Annotated[TrainingReviewStore, Depends(get_review_store)]
+MetadataStoreDep = Annotated[TrainingMetadataStore, Depends(get_metadata_store)]
 ScriptRunnerDep = Annotated[ScriptRunner, Depends(get_script_runner)]
 
 
@@ -52,6 +60,7 @@ class TrainingQueueItem(BaseModel):
     key: str
     entry: AuditEntry
     review: TrainingReview
+    metadata: TrainingMetadata = TrainingMetadata()
 
 
 class UIMode(BaseModel):
@@ -98,20 +107,30 @@ def get_training_queue(
     *,
     audit_log: AuditLogDep,
     review_store: ReviewStoreDep,
+    metadata_store: MetadataStoreDep,
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> list[TrainingQueueItem]:
     """Every audit entry with something to train on (skips emergency/
     blocked requests, which never reach `classify_intent()`), newest
-    first, each paired with its current review status.
+    first, each paired with its current review status and -- if the judge
+    stage has scored it -- its judge/correction metadata, so the Training
+    page can show that context alongside the entry instead of a human
+    reviewing blind.
     """
     reviews = review_store.all()
+    metadata = metadata_store.all()
     items: list[TrainingQueueItem] = []
     for entry in audit_log.recent(limit=limit):
         if entry.intent is None:
             continue
         key = example_key(entry)
         items.append(
-            TrainingQueueItem(key=key, entry=entry, review=reviews.get(key, TrainingReview()))
+            TrainingQueueItem(
+                key=key,
+                entry=entry,
+                review=reviews.get(key, TrainingReview()),
+                metadata=metadata.get(key, TrainingMetadata()),
+            )
         )
     return items
 
@@ -157,6 +176,26 @@ def export_training_data(
         content=jsonl,
         media_type="application/jsonl",
         headers={"Content-Disposition": 'attachment; filename="knock_training_data.jsonl"'},
+    )
+
+
+@router.get("/export/dpo")
+def export_dpo_data(
+    current_user: CurrentUserDep,
+    *,
+    audit_log: AuditLogDep,
+    review_store: ReviewStoreDep,
+    metadata_store: MetadataStoreDep,
+    limit: int = Query(default=10000, ge=1, le=100000),
+    margin_threshold: float = Query(default=2.0, ge=0.0, le=10.0),
+) -> PlainTextResponse:
+    jsonl = export_dpo_pairs_jsonl(
+        audit_log, review_store, metadata_store, limit=limit, margin_threshold=margin_threshold
+    )
+    return PlainTextResponse(
+        content=jsonl,
+        media_type="application/jsonl",
+        headers={"Content-Disposition": 'attachment; filename="knock_dpo_pairs.jsonl"'},
     )
 
 
@@ -292,4 +331,82 @@ def start_generate_training_data(
     if body.audit_log:
         args += ["--audit-log", body.audit_log]
     _start(runner, "generate_training_data", args)
+    return _status_response(runner.state())
+
+
+class JudgeTrainingDataRequest(BaseModel):
+    judge_models: list[str]
+    ollama_host: str = "127.0.0.1"
+    ollama_port: int = 11434
+    ollama_timeout: float = 120.0
+    audit_log: str | None = None
+    metadata_store: str | None = None
+    limit: int | None = None
+
+
+@router.post("/scripts/judge-training-data", response_model=ScriptStatus)
+def start_judge_training_data(
+    body: JudgeTrainingDataRequest, current_user: CurrentUserDep, *, runner: ScriptRunnerDep
+) -> ScriptStatus:
+    if len(body.judge_models) < 2:
+        raise HTTPException(status_code=400, detail="judge_models needs at least 2 models")
+    args = [
+        "--judge-models",
+        ",".join(body.judge_models),
+        "--ollama-host",
+        body.ollama_host,
+        "--ollama-port",
+        str(body.ollama_port),
+        "--ollama-timeout",
+        str(body.ollama_timeout),
+    ]
+    if body.audit_log:
+        args += ["--audit-log", body.audit_log]
+    if body.metadata_store:
+        args += ["--metadata-store", body.metadata_store]
+    if body.limit is not None:
+        args += ["--limit", str(body.limit)]
+    _start(runner, "judge_training_data", args)
+    return _status_response(runner.state())
+
+
+class CorrectTrainingDataRequest(BaseModel):
+    corrector_model: str
+    judge_models: list[str]
+    max_attempts: int = 2
+    ollama_host: str = "127.0.0.1"
+    ollama_port: int = 11434
+    ollama_timeout: float = 120.0
+    audit_log: str | None = None
+    metadata_store: str | None = None
+    limit: int | None = None
+
+
+@router.post("/scripts/correct-training-data", response_model=ScriptStatus)
+def start_correct_training_data(
+    body: CorrectTrainingDataRequest, current_user: CurrentUserDep, *, runner: ScriptRunnerDep
+) -> ScriptStatus:
+    if len(body.judge_models) < 2:
+        raise HTTPException(status_code=400, detail="judge_models needs at least 2 models")
+    args = [
+        "--corrector-model",
+        body.corrector_model,
+        "--judge-models",
+        ",".join(body.judge_models),
+        "--max-attempts",
+        str(body.max_attempts),
+        "--ollama-host",
+        body.ollama_host,
+        "--ollama-port",
+        str(body.ollama_port),
+        "--ollama-timeout",
+        str(body.ollama_timeout),
+    ]
+    if body.audit_log:
+        args += ["--audit-log", body.audit_log]
+    if body.metadata_store:
+        args += ["--metadata-store", body.metadata_store]
+    if body.limit is not None:
+        args += ["--limit", str(body.limit)]
+    _start(runner, "correct_training_data", args)
     return _status_response(runner.state())

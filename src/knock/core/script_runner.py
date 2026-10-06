@@ -1,6 +1,7 @@
-"""Runs `scripts/generate_scenarios.py`/`scripts/generate_training_data.py`
-as a tracked child process, so the Training page's training-mode script
-runner panel can kick these off from the browser instead of a terminal.
+"""Runs `scripts/generate_scenarios.py`/`scripts/generate_training_data.py`/
+`scripts/judge_training_data.py`/`scripts/correct_training_data.py` as a
+tracked child process, so the Training page's training-mode script runner
+panel can kick these off from the browser instead of a terminal.
 
 Deliberately not built on `BridgeSupervisor` (see `knock.core.supervisor`):
 these are one-shot batch jobs expected to run to completion and exit, not
@@ -29,7 +30,9 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-ScriptName = Literal["generate_scenarios", "generate_training_data"]
+ScriptName = Literal[
+    "generate_scenarios", "generate_training_data", "judge_training_data", "correct_training_data"
+]
 RunStatus = Literal["idle", "running", "completed", "failed", "stopped"]
 
 _MAX_LOG_LINES = 2000

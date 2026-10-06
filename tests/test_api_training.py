@@ -7,11 +7,23 @@ from fastapi.testclient import TestClient
 
 from knock.api.app import app
 from knock.api.auth_routes import get_auth_store, get_web_session_store
-from knock.api.training_routes import get_audit_log, get_review_store, get_script_runner
+from knock.api.training_routes import (
+    get_audit_log,
+    get_metadata_store,
+    get_review_store,
+    get_script_runner,
+)
 from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.auth import AuthStore, WebSessionStore
 from knock.core.script_runner import ScriptRunner
-from knock.core.training import TrainingReview, TrainingReviewStore, example_key
+from knock.core.training import (
+    TrainingMetadata,
+    TrainingMetadataStore,
+    TrainingReview,
+    TrainingReviewStore,
+    example_key,
+)
+from knock.core.training_judge import AggregatedJudgeResult
 
 
 @pytest.fixture
@@ -25,6 +37,11 @@ def review_store(tmp_path) -> TrainingReviewStore:
 
 
 @pytest.fixture
+def metadata_store(tmp_path) -> TrainingMetadataStore:
+    return TrainingMetadataStore(tmp_path / "training_metadata.json")
+
+
+@pytest.fixture
 def scripts_dir(tmp_path) -> Path:
     directory = tmp_path / "scripts"
     directory.mkdir()
@@ -33,6 +50,12 @@ def scripts_dir(tmp_path) -> Path:
     )
     (directory / "generate_training_data.py").write_text(
         "import sys\nprint('training data ran with', sys.argv[1:])"
+    )
+    (directory / "judge_training_data.py").write_text(
+        "import sys\nprint('judge ran with', sys.argv[1:])"
+    )
+    (directory / "correct_training_data.py").write_text(
+        "import sys\nprint('correct ran with', sys.argv[1:])"
     )
     return directory
 
@@ -43,13 +66,14 @@ def script_runner(scripts_dir) -> ScriptRunner:
 
 
 @pytest.fixture
-def client(tmp_path, audit_log, review_store, script_runner):
+def client(tmp_path, audit_log, review_store, metadata_store, script_runner):
     app.dependency_overrides[get_auth_store] = lambda: AuthStore(tmp_path / "auth.json")
     app.dependency_overrides[get_web_session_store] = lambda: WebSessionStore(
         tmp_path / "web_sessions.json"
     )
     app.dependency_overrides[get_audit_log] = lambda: audit_log
     app.dependency_overrides[get_review_store] = lambda: review_store
+    app.dependency_overrides[get_metadata_store] = lambda: metadata_store
     app.dependency_overrides[get_script_runner] = lambda: script_runner
     try:
         yield TestClient(app)
@@ -389,3 +413,122 @@ def test_stop_requires_authentication(client) -> None:
 def test_script_logs_requires_authentication(client) -> None:
     resp = client.get("/api/training/scripts/logs")
     assert resp.status_code == 401
+
+
+# -- judge/correct script endpoints ----------------------------------------------------------------
+
+
+def test_judge_training_data_requires_authentication(client) -> None:
+    resp = _post(
+        client, "/api/training/scripts/judge-training-data", {"judge_models": ["m1", "m2"]}
+    )
+    assert resp.status_code == 401
+
+
+def test_judge_training_data_rejects_fewer_than_two_models(client) -> None:
+    _login(client)
+    resp = _post(client, "/api/training/scripts/judge-training-data", {"judge_models": ["m1"]})
+    assert resp.status_code == 400
+
+
+def test_judge_training_data_runs_and_completes(client) -> None:
+    _login(client)
+    resp = _post(
+        client, "/api/training/scripts/judge-training-data", {"judge_models": ["m1", "m2"]}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["script"] == "judge_training_data"
+
+    final = _wait_until_idle(client)
+    assert final["status"] == "completed"
+
+    logs = client.get("/api/training/scripts/logs").json()
+    assert any("m1,m2" in line for line in logs["lines"])
+
+
+def test_correct_training_data_requires_authentication(client) -> None:
+    resp = _post(
+        client,
+        "/api/training/scripts/correct-training-data",
+        {"corrector_model": "m1", "judge_models": ["m1", "m2"]},
+    )
+    assert resp.status_code == 401
+
+
+def test_correct_training_data_rejects_fewer_than_two_judge_models(client) -> None:
+    _login(client)
+    resp = _post(
+        client,
+        "/api/training/scripts/correct-training-data",
+        {"corrector_model": "m1", "judge_models": ["m1"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_correct_training_data_runs_and_completes(client) -> None:
+    _login(client)
+    resp = _post(
+        client,
+        "/api/training/scripts/correct-training-data",
+        {"corrector_model": "m1", "judge_models": ["m1", "m2"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["script"] == "correct_training_data"
+
+    final = _wait_until_idle(client)
+    assert final["status"] == "completed"
+
+
+# -- queue metadata ----------------------------------------------------------------
+
+
+def test_queue_includes_judge_metadata_when_present(client, audit_log, metadata_store) -> None:
+    _login(client)
+    entry = _entry()
+    audit_log.record(entry)
+    metadata_store.set(
+        example_key(entry),
+        TrainingMetadata(
+            judge=AggregatedJudgeResult(
+                visitor_voice_avg=9.0,
+                category_correct_avg=9.0,
+                safety_compliant_avg=9.0,
+                natural_quality_avg=9.0,
+                voice_veto=False,
+                safety_veto=False,
+                disagreement=0.0,
+                per_judge=[],
+            )
+        ),
+    )
+
+    resp = client.get("/api/training/queue")
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["metadata"]["judge"]["category_correct_avg"] == 9.0
+
+
+def test_queue_defaults_to_empty_metadata_when_unjudged(client, audit_log) -> None:
+    _login(client)
+    audit_log.record(_entry())
+
+    resp = client.get("/api/training/queue")
+    item = resp.json()[0]
+    assert item["metadata"]["judge"] is None
+    assert item["metadata"]["corrections"] == []
+
+
+# -- DPO export ----------------------------------------------------------------
+
+
+def test_export_dpo_requires_authentication(client) -> None:
+    resp = client.get("/api/training/export/dpo")
+    assert resp.status_code == 401
+
+
+def test_export_dpo_is_empty_before_anything_is_judged(client, audit_log) -> None:
+    _login(client)
+    audit_log.record(_entry())
+    resp = client.get("/api/training/export/dpo")
+    assert resp.status_code == 200
+    assert resp.text == ""
