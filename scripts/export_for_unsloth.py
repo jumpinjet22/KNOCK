@@ -53,9 +53,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=10000)
     args = parser.parse_args()
 
-    exported = export_training_jsonl(
-        JSONLAuditLog(), TrainingReviewStore(), limit=args.limit
-    )
+    exported = export_training_jsonl(JSONLAuditLog(), TrainingReviewStore(), limit=args.limit)
     records = convert(exported)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
