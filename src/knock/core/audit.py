@@ -8,6 +8,8 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from knock.core.scene import SceneContext
+
 DEFAULT_AUDIT_LOG_ENV_VAR = "KNOCK_AUDIT_LOG"
 
 
@@ -18,7 +20,9 @@ class AuditEntry(BaseModel):
     the visitor said and what KNOCK actually said back for that same turn.
     `response_text` defaults to "" so an older audit log written before
     this field existed still parses (`model_validate_json` on a JSON line
-    missing the key just gets the default, not a validation error).
+    missing the key just gets the default, not a validation error) -- same
+    for `scene`, the camera context the LLM saw alongside `text` (None for
+    entries recorded before it existed, or with no camera involved).
     """
 
     timestamp: datetime
@@ -30,6 +34,7 @@ class AuditEntry(BaseModel):
     allowed: bool
     reason: str
     intent: str | None = None
+    scene: SceneContext | None = None
 
 
 class AuditLog(Protocol):

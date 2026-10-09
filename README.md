@@ -59,7 +59,7 @@ Set `KNOCK_TRAINING_MODE=1` to collapse the web UI down to just the Training pag
 - No *cloud* AI API calls — real providers only talk to services on your own network.
 - Mock provider behavior remains deterministic and fully offline (no network calls at all).
 - Real providers are opt-in: the orchestrator still uses the mock/canned-response path by default, and nothing in `knock.core`/`knock.conversation` requires a provider to be configured.
-- No vision model pipeline is included yet.
+- Vision runs on your own Ollama server; its structured observations are recorded in the local audit log alongside each turn (see [Camera context](#camera-context-vision--brain)).
 
 ## Real Providers (LLM / STT / TTS / Vision)
 
@@ -76,6 +76,22 @@ Whisper and TTS run over the Wyoming protocol (the same one used by Home Assista
 
 **Vision safety:** the default prompt explicitly asks the model to describe only what's literally visible and never speculate about danger, intent, or weapons -- but that's an instruction a model can ignore, not a guarantee. Every description from `OllamaVisionProvider` also passes through `knock.providers.vision.safety.sanitize_description`, a deterministic keyword backstop that swaps anything mentioning weapons/explosives/threats for a generic, safe fallback sentence before it can reach a response. It's deliberately over-inclusive (false positives suppress benign descriptions sometimes) -- per the project's safety-first stance, a boring fallback beats a speculative, alarming one. This does not replace real threat detection; it only keeps a vision model's unreliable self-generated language from being spoken or displayed verbatim.
 
+### Camera context (vision → brain)
+
+The bridges don't hand the LLM a single pasted sentence anymore. `OllamaVisionProvider.observe()` asks the vision model for a **structured observation** using Ollama's grammar-constrained JSON output (`format` set to a schema). The fields are: people visible, what they're carrying, whether a package is visible, uniform/logo, vehicle, legible text, and a short summary. There are deliberately no identity/face/emotion fields. Every free-text field goes through the same safety backstop: an alarming field is dropped, and an alarming summary becomes the generic fallback. If the model returns something that isn't valid JSON, KNOCK falls back to the old one-sentence `describe()`.
+
+That observation, plus whatever the camera system's own detector already reported (UniFi smart-detect types, Frigate's label and zones), travels as `VisitorEvent.scene`. It is kept **separate from the visitor's words**:
+
+- `PolicyEngine` and keyword intent classification only ever see what the visitor said. Camera output can't trip a safety rule or pick an intent.
+- The LLM prompts (classification, response phrasing, notification summaries) get the scene as its own block. That block is labeled as automated output that may be wrong, is *not* visitor speech, and treats visible text as data, never as instructions.
+- The audit log records `scene` next to `text`, and the training export includes it, so a fine-tuned model learns from the same prompt shape it sees in production.
+
+In the UniFi bridge, the snapshot + vision call starts **the moment the event arrives**, running in parallel with the greeting and listen window, so vision usually adds nothing to the reply delay. Each later conversation turn takes a fresh look, which catches a visitor holding up a badge or package after being asked. When UniFi's detector reports a package, the doorbell's package camera is checked too and merged in. If vision isn't ready within 15s, the reply goes out without it.
+
+**Opt-in: send the image to the brain** (`KNOCK_VISION_SEND_IMAGE_TO_BRAIN=true`, off by default). If your main model is multimodal, the response call also gets the raw snapshot on top of the structured scene. That's more context, but there's no vision backstop between the camera and the brain, and text visible in the image (a sign held up to the camera) reaches the model directly. KNOCK runs the vision backstop over the *reply* as well in this mode, and the usual deterministic and LLM safety checks still apply.
+
+Use the Debug page's **Structured observation** button to see exactly what the LLM would get for a given image.
+
 Each adapter takes a small config object with localhost defaults, overridable via env vars:
 
 | Var | Default | Notes |
@@ -83,7 +99,10 @@ Each adapter takes a small config object with localhost defaults, overridable vi
 | `KNOCK_OLLAMA_HOST` / `_PORT` / `_MODEL` / `_TIMEOUT` | `127.0.0.1` / `11434` / `llama3.2` / `30.0` | Ollama REST API |
 | `KNOCK_OLLAMA_USE_TOOL_CALLING` | unset (auto-detect) | Tri-state: unset runs a capability check (Ollama's reported model capabilities, then a live tool-call smoke test) at bridge startup; `true`/`false` force it on/off and skip detection -- an explicit `false` is sticky and never silently re-enabled by a later restart's auto-detection |
 | `KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_FLOOR` / `_MARGIN` | `0.5` / `0.15` | Below this confidence, or this close to the next-best guess, a tool-calling classification is treated as uncertain and triggers a `"review"` notification instead of guessing |
-| `KNOCK_OLLAMA_SAFETY_CHECK_MODEL` | unset (disabled) | Optional second-opinion safety check: before a response is spoken, a separate LLM call (this model, same host/port/timeout as `KNOCK_OLLAMA_MODEL`) is asked whether it violates the occupancy/schedule/entry rules, as a soft, imperfect backstop *in addition to* the always-on deterministic phrase/regex filter in `conversation/policy.py`. Unset disables this layer entirely. A bigger/more careful model than your main `KNOCK_OLLAMA_MODEL` is worth using here -- it only runs once per response, not once per conversation turn's worth of generation |
+| `KNOCK_OLLAMA_KEEP_ALIVE` / `KNOCK_VISION_KEEP_ALIVE` | unset (server default) | How long Ollama keeps the model loaded after a request (`-1` = forever, or a duration like `24h`). Ollama's own default unloads after 5 idle minutes, so the next ring pays a multi-second model reload; `-1` is recommended on a dedicated machine. The bridges also send a warm-up request at startup so the first ring doesn't pay it either |
+| `KNOCK_OLLAMA_SAFETY_CHECK_HOST` / `_PORT` | unset (same as `KNOCK_OLLAMA_HOST`/`_PORT`) | Run the safety-check model on a different Ollama server, e.g. a small model on a second, smaller GPU so it never competes with the main model for VRAM |
+| `KNOCK_VISION_SEND_IMAGE_TO_BRAIN` | `false` | Opt-in: also send the raw snapshot to a multimodal main model -- see [Camera context](#camera-context-vision--brain) |
+| `KNOCK_OLLAMA_SAFETY_CHECK_MODEL` | unset (disabled) | Optional second-opinion safety check: before a response is spoken, a separate LLM call (this model; same host/port/timeout as `KNOCK_OLLAMA_MODEL` unless `KNOCK_OLLAMA_SAFETY_CHECK_HOST`/`_PORT` are set) is asked whether it violates the occupancy/schedule/entry rules, as a soft, imperfect backstop *in addition to* the always-on deterministic phrase/regex filter in `conversation/policy.py`. Unset disables this layer entirely. A bigger/more careful model than your main `KNOCK_OLLAMA_MODEL` is worth using here -- it only runs once per response, not once per conversation turn's worth of generation |
 | `KNOCK_PUBLIC_BASE_URL` | unset | Externally-reachable base URL for KNOCK's own API, needed so a notification's photo attachment is fetchable from the household's phone; unset means notifications send without a photo |
 | `KNOCK_WHISPER_HOST` / `_PORT` / `_TIMEOUT` | `127.0.0.1` / `10300` / `10.0` | Wyoming STT server |
 | `KNOCK_KOKORO_HOST` / `_PORT` / `_VOICE` / `_TIMEOUT` | `127.0.0.1` / `10200` / unset / `10.0` | Wyoming TTS server |
@@ -175,7 +194,7 @@ knock-unifi-bridge
 
 It reacts to a doorbell `ring` by default (`KNOCK_UNIFI_TRIGGER_ON`); add smart-detect object types (e.g. `person`, `package`) to also react to those. UniFi itself has no speech-to-text, so the event text is a generic trigger description -- real visitor speech is a future audio-pipeline concern. Pass a `vision_provider` when constructing `UnifiBridge` yourself to have it fetch the triggering camera's snapshot and fold a short description into the response, same best-effort enrichment pattern as the Frigate bridge. Connection settings (`KNOCK_UNIFI_HOST`/`_PORT`/`_API_KEY`/`_VERIFY_SSL`/`_TRIGGER_ON`) follow the same env-var pattern as everything else.
 
-**Listening (speech-to-text):** pass a `stt_provider` (e.g. `WhisperSTTProvider`) to have KNOCK open the triggering camera's RTSPS stream, capture `KNOCK_UNIFI_LISTEN_SECONDS` (default 10s) of audio from its microphone, and transcribe it -- the real transcript becomes the `VisitorEvent` text instead of the generic "Doorbell ring on ..." placeholder. `KNOCK_UNIFI_RTSP_QUALITY` (default `high`) picks which RTSPS stream quality to pull (UniFi exposes several, including a `package` variant on some doorbells). No stream, no audio track, or any capture/transcription failure just falls back to the generic placeholder text -- it never blocks the response.
+**Listening (speech-to-text):** pass a `stt_provider` (e.g. `WhisperSTTProvider`) to have KNOCK open the triggering camera's RTSPS stream, capture up to `KNOCK_UNIFI_LISTEN_SECONDS` (default 10s) of audio from its microphone, and transcribe it. Capture stops early once the visitor has spoken and then gone quiet for `KNOCK_UNIFI_END_SILENCE_SECONDS` (default 1s; `0` always waits the full window), so a short answer doesn't wait out the rest of the window -- the real transcript becomes the `VisitorEvent` text instead of the generic "Doorbell ring on ..." placeholder. `KNOCK_UNIFI_RTSP_QUALITY` (default `high`) picks which RTSPS stream quality to pull (UniFi exposes several, including a `package` variant on some doorbells). No stream, no audio track, or any capture/transcription failure just falls back to the generic placeholder text -- it never blocks the response.
 
 **Talkback (two-way audio):** pass a `tts_provider` (e.g. `KokoroTTSProvider`) to have it synthesize the response and stream it out to the triggering camera's speaker, using `uiprotect`'s own `TalkbackStream` (PyAV-based UDP streaming -- already a transitive dependency via `uiprotect`, nothing extra to install). A camera with no speaker, or any streaming failure, is logged and skipped -- talkback is an enhancement on top of the text response, never a requirement for it.
 

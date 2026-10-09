@@ -388,7 +388,7 @@ def build_dpo_pairs(
                 continue
             pairs.append(
                 DpoPair(
-                    prompt=_response_prompt(chosen.intent, chosen.text),
+                    prompt=_response_prompt(chosen.intent, chosen.text, chosen.scene),
                     chosen=chosen.response_text,
                     rejected=rejected.response_text,
                     margin=margin,
@@ -429,7 +429,7 @@ def build_classification_dpo_pairs(
                 continue
             pairs.append(
                 DpoPair(
-                    prompt=_classification_prompt(chosen.text),
+                    prompt=_classification_prompt(chosen.text, chosen.scene),
                     chosen=str(chosen.intent),
                     rejected=str(rejected.intent),
                     margin=margin,
