@@ -164,7 +164,10 @@ def test_queue_is_empty_before_anything_is_recorded(client) -> None:
     _login(client)
     resp = client.get("/api/training/queue")
     assert resp.status_code == 200
-    assert resp.json() == []
+    body = resp.json()
+    assert body["items"] == []
+    assert body["total"] == 0
+    assert body["has_more"] is False
 
 
 def test_queue_excludes_entries_with_no_intent(client, audit_log) -> None:
@@ -174,7 +177,7 @@ def test_queue_excludes_entries_with_no_intent(client, audit_log) -> None:
     resp = client.get("/api/training/queue")
 
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.json()["items"] == []
 
 
 def test_queue_lists_entries_newest_first_with_pending_review_status(client, audit_log) -> None:
@@ -185,7 +188,7 @@ def test_queue_lists_entries_newest_first_with_pending_review_status(client, aud
     resp = client.get("/api/training/queue")
 
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["items"]
     assert [item["entry"]["text"] for item in body] == ["second", "first"]
     assert all(item["review"]["status"] == "pending" for item in body)
 
@@ -199,7 +202,64 @@ def test_queue_reflects_a_saved_review(client, audit_log, review_store) -> None:
     resp = client.get("/api/training/queue")
 
     assert resp.status_code == 200
-    assert resp.json()[0]["review"]["status"] == "approved"
+    assert resp.json()["items"][0]["review"]["status"] == "approved"
+
+
+def test_queue_filters_by_status(client, audit_log, review_store) -> None:
+    _login(client)
+    pending = _entry(text="still pending")
+    approved = _entry(text="already approved")
+    audit_log.record(pending)
+    audit_log.record(approved)
+    review_store.set(example_key(approved), TrainingReview(status="approved"))
+
+    resp = client.get("/api/training/queue?status=approved")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [item["entry"]["text"] for item in body["items"]] == ["already approved"]
+    assert body["total"] == 1
+
+
+def test_queue_paginates_with_offset_and_limit(client, audit_log) -> None:
+    _login(client)
+    for i in range(5):
+        audit_log.record(_entry(text=f"entry {i}"))
+
+    first_page = client.get("/api/training/queue?limit=2&offset=0").json()
+    second_page = client.get("/api/training/queue?limit=2&offset=2").json()
+
+    assert first_page["total"] == 5
+    assert first_page["has_more"] is True
+    assert len(first_page["items"]) == 2
+    assert second_page["items"][0]["entry"]["text"] != first_page["items"][0]["entry"]["text"]
+
+
+def test_queue_counts_reflect_the_full_history_not_just_one_page(
+    client, audit_log, review_store
+) -> None:
+    _login(client)
+    # More entries than a single page would hold, spanning all three
+    # statuses -- this is the regression test for the bug that motivated
+    # pagination: counts (and the status-filtered queue) must reflect the
+    # full history, not a recent-N window that silently drops older
+    # reviewed entries once the dataset outgrows it.
+    entries = [_entry(text=f"entry {i}") for i in range(6)]
+    for entry in entries:
+        audit_log.record(entry)
+    review_store.set(example_key(entries[0]), TrainingReview(status="approved"))
+    review_store.set(example_key(entries[1]), TrainingReview(status="approved"))
+    review_store.set(example_key(entries[2]), TrainingReview(status="rejected"))
+
+    resp = client.get("/api/training/queue/counts")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"pending": 3, "approved": 2, "rejected": 1}
+
+
+def test_queue_counts_requires_authentication(client) -> None:
+    resp = client.get("/api/training/queue/counts")
+    assert resp.status_code == 401
 
 
 # -- review ----------------------------------------------------------------
@@ -217,7 +277,7 @@ def test_put_review_saves_approval(client, audit_log) -> None:
     assert resp.json()["status"] == "approved"
 
     queue = client.get("/api/training/queue").json()
-    assert queue[0]["review"]["status"] == "approved"
+    assert queue["items"][0]["review"]["status"] == "approved"
 
 
 def test_put_review_saves_corrections(client, audit_log) -> None:
@@ -504,7 +564,7 @@ def test_queue_includes_judge_metadata_when_present(client, audit_log, metadata_
 
     resp = client.get("/api/training/queue")
     assert resp.status_code == 200
-    item = resp.json()[0]
+    item = resp.json()["items"][0]
     assert item["metadata"]["judge"]["category_correct_avg"] == 9.0
 
 
@@ -513,7 +573,7 @@ def test_queue_defaults_to_empty_metadata_when_unjudged(client, audit_log) -> No
     audit_log.record(_entry())
 
     resp = client.get("/api/training/queue")
-    item = resp.json()[0]
+    item = resp.json()["items"][0]
     assert item["metadata"]["judge"] is None
     assert item["metadata"]["corrections"] == []
 

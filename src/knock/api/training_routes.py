@@ -63,6 +63,54 @@ class TrainingQueueItem(BaseModel):
     metadata: TrainingMetadata = TrainingMetadata()
 
 
+class TrainingQueuePage(BaseModel):
+    items: list[TrainingQueueItem]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool
+
+
+class TrainingQueueCounts(BaseModel):
+    pending: int
+    approved: int
+    rejected: int
+
+
+def _all_queue_items(
+    audit_log: JSONLAuditLog,
+    review_store: TrainingReviewStore,
+    metadata_store: TrainingMetadataStore,
+) -> list[TrainingQueueItem]:
+    """Every audit entry with something to train on, newest first, joined
+    with its current review status and judge/correction metadata -- the
+    full history, not a recent-N window. `recent(limit=100_000)` is this
+    project's established "effectively everything" idiom (see
+    scripts/judge_training_data.py); a plain linear scan is fine at this
+    local-first scale (see JSONLAuditLog.recent's own docstring).
+
+    Callers filter/paginate this list themselves -- this just does the
+    join once so `get_training_queue` and `get_training_queue_counts`
+    don't each repeat it.
+    """
+    reviews = review_store.all()
+    metadata = metadata_store.all()
+    items: list[TrainingQueueItem] = []
+    for entry in audit_log.recent(limit=100_000):
+        if entry.intent is None:
+            continue
+        key = example_key(entry)
+        items.append(
+            TrainingQueueItem(
+                key=key,
+                entry=entry,
+                review=reviews.get(key, TrainingReview()),
+                metadata=metadata.get(key, TrainingMetadata()),
+            )
+        )
+    return items
+
+
 class UIMode(BaseModel):
     training_only: bool
 
@@ -101,38 +149,59 @@ def get_training_intents(current_user: CurrentUserDep) -> IntentOptions:
     return IntentOptions(intents=sorted(VALID_TRAINING_INTENTS))
 
 
-@router.get("/queue", response_model=list[TrainingQueueItem])
+@router.get("/queue", response_model=TrainingQueuePage)
 def get_training_queue(
     current_user: CurrentUserDep,
     *,
     audit_log: AuditLogDep,
     review_store: ReviewStoreDep,
     metadata_store: MetadataStoreDep,
-    limit: int = Query(default=200, ge=1, le=1000),
-) -> list[TrainingQueueItem]:
-    """Every audit entry with something to train on (skips emergency/
-    blocked requests, which never reach `classify_intent()`), newest
-    first, each paired with its current review status and -- if the judge
-    stage has scored it -- its judge/correction metadata, so the Training
-    page can show that context alongside the entry instead of a human
-    reviewing blind.
+    status: Literal["pending", "approved", "rejected"] | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> TrainingQueuePage:
+    """A page of audit entries with something to train on (skips
+    emergency/blocked requests, which never reach `classify_intent()`),
+    newest first, each paired with its current review status and -- if
+    the judge stage has scored it -- its judge/correction metadata.
+
+    Filters by `status` (if given) *before* paginating, across the full
+    history -- not a recent-N window truncated before filtering. That
+    distinction matters once a deployment accumulates more than one
+    page's worth of history: the previous version took a flat `limit`
+    (capped at 1000) over the newest raw audit entries and filtered by
+    status client-side, so anything reviewed earlier than that window
+    -- most of an actually-reviewed history, in practice -- silently
+    stopped appearing in the Approved/Rejected tabs at all, with no
+    indication anything was missing.
     """
-    reviews = review_store.all()
-    metadata = metadata_store.all()
-    items: list[TrainingQueueItem] = []
-    for entry in audit_log.recent(limit=limit):
-        if entry.intent is None:
-            continue
-        key = example_key(entry)
-        items.append(
-            TrainingQueueItem(
-                key=key,
-                entry=entry,
-                review=reviews.get(key, TrainingReview()),
-                metadata=metadata.get(key, TrainingMetadata()),
-            )
-        )
-    return items
+    matching = [
+        item
+        for item in _all_queue_items(audit_log, review_store, metadata_store)
+        if status is None or item.review.status == status
+    ]
+    total = len(matching)
+    page = matching[offset : offset + limit]
+    return TrainingQueuePage(
+        items=page, total=total, offset=offset, limit=limit, has_more=offset + limit < total
+    )
+
+
+@router.get("/queue/counts", response_model=TrainingQueueCounts)
+def get_training_queue_counts(
+    current_user: CurrentUserDep,
+    *,
+    audit_log: AuditLogDep,
+    review_store: ReviewStoreDep,
+    metadata_store: MetadataStoreDep,
+) -> TrainingQueueCounts:
+    """Counts across the FULL history, for the tab labels -- computed in
+    one pass so showing all three doesn't cost three separate full scans.
+    """
+    counts = {"pending": 0, "approved": 0, "rejected": 0}
+    for item in _all_queue_items(audit_log, review_store, metadata_store):
+        counts[item.review.status] += 1
+    return TrainingQueueCounts(**counts)
 
 
 class ReviewRequest(BaseModel):

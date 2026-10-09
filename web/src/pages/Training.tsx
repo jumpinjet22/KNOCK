@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react"
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react"
 import { ScriptRunnerPanel } from "../components/ScriptRunnerPanel"
 import {
   ApiError,
   trainingApi,
   type AggregatedJudgeResult,
+  type TrainingQueueCounts,
   type TrainingQueueItem,
   type TrainingReview,
 } from "../lib/api"
 import { useUIMode } from "../lib/uiMode"
 
 const DISAGREEMENT_WARNING_THRESHOLD = 2.5
+const PAGE_SIZE = 25
 
 function AxisBadge({ label, value }: { label: string; value: number }) {
   const tone =
@@ -174,37 +176,69 @@ function EntryFields({
 
 export function Training() {
   const { trainingOnly } = useUIMode()
-  const [items, setItems] = useState<TrainingQueueItem[] | null>(null)
+  const [counts, setCounts] = useState<TrainingQueueCounts | null>(null)
   const [intents, setIntents] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<StatusFilter>("pending")
   const [edits, setEdits] = useState<Record<string, EditState>>({})
   const [savingKey, setSavingKey] = useState<string | null>(null)
   // Small in-memory undo stack for the one-at-a-time triage flow below --
-  // "Back" pops the most recently approved/rejected key and resets it to
+  // "Back" pops the most recently approved/rejected item and resets it to
   // pending. Session-only (not persisted); a page reload just loses it,
-  // same as the reviewed-this-session counter.
-  const [history, setHistory] = useState<string[]>([])
+  // same as the reviewed-this-session counter. Stores the full item (not
+  // just its key) so undo doesn't depend on it still being in whichever
+  // page happens to be loaded.
+  const [history, setHistory] = useState<TrainingQueueItem[]>([])
   const [reviewedCount, setReviewedCount] = useState(0)
 
-  function load() {
-    // Explicit high limit -- a generated scenario batch across several
-    // models can easily exceed the API's default of 200, which would
-    // otherwise silently hide the oldest entries from review entirely.
-    Promise.all([trainingApi.queue(1000), trainingApi.intents()])
-      .then(([queue, intentOptions]) => {
-        setItems(queue)
-        setIntents(intentOptions.intents)
-      })
+  // The active tab's current page. "pending" always re-fetches at
+  // offset=0 -- an approved/rejected item simply stops matching
+  // status=pending, so offset=0 is always "whatever's left", no cursor
+  // bookkeeping needed. approved/rejected are real paginated lists with
+  // a "Load more" button, since they're browsed as a list, not
+  // consumed one-at-a-time.
+  const [items, setItems] = useState<TrainingQueueItem[]>([])
+  const [total, setTotal] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+
+  const loadCounts = useCallback(() => {
+    trainingApi
+      .queueCounts()
+      .then(setCounts)
       .catch((err) => setError(errorMessage(err)))
+  }, [])
+
+  const loadPage = useCallback((status: StatusFilter, offset: number) => {
+    return trainingApi.queue({ status, offset, limit: PAGE_SIZE }).then((page) => {
+      setItems((current) => (offset === 0 ? page.items : [...current, ...page.items]))
+      setTotal(page.total)
+      setHasMore(page.has_more)
+      return page
+    })
+  }, [])
+
+  useEffect(() => {
+    setItems([])
+    setTotal(0)
+    setHasMore(false)
+    loadPage(filter, 0).catch((err) => setError(errorMessage(err)))
+  }, [filter, loadPage])
+
+  useEffect(() => {
+    loadCounts()
+    trainingApi
+      .intents()
+      .then((res) => setIntents(res.intents))
+      .catch((err) => setError(errorMessage(err)))
+  }, [loadCounts])
+
+  function loadMore() {
+    setLoadingMore(true)
+    loadPage(filter, items.length)
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setLoadingMore(false))
   }
-
-  useEffect(load, [])
-
-  const filtered = useMemo(
-    () => (items ?? []).filter((item) => item.review.status === filter),
-    [items, filter],
-  )
 
   function editFor(item: TrainingQueueItem): EditState {
     const lastCorrection = item.metadata.corrections.at(-1)
@@ -231,13 +265,24 @@ export function Training() {
         intent_override: intentChanged ? edit.intent : null,
         response_override: responseChanged ? edit.response : null,
       })
-      setItems(
-        (current) =>
-          current?.map((entry) => (entry.key === item.key ? { ...entry, review: updated } : entry)) ??
-          current,
-      )
+      // The item no longer matches the active tab's filter (it moved to
+      // a different status) -- drop it from the current page locally
+      // rather than wait on a refetch, then reconcile counts/total from
+      // the server so they stay authoritative.
+      const remaining = items.filter((i) => i.key !== item.key)
+      setItems(remaining)
+      setTotal((t) => Math.max(0, t - 1))
+      loadCounts()
+      // Refill the pending buffer once it runs dry -- offset=0 is always
+      // correct here (nothing reviewed matches status=pending anymore),
+      // so this naturally fetches whatever's left rather than needing a
+      // cursor. Without this, finishing a page's worth of pending items
+      // would wrongly show "All caught up" even if more exist.
+      if (filter === "pending" && remaining.length === 0 && hasMore) {
+        loadPage("pending", 0).catch((err) => setError(errorMessage(err)))
+      }
       if (status === "approved" || status === "rejected") {
-        setHistory((h) => [...h, item.key])
+        setHistory((h) => [...h, { ...item, review: updated }])
         setReviewedCount((c) => c + 1)
       }
     } catch (err) {
@@ -248,12 +293,18 @@ export function Training() {
   }
 
   async function goBack() {
-    const lastKey = history[history.length - 1]
-    const item = items?.find((i) => i.key === lastKey)
-    if (!lastKey || !item) return
+    const lastItem = history[history.length - 1]
+    if (!lastItem) return
     setHistory((h) => h.slice(0, -1))
     setReviewedCount((c) => Math.max(0, c - 1))
-    await setStatus(item, "pending")
+    await setStatus(lastItem, "pending")
+    // Reverting back to pending while viewing the pending tab: put it
+    // back at the front so it's the very next one shown, rather than
+    // wherever a fresh fetch would place it.
+    if (filter === "pending") {
+      setItems((current) => [{ ...lastItem, review: { ...lastItem.review, status: "pending" } }, ...current])
+      setTotal((t) => t + 1)
+    }
   }
 
   return (
@@ -306,11 +357,7 @@ export function Training() {
             }`}
           >
             {tab.label}
-            {items && (
-              <span className="ml-1.5 text-xs text-steel">
-                ({items.filter((item) => item.review.status === tab.key).length})
-              </span>
-            )}
+            {counts && <span className="ml-1.5 text-xs text-steel">({counts[tab.key]})</span>}
           </button>
         ))}
       </div>
@@ -322,11 +369,10 @@ export function Training() {
           </p>
         )}
 
-        {!items ? (
-          <p className="text-sm text-steel">Loading…</p>
-        ) : filter === "pending" ? (
+        {filter === "pending" ? (
           <PendingTriage
-            items={filtered}
+            current={items[0] ?? null}
+            totalRemaining={total}
             intents={intents}
             setEdits={setEdits}
             editFor={editFor}
@@ -336,11 +382,11 @@ export function Training() {
             canGoBack={history.length > 0}
             reviewedCount={reviewedCount}
           />
-        ) : filtered.length === 0 ? (
+        ) : items.length === 0 ? (
           <p className="text-sm text-steel">No {filter} entries yet.</p>
         ) : (
           <div className="space-y-3">
-            {filtered.map((item) => {
+            {items.map((item) => {
               const edit = editFor(item)
               const saving = savingKey === item.key
               return (
@@ -384,6 +430,16 @@ export function Training() {
                 </div>
               )
             })}
+            {hasMore && (
+              <button
+                type="button"
+                disabled={loadingMore}
+                onClick={loadMore}
+                className={`${buttonClass} w-full border border-steel/30 py-2 text-steel hover:border-porch hover:text-ink dark:text-mist`}
+              >
+                {loadingMore ? "Loading…" : `Load more (${items.length}/${total})`}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -392,7 +448,8 @@ export function Training() {
 }
 
 function PendingTriage({
-  items,
+  current,
+  totalRemaining,
   intents,
   setEdits,
   editFor,
@@ -402,7 +459,8 @@ function PendingTriage({
   canGoBack,
   reviewedCount,
 }: {
-  items: TrainingQueueItem[]
+  current: TrainingQueueItem | null
+  totalRemaining: number
   intents: string[]
   setEdits: Dispatch<SetStateAction<Record<string, EditState>>>
   editFor: (item: TrainingQueueItem) => EditState
@@ -412,8 +470,6 @@ function PendingTriage({
   canGoBack: boolean
   reviewedCount: number
 }) {
-  const current = items[0]
-
   if (!current) {
     return (
       <div className="rounded-lg border border-steel/20 bg-paper px-6 py-10 text-center dark:bg-dusk">
@@ -432,7 +488,7 @@ function PendingTriage({
   return (
     <div>
       <div className="mb-3 flex items-center justify-between text-xs text-steel">
-        <span>{items.length} left to review</span>
+        <span>{totalRemaining} left to review</span>
         {reviewedCount > 0 && <span>{reviewedCount} done this session</span>}
       </div>
       <div className="rounded-lg border border-steel/20 bg-paper px-5 py-5 dark:bg-dusk">

@@ -402,6 +402,20 @@ export interface TrainingQueueItem {
   metadata: TrainingMetadata
 }
 
+export interface TrainingQueuePage {
+  items: TrainingQueueItem[]
+  total: number
+  offset: number
+  limit: number
+  has_more: boolean
+}
+
+export interface TrainingQueueCounts {
+  pending: number
+  approved: number
+  rejected: number
+}
+
 export interface TrainingIntentOptions {
   intents: string[]
 }
@@ -413,7 +427,19 @@ export interface UIMode {
 export const trainingApi = {
   uiMode: () => apiFetch<UIMode>("/api/training/ui-mode"),
   intents: () => apiFetch<TrainingIntentOptions>("/api/training/intents"),
-  queue: (limit = 200) => apiFetch<TrainingQueueItem[]>(`/api/training/queue?limit=${limit}`),
+  // Status-filtered, paginated -- see training_routes.py's get_training_queue
+  // docstring for why: the old flat `limit` (over the newest raw entries,
+  // filtered client-side) silently hid most of an actually-reviewed
+  // history once the dataset outgrew it. offset/limit here page through
+  // the full, status-filtered history instead.
+  queue: (params: { status?: TrainingReview["status"]; offset?: number; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.status) query.set("status", params.status)
+    query.set("offset", String(params.offset ?? 0))
+    query.set("limit", String(params.limit ?? 25))
+    return apiFetch<TrainingQueuePage>(`/api/training/queue?${query.toString()}`)
+  },
+  queueCounts: () => apiFetch<TrainingQueueCounts>("/api/training/queue/counts"),
   review: (
     key: string,
     body: {
