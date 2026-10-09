@@ -44,9 +44,30 @@ from pydantic import BaseModel, Field
 
 from knock.core.audit import AuditEntry
 from knock.core.orchestrator import _classification_prompt, _response_prompt
+from knock.core.scene import format_scene_for_prompt
 from knock.providers.llm.base import LLMProvider
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _same_scene(a: AuditEntry, b: AuditEntry) -> bool:
+    """Whether `a` and `b` would have produced the identical camera-context
+    prompt block -- i.e. whether they're actually comparable completions of
+    the SAME prompt, not just the same visitor text.
+
+    Needed because a DPO pair's `prompt` field is built from only the
+    chosen entry's scene (`build_dpo_pairs`/`build_classification_dpo_pairs`
+    below) -- without this check, two entries that happen to share visitor
+    text but were captured under different camera context (a real, repeated
+    phrase like "I have a package for you" said on different real visits)
+    would get silently paired as if "rejected" had lost a comparison under
+    a prompt it never actually saw. Comparing the rendered prompt block
+    rather than the raw `SceneContext` objects means two `None`/empty
+    scenes (every synthetic Stage 2 entry, which never attaches one) still
+    count as equivalent, and a cosmetic difference like `captured_at`
+    doesn't block an otherwise-identical pair.
+    """
+    return format_scene_for_prompt(a.scene) == format_scene_for_prompt(b.scene)
 
 
 def _parse_json_object(raw: str) -> dict[str, object] | None:
@@ -378,6 +399,8 @@ def build_dpo_pairs(
         for entry_b, score_b in scored[i + 1 :]:
             if entry_a.text != entry_b.text or entry_a.intent != entry_b.intent:
                 continue
+            if not _same_scene(entry_a, entry_b):
+                continue
             margin = abs(score_a - score_b)
             if margin < margin_threshold:
                 continue
@@ -388,7 +411,7 @@ def build_dpo_pairs(
                 continue
             pairs.append(
                 DpoPair(
-                    prompt=_response_prompt(chosen.intent, chosen.text),
+                    prompt=_response_prompt(chosen.intent, chosen.text, chosen.scene),
                     chosen=chosen.response_text,
                     rejected=rejected.response_text,
                     margin=margin,
@@ -421,6 +444,8 @@ def build_classification_dpo_pairs(
         for entry_b, score_b in scored[i + 1 :]:
             if entry_a.text != entry_b.text or entry_a.intent == entry_b.intent:
                 continue
+            if not _same_scene(entry_a, entry_b):
+                continue
             margin = abs(score_a - score_b)
             if margin < margin_threshold:
                 continue
@@ -429,7 +454,7 @@ def build_classification_dpo_pairs(
                 continue
             pairs.append(
                 DpoPair(
-                    prompt=_classification_prompt(chosen.text),
+                    prompt=_classification_prompt(chosen.text, chosen.scene),
                     chosen=str(chosen.intent),
                     rejected=str(rejected.intent),
                     margin=margin,

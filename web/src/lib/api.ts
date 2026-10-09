@@ -137,6 +137,24 @@ export interface VisionDescribeResult {
   latency_ms: number
 }
 
+export interface SceneObservation {
+  people_count: number | null
+  carrying: string[]
+  package_visible: boolean | null
+  uniform_or_logo: string | null
+  vehicle: string | null
+  visible_text: string | null
+  summary: string
+}
+
+export interface VisionObserveResult {
+  raw: string
+  observation: SceneObservation | null
+  parse_error: string | null
+  prompt_block: string
+  latency_ms: number
+}
+
 export interface LLMGenerateResult {
   response: string
   latency_ms: number
@@ -335,6 +353,11 @@ export const debugApi = {
     apiFetch<VisionDescribeResult>("/api/debug/vision/describe", {
       method: "POST",
       body: { image_base64: imageBase64, prompt: prompt || null },
+    }),
+  observeVision: (imageBase64: string) =>
+    apiFetch<VisionObserveResult>("/api/debug/vision/observe", {
+      method: "POST",
+      body: { image_base64: imageBase64 },
     }),
   generateLLM: (prompt: string) =>
     apiFetch<LLMGenerateResult>("/api/debug/llm/generate", { method: "POST", body: { prompt } }),

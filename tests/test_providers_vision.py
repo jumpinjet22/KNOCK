@@ -8,6 +8,8 @@ import respx
 from PIL import Image
 
 from knock.config import VisionConfig
+from knock.core.scene import SceneObservation
+from knock.providers.vision.base import observe_scene
 from knock.providers.vision.ollama import OllamaVisionProvider
 from knock.providers.vision.safety import SAFE_FALLBACK_DESCRIPTION
 
@@ -139,3 +141,155 @@ def test_describe_sends_unparseable_image_bytes_unchanged() -> None:
 
     sent_body = json.loads(route.calls.last.request.content)
     assert base64.b64decode(sent_body["images"][0]) == garbage
+
+
+# -- observe() / structured output ------------------------------------------------
+
+
+def _observation_json(**overrides) -> str:
+    data = {
+        "people_count": 1,
+        "carrying": ["box"],
+        "package_visible": True,
+        "uniform_or_logo": "UPS",
+        "vehicle": "",
+        "visible_text": "",
+        "summary": "A person holding a box.",
+    }
+    data.update(overrides)
+    return json.dumps(data)
+
+
+@respx.mock
+def test_observe_requests_structured_output_and_parses_it() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": _observation_json()})
+    )
+
+    observation = OllamaVisionProvider(config=config).observe(b"fake-jpeg-bytes")
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["format"]["type"] == "object"
+    assert "uniform_or_logo" in body["format"]["required"]
+    assert body["images"]
+    assert observation.people_count == 1
+    assert observation.carrying == ["box"]
+    assert observation.package_visible is True
+    assert observation.uniform_or_logo == "UPS"
+    # "" means "not visible" in the schema, None in the model.
+    assert observation.vehicle is None
+    assert observation.visible_text is None
+    assert observation.summary == "A person holding a box."
+
+
+@respx.mock
+def test_observe_drops_alarming_fields_and_sanitizes_the_summary() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "response": _observation_json(
+                    carrying=["box", "a knife"],
+                    vehicle="a van with a gun rack",
+                    summary="A person who might have a weapon.",
+                )
+            },
+        )
+    )
+
+    observation = OllamaVisionProvider(config=config).observe(b"fake-jpeg-bytes")
+
+    assert observation.carrying == ["box"]
+    assert observation.vehicle is None
+    assert observation.summary == SAFE_FALLBACK_DESCRIPTION
+
+
+@respx.mock
+def test_observe_ignores_wrongly_typed_fields() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "response": _observation_json(
+                    people_count=True, package_visible="yes", carrying="box"
+                )
+            },
+        )
+    )
+
+    observation = OllamaVisionProvider(config=config).observe(b"fake-jpeg-bytes")
+
+    assert observation.people_count is None
+    assert observation.package_visible is None
+    assert observation.carrying == []
+
+
+@respx.mock
+def test_observe_falls_back_to_describe_on_unparseable_output() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": "not json at all"}),
+            httpx.Response(200, json={"response": "A person at the door."}),
+        ]
+    )
+
+    observation = OllamaVisionProvider(config=config).observe(b"fake-jpeg-bytes")
+
+    assert route.call_count == 2
+    assert "format" not in json.loads(route.calls.last.request.content)
+    assert observation.summary == "A person at the door."
+    assert observation.people_count is None
+
+
+@respx.mock
+def test_keep_alive_is_sent_only_when_configured() -> None:
+    unset = VisionConfig()
+    route = respx.post(f"{unset.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "ok"})
+    )
+
+    OllamaVisionProvider(config=unset).describe(b"img")
+    assert "keep_alive" not in json.loads(route.calls.last.request.content)
+
+    OllamaVisionProvider(config=VisionConfig(keep_alive="-1")).describe(b"img")
+    # A bare number must go out as a JSON number -- Ollama rejects "-1" as a
+    # duration string.
+    assert json.loads(route.calls.last.request.content)["keep_alive"] == -1
+
+
+@respx.mock
+def test_warm_up_loads_the_model_with_an_empty_request() -> None:
+    config = VisionConfig(keep_alive="24h")
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"done": True})
+    )
+
+    assert OllamaVisionProvider(config=config).warm_up() is True
+    assert json.loads(route.calls.last.request.content) == {
+        "model": config.model,
+        "keep_alive": "24h",
+    }
+
+
+@respx.mock
+def test_warm_up_failure_is_reported_not_raised() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(return_value=httpx.Response(500))
+
+    assert OllamaVisionProvider(config=config).warm_up() is False
+
+
+def test_observe_scene_uses_describe_for_a_describe_only_provider() -> None:
+    class _DescribeOnly:
+        name = "describe-only"
+
+        def describe(self, image: bytes, prompt: str | None = None) -> str:
+            return "A person at the door."
+
+    observation = observe_scene(_DescribeOnly(), b"img")
+
+    assert observation == SceneObservation(summary="A person at the door.")

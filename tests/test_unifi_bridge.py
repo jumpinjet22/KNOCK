@@ -1,4 +1,7 @@
+import array
 import asyncio
+import functools
+import threading
 import wave
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -12,6 +15,7 @@ from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
 from knock.core.audit import JSONLAuditLog
 from knock.core.orchestrator import Orchestrator
+from knock.core.scene import SceneObservation
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
@@ -20,6 +24,7 @@ from knock.integrations.unifi import (
     _THINKING_SOUND,
     UnifiBridge,
     _default_session_id,
+    _EndOfSpeechDetector,
     _load_bundled_wav,
     _rms,
 )
@@ -192,13 +197,12 @@ def test_handle_event_enriches_with_vision_description(tmp_path) -> None:
     vision_provider.describe.assert_called_once_with(b"fake-jpeg-bytes")
 
 
-def test_handle_event_enriches_with_explicit_camera_framing(tmp_path) -> None:
-    # Found live in production: a bare ":" join ("Food delivery.: a man
-    # holding a bag...") reads to the LLM like a label/definition pair
-    # rather than "the same visitor, described two ways" -- the model
-    # sometimes responded as if a third party were reporting a delivery
-    # rather than the visitor *being* the delivery. This asserts the
-    # unambiguous framing that replaced it.
+def test_handle_event_passes_camera_context_separately_from_speech(tmp_path) -> None:
+    # The vision output used to be pasted into the visitor's own words
+    # ("Doorbell ring on cam1 (camera also shows: ...)"), where the policy
+    # and keyword-intent layers scored it as speech and the audit log
+    # recorded it as something the visitor said. It now rides alongside as
+    # a structured scene, framed for the LLM as camera output.
     class _CapturingLLMProvider:
         name = "capturing-fake-llm"
 
@@ -212,17 +216,205 @@ def test_handle_event_enriches_with_explicit_camera_framing(tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
     llm = _CapturingLLMProvider()
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
     bridge = _bridge(tmp_path, mock_client=mock_client)
     bridge.orchestrator = Orchestrator(llm_provider=llm)
-    vision_provider = MagicMock()
-    vision_provider.describe.return_value = "a man holding a reusable shopping bag"
-    bridge.vision_provider = vision_provider
+    bridge.audit_log = audit_log
+    bridge.vision_provider = _FakeObservingVision(
+        SceneObservation(carrying=["reusable shopping bag"], summary="A man holding a bag.")
+    )
 
     asyncio.run(bridge.handle_event(_event()))
 
     combined = " ".join(llm.prompts)
-    assert "(camera also shows: a man holding a reusable shopping bag)" in combined
-    assert "cam1: a man holding" not in combined  # the old bare ":" join
+    assert "camera also shows" not in combined
+    assert "NOT something the visitor said" in combined
+    assert "- carrying: reusable shopping bag" in combined
+    entry = audit_log.recent()[0]
+    assert entry.text == "Doorbell ring on cam1"
+    assert entry.scene is not None
+    assert entry.scene.observation is not None
+    assert entry.scene.observation.summary == "A man holding a bag."
+
+
+class _FakeObservingVision:
+    """A vision provider with the structured `observe()` API, recording
+    which images it was shown.
+    """
+
+    name = "fake-observing-vision"
+
+    def __init__(self, *observations: SceneObservation, started=None) -> None:
+        self._observations = list(observations)
+        self.images: list[bytes] = []
+        self._started = started
+
+    def describe(self, image: bytes, prompt: str | None = None) -> str:
+        raise AssertionError("observe() should be used, not describe()")
+
+    def observe(self, image: bytes) -> SceneObservation:
+        self.images.append(image)
+        if self._started is not None:
+            self._started.set()
+        return self._observations.pop(0) if len(self._observations) > 1 else self._observations[0]
+
+
+def test_vision_runs_in_parallel_with_listening(tmp_path) -> None:
+    # Vision is started when the event arrives, not after the visitor has
+    # finished talking -- so the capture below, which only returns once
+    # vision has started (or gives up after a timeout), sees it already
+    # running.
+    vision_started = threading.Event()
+    seen_during_listen: list[bool] = []
+    tts_text_log: list[str] = []
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I have a package", ""],
+        tts_text_log=tts_text_log,
+        vision_provider=_FakeObservingVision(
+            SceneObservation(summary="A person."), started=vision_started
+        ),
+    )
+
+    def capture(url: str, duration: float, rate: int, verify_ssl: bool) -> bytes:
+        seen_during_listen.append(vision_started.wait(timeout=2.0))
+        return b"\x01\x02"
+
+    bridge._rtsp_audio_capture = capture
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    assert seen_during_listen[0] is True
+
+
+def test_each_conversation_turn_gets_a_fresh_scene(tmp_path) -> None:
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    tts_text_log: list[str] = []
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["hello", "here is my badge", ""],
+        tts_text_log=tts_text_log,
+        vision_provider=_FakeObservingVision(
+            SceneObservation(summary="A person."),
+            SceneObservation(carrying=["badge"], summary="A person holding a badge."),
+        ),
+    )
+    bridge.audit_log = audit_log
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    summaries = [
+        entry.scene.observation.summary
+        for entry in reversed(audit_log.recent())
+        if entry.scene is not None and entry.scene.observation is not None
+    ]
+    assert summaries == ["A person.", "A person holding a badge."]
+
+
+def test_package_detection_also_looks_through_the_package_camera(tmp_path) -> None:
+    mock_client = MagicMock()
+    mock_client.get_public_api_camera_snapshot = AsyncMock(
+        side_effect=lambda device_id, package=False: b"package-lens" if package else b"main-lens"
+    )
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    bridge = _bridge(tmp_path, mock_client=mock_client, trigger_on=["ring", "package"])
+    bridge.audit_log = audit_log
+    vision = _FakeObservingVision(
+        SceneObservation(people_count=1, package_visible=False, summary="A person."),
+        SceneObservation(people_count=0, carrying=["box"], package_visible=True, summary="A box."),
+    )
+    bridge.vision_provider = vision
+
+    asyncio.run(
+        bridge.handle_event(
+            _event(event_type="smartDetectZone", smart_detect_types=("person", "package"))
+        )
+    )
+
+    assert vision.images == [b"main-lens", b"package-lens"]
+    scene = audit_log.recent()[0].scene
+    assert scene is not None
+    assert scene.detected_labels == ["person", "package"]
+    assert scene.observation is not None
+    # The main view's people/summary, plus what only the package lens saw.
+    assert scene.observation.people_count == 1
+    assert scene.observation.summary == "A person."
+    assert scene.observation.package_visible is True
+    assert scene.observation.carrying == ["box"]
+
+
+def test_detector_labels_reach_the_scene_without_any_vision_model(tmp_path) -> None:
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    bridge = _bridge(tmp_path, trigger_on=["person"])
+    bridge.audit_log = audit_log
+
+    asyncio.run(
+        bridge.handle_event(_event(event_type="smartDetectZone", smart_detect_types=("person",)))
+    )
+
+    scene = audit_log.recent()[0].scene
+    assert scene is not None
+    assert scene.detected_labels == ["person"]
+    assert scene.observation is None
+
+
+def test_slow_vision_does_not_hold_up_the_reply(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(unifi_module, "_SCENE_WAIT_SECONDS", 0.05)
+    release = threading.Event()
+
+    class _SlowVision:
+        name = "slow-vision"
+
+        def describe(self, image: bytes, prompt: str | None = None) -> str:
+            return "unused"
+
+        def observe(self, image: bytes) -> SceneObservation:
+            release.wait(timeout=2.0)
+            return SceneObservation(summary="Too late.")
+
+    mock_client = MagicMock()
+    mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    bridge = _bridge(tmp_path, mock_client=mock_client)
+    bridge.audit_log = audit_log
+    bridge.vision_provider = _SlowVision()
+
+    try:
+        decision = asyncio.run(bridge.handle_event(_event()))
+    finally:
+        release.set()
+
+    assert decision is not None
+    scene = audit_log.recent()[0].scene
+    assert scene is not None
+    assert scene.observation is None
+
+
+def test_snapshot_reaches_the_brain_only_when_opted_in(tmp_path) -> None:
+    class _ImageLLM:
+        name = "image-llm"
+
+        def __init__(self) -> None:
+            self.images: list[list[bytes]] = []
+
+        def generate(self, prompt: str) -> str:
+            return "Thanks."
+
+        def generate_with_images(self, prompt: str, images: list[bytes]) -> str:
+            self.images.append(images)
+            return "Thanks."
+
+    for opted_in, expected in ((False, []), (True, [[b"fake-jpeg-bytes"]])):
+        mock_client = MagicMock()
+        mock_client.get_public_api_camera_snapshot = AsyncMock(return_value=b"fake-jpeg-bytes")
+        llm = _ImageLLM()
+        bridge = _bridge(tmp_path, mock_client=mock_client)
+        bridge.orchestrator = Orchestrator(llm_provider=llm, send_image_to_brain=opted_in)
+        bridge.vision_provider = _FakeObservingVision(SceneObservation(summary="A person."))
+
+        asyncio.run(bridge.handle_event(_event()))
+
+        assert llm.images == expected
 
 
 def test_handle_event_skips_vision_when_snapshot_is_none(tmp_path) -> None:
@@ -1870,3 +2062,74 @@ def test_main_wires_a_real_audit_log_not_the_null_default(tmp_path, monkeypatch)
     kwargs = bridge_cls.call_args.kwargs
     assert isinstance(kwargs["audit_log"], JSONLAuditLog)
     assert kwargs["audit_log"].path == tmp_path / "audit.jsonl"
+
+
+# -- end-of-speech detection ----------------------------------------------------
+
+
+def _pcm(amplitude: int, seconds: float, rate: int = 16000) -> bytes:
+    return array.array("h", [amplitude] * int(rate * seconds)).tobytes()
+
+
+def test_end_of_speech_needs_speech_then_enough_quiet() -> None:
+    detector = _EndOfSpeechDetector(16000, threshold=60.0, end_silence_seconds=1.0)
+
+    # Silence before anyone talks never ends the listen window -- the
+    # visitor may just be slow to start.
+    assert detector.feed(_pcm(0, 3.0)) is False
+    assert detector.feed(_pcm(2000, 0.5)) is False  # speaking
+    assert detector.feed(_pcm(0, 0.5)) is False  # a pause, not the end
+    assert detector.feed(_pcm(2000, 0.2)) is False  # talking again resets it
+    assert detector.feed(_pcm(0, 0.6)) is False
+    assert detector.feed(_pcm(0, 0.5)) is True
+
+
+def test_a_short_noise_does_not_count_as_speech() -> None:
+    detector = _EndOfSpeechDetector(16000, threshold=60.0, end_silence_seconds=1.0)
+
+    assert detector.feed(_pcm(5000, 0.1)) is False  # a car door
+    assert detector.feed(_pcm(0, 3.0)) is False  # still waiting for the visitor
+
+
+def test_end_of_speech_disabled_with_zero() -> None:
+    detector = _EndOfSpeechDetector(16000, threshold=60.0, end_silence_seconds=0.0)
+
+    detector.feed(_pcm(2000, 0.5))
+    assert detector.feed(_pcm(0, 5.0)) is False
+
+
+def test_default_capture_uses_configured_end_of_speech_settings(tmp_path) -> None:
+    bridge = _bridge(tmp_path, end_silence_seconds=0.7, silence_rms_threshold=42.0)
+
+    capture = bridge._rtsp_audio_capture
+
+    assert isinstance(capture, functools.partial)
+    assert capture.func is unifi_module._capture_rtsp_audio
+    assert capture.keywords == {"end_silence_seconds": 0.7, "silence_rms_threshold": 42.0}
+
+
+def test_capture_rtsp_audio_stops_once_the_visitor_goes_quiet(tmp_path) -> None:
+    import math
+    import struct
+
+    rate = 16000
+    tone = [int(3000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(rate // 2)]
+    silence = [0] * (rate * 3)
+    more_tone = tone * 2
+    samples = tone + silence + more_tone  # 0.5s speech, 3s quiet, 1s speech
+    wav_path = tmp_path / "speech-then-quiet.wav"
+    with wave.open(str(wav_path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate)
+        f.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+    early = unifi_module._capture_rtsp_audio(
+        str(wav_path), duration=10.0, sample_rate=rate, end_silence_seconds=1.0
+    )
+    full = unifi_module._capture_rtsp_audio(str(wav_path), duration=10.0, sample_rate=rate)
+
+    seconds = len(early) / 2 / rate
+    # The 0.5s of speech plus ~1s of trailing quiet -- never the later tone.
+    assert 1.4 < seconds < 1.8
+    assert len(full) / 2 / rate > 4.0

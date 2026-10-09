@@ -29,10 +29,11 @@ from knock.core.audit import JSONLAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
+from knock.core.scene import SceneContext, SceneObservation, format_scene_for_prompt
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.kokoro import KokoroTTSProvider
-from knock.providers.vision.ollama import OllamaVisionProvider
+from knock.providers.vision.ollama import OllamaVisionProvider, parse_observation
 from knock.providers.vision.safety import contains_alarming_language, sanitize_description
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
@@ -127,6 +128,61 @@ def debug_vision_describe(
         raw=raw,
         sanitized=sanitize_description(raw),
         alarming_language_detected=contains_alarming_language(raw),
+        latency_ms=latency_ms,
+    )
+
+
+class VisionObserveRequest(BaseModel):
+    image_base64: str
+
+
+class VisionObserveResponse(BaseModel):
+    raw: str
+    # None when the model's reply couldn't be parsed as the structured
+    # schema -- a real bridge would fall back to a plain describe() then.
+    observation: SceneObservation | None
+    parse_error: str | None = None
+    # Exactly the camera-observations block the LLM prompt would get.
+    prompt_block: str
+    latency_ms: float
+
+
+@router.post("/vision/observe", response_model=VisionObserveResponse)
+def debug_vision_observe(
+    body: VisionObserveRequest, current_user: CurrentUserDep, *, store: ConfigStoreDep
+) -> VisionObserveResponse:
+    try:
+        image = base64.b64decode(body.image_base64)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="image_base64 is not valid base64") from exc
+
+    provider = OllamaVisionProvider(config=VisionConfig.from_sources(store))
+    start = time.perf_counter()
+    try:
+        raw = provider.observe_raw(image)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"vision request failed: {_httpx_error_detail(exc)}"
+        ) from exc
+    finally:
+        provider.close()
+    latency_ms = (time.perf_counter() - start) * 1000
+
+    observation: SceneObservation | None
+    parse_error: str | None = None
+    try:
+        observation = parse_observation(raw)
+    except ValueError as exc:
+        observation = None
+        parse_error = str(exc)
+
+    return VisionObserveResponse(
+        raw=raw,
+        observation=observation,
+        parse_error=parse_error,
+        prompt_block=format_scene_for_prompt(
+            SceneContext(observation=observation) if observation is not None else None
+        ),
         latency_ms=latency_ms,
     )
 

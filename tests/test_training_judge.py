@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from knock.core.audit import AuditEntry
+from knock.core.scene import SceneContext, SceneObservation
 from knock.core.training_judge import (
     AggregatedJudgeResult,
     JudgeAxisScores,
@@ -18,6 +19,7 @@ def _entry(
     text: str = "Hi, I have a package for you",
     response_text: str = "Thanks, leave it by the door.",
     intent: str | None = "delivery",
+    scene: SceneContext | None = None,
 ) -> AuditEntry:
     return AuditEntry(
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
@@ -28,6 +30,7 @@ def _entry(
         allowed=True,
         reason="normal",
         intent=intent,
+        scene=scene,
     )
 
 
@@ -369,6 +372,69 @@ def test_build_dpo_pairs_respects_chosen_allowed_gate() -> None:
     )
     # unapproved_good scored higher but isn't allowed to be "chosen", and
     # approved_worse scored too low to win on its own -- no valid pair.
+    assert pairs == []
+
+
+def test_build_dpo_pairs_ignores_candidates_with_different_scene() -> None:
+    # Codex PR review finding, verified before fixing: same text/intent but
+    # different real camera context means these aren't comparable
+    # completions of the same prompt -- pairing them would train on a
+    # prompt the "rejected" side never actually saw.
+    same_text = "Hi, I have a package for you"
+    seen_package = _entry(
+        text=same_text,
+        response_text="Thanks, leave it by the door.",
+        scene=SceneContext(observation=SceneObservation(package_visible=True)),
+    )
+    seen_nothing = _entry(
+        text=same_text,
+        response_text="I'll let the resident know it's here.",
+        scene=SceneContext(observation=SceneObservation(package_visible=False)),
+    )
+    candidates = [
+        (seen_package, _ok_result(category_correct=9, natural_quality=9)),
+        (seen_nothing, _ok_result(category_correct=2, natural_quality=2)),
+    ]
+    pairs = build_dpo_pairs(candidates, margin_threshold=2.0)
+    assert pairs == []
+
+
+def test_build_dpo_pairs_pairs_candidates_with_equivalent_scene() -> None:
+    # Both None, and both "nothing observed" (the common synthetic-data
+    # case, which never attaches a scene at all), must still count as
+    # equivalent -- this guard shouldn't block ordinary same-scene pairs.
+    same_text = "Hi, I have a package for you"
+    good = _entry(text=same_text, response_text="Thanks, leave it by the door.", scene=None)
+    bad = _entry(
+        text=same_text,
+        response_text="I'll let the resident know it's here.",
+        scene=SceneContext(observation=SceneObservation()),
+    )
+    candidates = [
+        (good, _ok_result(category_correct=9, natural_quality=9)),
+        (bad, _ok_result(category_correct=2, natural_quality=2)),
+    ]
+    pairs = build_dpo_pairs(candidates, margin_threshold=2.0)
+    assert len(pairs) == 1
+
+
+def test_build_classification_dpo_pairs_ignores_candidates_with_different_scene() -> None:
+    same_text = "I have a package"
+    correct = _entry(
+        text=same_text,
+        intent="delivery",
+        scene=SceneContext(observation=SceneObservation(package_visible=True)),
+    )
+    wrong = _entry(
+        text=same_text,
+        intent="food_delivery",
+        scene=SceneContext(observation=SceneObservation(package_visible=False)),
+    )
+    candidates = [
+        (correct, _ok_result(category_correct=9)),
+        (wrong, _ok_result(category_correct=2)),
+    ]
+    pairs = build_classification_dpo_pairs(candidates, margin_threshold=2.0)
     assert pairs == []
 
 

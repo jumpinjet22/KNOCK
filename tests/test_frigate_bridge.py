@@ -7,6 +7,7 @@ import respx
 import knock.integrations.frigate as frigate_module
 from knock.config import FrigateConfig
 from knock.core.audit import JSONLAuditLog
+from knock.core.scene import SceneObservation
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.frigate import FrigateBridge, FrigateDetection, _default_session_id
 
@@ -117,6 +118,46 @@ def test_handle_detection_enriches_with_vision_description(tmp_path) -> None:
     bridge.handle_detection(detection)
 
     vision_provider.describe.assert_called_once_with(b"fake-jpeg-bytes")
+
+
+@respx.mock
+def test_handle_detection_keeps_camera_context_out_of_the_visitor_text(tmp_path) -> None:
+    respx.get("http://127.0.0.1:5000/api/events/evt-1/snapshot.jpg").mock(
+        return_value=httpx.Response(200, content=b"fake-jpeg-bytes")
+    )
+
+    class _ObservingVision:
+        name = "observing-vision"
+
+        def describe(self, image: bytes, prompt: str | None = None) -> str:
+            raise AssertionError("observe() should be used, not describe()")
+
+        def observe(self, image: bytes) -> SceneObservation:
+            return SceneObservation(carrying=["package"], summary="A person holding a box.")
+
+    audit_log = JSONLAuditLog(tmp_path / "audit.jsonl")
+    bridge = _bridge(tmp_path, http_host="127.0.0.1", http_port=5000)
+    bridge.vision_provider = _ObservingVision()
+    bridge.audit_log = audit_log
+
+    bridge.handle_detection(
+        FrigateDetection(
+            event_id="evt-1",
+            camera="front_door",
+            label="person",
+            zones=("front_porch",),
+            has_snapshot=True,
+        )
+    )
+
+    entry = audit_log.recent()[0]
+    assert entry.text == "person detected entering front_porch on front_door"
+    assert entry.scene is not None
+    assert entry.scene.camera == "front_door"
+    assert entry.scene.detected_labels == ["person"]
+    assert entry.scene.zones == ["front_porch"]
+    assert entry.scene.observation is not None
+    assert entry.scene.observation.summary == "A person holding a box."
 
 
 @respx.mock
