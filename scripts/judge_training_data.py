@@ -45,6 +45,7 @@ from knock.core.training import (
 )
 from knock.core.training_judge import (
     AggregatedJudgeResult,
+    JudgeAxisScores,
     aggregate_scores,
     score_candidate,
     score_visitor_voice,
@@ -116,23 +117,34 @@ def main() -> int:
         for name in judge_names
     ]
 
-    results: dict[str, AggregatedJudgeResult] = {}
-    scenario_voice_veto: dict[str, bool] = {}
     # visitor_voice is a property of the shared scenario text, not of any
     # one candidate response -- scored once per distinct text (via the
     # first judge model) and reused across every candidate and every
     # judge that shares it, rather than re-asking per candidate/judge.
     voice_score_cache: dict[str, int] = {}
-    try:
-        for i, entry in enumerate(candidates):
-            t0 = time.monotonic()
-            intent = entry.intent or "unknown"
-            if entry.text not in voice_score_cache:
-                voice_score_cache[entry.text] = score_visitor_voice(judges[0][1], entry.text)
-            voice_score = voice_score_cache[entry.text]
+    distinct_texts = list({entry.text for entry in candidates})
 
-            scores = []
-            for judge_name, provider in judges:
+    # Judge-major, not candidate-major: load each judge model once and run
+    # it against every candidate before moving to the next judge, rather
+    # than swapping models on every single candidate. Ollama only keeps one
+    # model resident in VRAM at a time, so the naive candidate-major order
+    # reloads every judge from disk on every candidate -- live-measured via
+    # Ollama's own logs during a 628-candidate run as a ~17s/candidate model
+    # swap cycle (~3 hours total), the same antipattern generate_scenarios.py
+    # was already fixed for in an earlier PR. This mirrors that fix: each
+    # judge model loads from disk exactly once for the whole run.
+    scores_by_key: dict[str, list[JudgeAxisScores]] = {example_key(e): [] for e in candidates}
+    try:
+        for judge_idx, (judge_name, provider) in enumerate(judges):
+            if judge_idx == 0:
+                print(f"Scoring visitor voice for {len(distinct_texts)} distinct scenario(s)...")
+                for text in distinct_texts:
+                    voice_score_cache[text] = score_visitor_voice(provider, text)
+
+            print(f"\nJudging {len(candidates)} candidate(s) with {judge_name}...")
+            for i, entry in enumerate(candidates):
+                t0 = time.monotonic()
+                intent = entry.intent or "unknown"
                 score = score_candidate(
                     provider,
                     judge_name,
@@ -140,51 +152,55 @@ def main() -> int:
                     intent,
                     entry.response_text,
                     _VALID_INTENTS,
-                    visitor_voice_score=voice_score,
+                    visitor_voice_score=voice_score_cache[entry.text],
                 )
+                elapsed = time.monotonic() - t0
                 if score is not None:
-                    scores.append(score)
-            result = aggregate_scores(scores)
-            elapsed = time.monotonic() - t0
-
-            key = example_key(entry)
-            results[key] = result
-            scenario_voice_veto[entry.text] = (
-                scenario_voice_veto.get(entry.text, False) or result.voice_veto
-            )
-
-            tag = (
-                "VOICE_VETO"
-                if result.voice_veto
-                else ("SAFETY_VETO" if result.safety_veto else "ok")
-            )
-            print(
-                f"{i + 1:>4}/{len(candidates)} ({elapsed:5.1f}s) {tag:12} "
-                f"voice={result.visitor_voice_avg:.1f} cat={result.category_correct_avg:.1f} "
-                f"safety={result.safety_compliant_avg:.1f} "
-                f"quality={result.natural_quality_avg:.1f} "
-                f"disagreement={result.disagreement:.1f} -- {entry.text!r}"
-            )
-
-        if args.dry_run:
-            print("\n(--dry-run: no metadata/reviews were actually written)")
-            return 0
-
-        group_rejected = 0
-        for entry in candidates:
-            key = example_key(entry)
-            result = results[key]
-            metadata_store.set(key, TrainingMetadata(judge=result))
-            # Group-wide: ANY candidate response sharing this visitor text
-            # that tripped a voice veto means the scenario itself isn't
-            # genuine visitor speech -- every response to it is equally
-            # untrustworthy as training data, not just the one judged.
-            if scenario_voice_veto.get(entry.text, False):
-                review_store.set(key, TrainingReview(status="rejected"))
-                group_rejected += 1
+                    scores_by_key[example_key(entry)].append(score)
+                print(
+                    f"[{judge_name}] {i + 1:>4}/{len(candidates)} ({elapsed:5.1f}s) -- "
+                    f"{entry.text!r}"
+                )
     finally:
         for _name, provider in judges:
             provider.close()
+
+    results: dict[str, AggregatedJudgeResult] = {}
+    scenario_voice_veto: dict[str, bool] = {}
+    print("\n=== Aggregated results ===")
+    for i, entry in enumerate(candidates):
+        key = example_key(entry)
+        result = aggregate_scores(scores_by_key[key])
+        results[key] = result
+        scenario_voice_veto[entry.text] = (
+            scenario_voice_veto.get(entry.text, False) or result.voice_veto
+        )
+
+        tag = "VOICE_VETO" if result.voice_veto else ("SAFETY_VETO" if result.safety_veto else "ok")
+        print(
+            f"{i + 1:>4}/{len(candidates)} {tag:12} "
+            f"voice={result.visitor_voice_avg:.1f} cat={result.category_correct_avg:.1f} "
+            f"safety={result.safety_compliant_avg:.1f} "
+            f"quality={result.natural_quality_avg:.1f} "
+            f"disagreement={result.disagreement:.1f} -- {entry.text!r}"
+        )
+
+    if args.dry_run:
+        print("\n(--dry-run: no metadata/reviews were actually written)")
+        return 0
+
+    group_rejected = 0
+    for entry in candidates:
+        key = example_key(entry)
+        result = results[key]
+        metadata_store.set(key, TrainingMetadata(judge=result))
+        # Group-wide: ANY candidate response sharing this visitor text
+        # that tripped a voice veto means the scenario itself isn't
+        # genuine visitor speech -- every response to it is equally
+        # untrustworthy as training data, not just the one judged.
+        if scenario_voice_veto.get(entry.text, False):
+            review_store.set(key, TrainingReview(status="rejected"))
+            group_rejected += 1
 
     if not args.dry_run:
         print(f"\nAuto-rejected {group_rejected} entries via group-wide voice veto.")
