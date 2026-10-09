@@ -61,6 +61,28 @@ def test_package_not_visible_is_stated_but_unknown_is_omitted() -> None:
     assert "package visible" not in unknown
 
 
+def test_zero_people_gets_a_no_active_visit_warning() -> None:
+    # Live-tested finding: stale porch clutter (a box sitting there for a
+    # while) got read by the vision model as package_visible=True with
+    # nobody in frame, and the brain confidently narrated an in-progress
+    # delivery it never saw happen. This line exists to stop that without
+    # hiding the other (still factual) observed fields.
+    block = format_scene_for_prompt(
+        SceneContext(observation=SceneObservation(people_count=0, package_visible=True))
+    )
+
+    assert "- people visible: 0" in block
+    assert "no one is currently in frame" in block
+    assert "- package visible: yes" in block
+
+
+def test_nonzero_people_count_has_no_warning() -> None:
+    block = format_scene_for_prompt(SceneContext(observation=SceneObservation(people_count=1)))
+
+    assert "- people visible: 1" in block
+    assert "no one is currently in frame" not in block
+
+
 def test_visible_text_cannot_break_out_of_its_quotes() -> None:
     block = format_scene_for_prompt(
         SceneContext(

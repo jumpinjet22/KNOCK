@@ -97,6 +97,21 @@ def format_scene_for_prompt(scene: SceneContext | None) -> str:
     if obs is not None:
         if obs.people_count is not None:
             lines.append(f"- people visible: {obs.people_count}")
+            if obs.people_count == 0:
+                # Live-tested finding: a snapshot showing stale porch clutter
+                # (a box that's been sitting there a while) got read as
+                # "package_visible: yes" and the response confidently
+                # narrated an in-progress delivery ("I've left it by the
+                # door as requested") despite nobody being in frame at all.
+                # The other fields below are still factual and still shown
+                # -- this just blocks the model from turning them into a
+                # story about something actively happening right now.
+                lines.append(
+                    "- no one is currently in frame -- do not describe a "
+                    "delivery, visit, or any other event as happening right "
+                    "now based on camera content alone; camera objects can "
+                    "be leftover/stale, not evidence of an active visit"
+                )
         if obs.carrying:
             carrying = ", ".join(_clip(item) for item in obs.carrying[:_MAX_LIST_ITEMS])
             lines.append(f"- carrying: {carrying}")
