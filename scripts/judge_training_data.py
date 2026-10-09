@@ -24,7 +24,15 @@ Usage:
     python scripts/judge_training_data.py \\
         --judge-models qwen2.5:14b,gpt-oss:20b,deepseek-r1:14b \\
         [--ollama-host 127.0.0.1] [--ollama-port 11434] [--ollama-timeout 120.0] \\
-        [--audit-log PATH] [--metadata-store PATH] [--dry-run] [--limit N]
+        [--audit-log PATH] [--metadata-store PATH] [--dry-run] [--limit N] \\
+        [--include-reviewed]
+
+By default only scores entries still at review status "pending".
+--include-reviewed also scores already-approved/rejected entries that
+predate this pipeline (so they become eligible for DPO pair
+construction, which needs judge metadata regardless of review status)
+-- a human's existing decision is never overwritten by this, see
+main()'s voice-veto write-back.
 """
 
 from __future__ import annotations
@@ -71,7 +79,18 @@ def main() -> int:
         "--dry-run", action="store_true", help="print verdicts without writing metadata/reviews"
     )
     parser.add_argument(
-        "--limit", type=int, default=None, help="only judge the first N pending entries"
+        "--limit", type=int, default=None, help="only judge the first N eligible entries"
+    )
+    parser.add_argument(
+        "--include-reviewed",
+        action="store_true",
+        help=(
+            "also score already-approved/rejected entries that were never judged (e.g. ones "
+            "reviewed by hand before this pipeline existed) -- needed for DPO pair construction, "
+            "which requires judge metadata regardless of review status. A human's existing "
+            "approved/rejected decision is never overwritten by this (see the voice-veto "
+            "write-back below); only the metadata gets attached."
+        ),
     )
     args = parser.parse_args()
 
@@ -91,16 +110,26 @@ def main() -> int:
 
     entries = audit_log.recent(limit=100_000)
     entries.reverse()  # oldest first, for a stable/readable progress order
+    eligible_statuses = (
+        {"pending", "approved", "rejected"} if args.include_reviewed else {"pending"}
+    )
     candidates = [
         entry
         for entry in entries
         if entry.intent is not None
-        and reviews.get(example_key(entry), TrainingReview()).status == "pending"
+        and reviews.get(example_key(entry), TrainingReview()).status in eligible_statuses
         and example_key(entry) not in existing_metadata
     ]
     if args.limit is not None:
         candidates = candidates[: args.limit]
-    print(f"{len(candidates)} pending, unjudged entries to score (of {len(entries)} total)")
+    # Captured now, before any write-back below -- the voice-veto
+    # auto-reject must check what a human *already* decided, never what
+    # this same run just set for another candidate sharing the scenario.
+    original_status = {
+        example_key(entry): reviews.get(example_key(entry), TrainingReview()).status
+        for entry in candidates
+    }
+    print(f"{len(candidates)} eligible, unjudged entries to score (of {len(entries)} total)")
 
     judges = [
         (
@@ -190,6 +219,7 @@ def main() -> int:
         return 0
 
     group_rejected = 0
+    already_decided_skipped = 0
     for entry in candidates:
         key = example_key(entry)
         result = results[key]
@@ -198,12 +228,26 @@ def main() -> int:
         # that tripped a voice veto means the scenario itself isn't
         # genuine visitor speech -- every response to it is equally
         # untrustworthy as training data, not just the one judged.
+        # Only ever applied on top of a *pending* entry -- an
+        # already-approved/rejected entry (reachable here via
+        # --include-reviewed) keeps a human's existing decision
+        # untouched; it still gets judge metadata attached, just not a
+        # status override.
         if scenario_voice_veto.get(entry.text, False):
-            review_store.set(key, TrainingReview(status="rejected"))
-            group_rejected += 1
+            if original_status[key] == "pending":
+                review_store.set(key, TrainingReview(status="rejected"))
+                group_rejected += 1
+            else:
+                already_decided_skipped += 1
 
     if not args.dry_run:
         print(f"\nAuto-rejected {group_rejected} entries via group-wide voice veto.")
+        if already_decided_skipped:
+            print(
+                f"{already_decided_skipped} already-approved/rejected entries tripped a voice "
+                "veto but kept their existing human decision (metadata attached, status "
+                "unchanged)."
+            )
     return 0
 
 
