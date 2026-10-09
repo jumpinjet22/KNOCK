@@ -208,6 +208,39 @@ def test_apply_style_does_not_flag_let_me_or_us_know() -> None:
         assert engine.apply_style(phrase) == phrase
 
 
+def test_apply_style_catches_notify_someone_variants() -> None:
+    # Found live via a training-data correction run: the judge ensemble
+    # flagged this project's own canonical safe phrase ("I'll pass that
+    # along") as an occupancy hint, while the genuinely more revealing
+    # "okay let me notify the homeowner, give me a second" -- which names
+    # a specific person and implies they're actively available right now
+    # -- sailed through this backstop untouched, since it contains no
+    # "know" anywhere. Same structural approach as the "let ... know"
+    # regex above, just a different verb.
+    engine = PolicyEngine()
+    for phrase in [
+        "okay let me notify the homeowner give me a second",
+        "give me a sec while I notify the homeowner",
+        "let me notify them, give me a second",
+        "I'll notify the resident",
+        "I'll notify my neighbor",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_does_not_flag_notify_you_me_or_us() -> None:
+    # Same "visitor and assistant informing each other" exclusion as
+    # "let you/me/us know" -- "notify you/me/us" never discloses a third
+    # party's presence.
+    engine = PolicyEngine()
+    for phrase in [
+        "I'll notify you once it's ready.",
+        "notify me if anything changes",
+        "please notify us when you arrive",
+    ]:
+        assert engine.apply_style(phrase) == phrase
+
+
 def test_apply_style_still_truncates_to_140_chars() -> None:
     styled = PolicyEngine().apply_style("x" * 200)
     assert len(styled) == 140

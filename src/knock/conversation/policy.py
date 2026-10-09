@@ -71,6 +71,17 @@ _LET_SOMEONE_KNOW_RE = re.compile(
     r"\blet\s+(?!(?:you|me|us)\b)(?:\S+\s+){0,4}know\b", re.IGNORECASE
 )
 
+# Same shape of leak as "let THEM know", different verb -- found live via
+# training-data correction: a judge flagged "Thanks, I'll pass that along!"
+# (this project's own designed-in canonical safe phrase) as an occupancy
+# hint, while "okay let me notify the homeowner, give me a second" --
+# genuinely more revealing, since it names a specific person and implies
+# they're actively available right now -- sailed through this backstop
+# completely untouched (no "know" anywhere in it). Same "not you/me/us"
+# exclusion as above, for the same reason: "I'll notify you" is the
+# visitor and the assistant addressing each other, not a third-party leak.
+_NOTIFY_SOMEONE_RE = re.compile(r"\bnotify\s+(?!(?:you|me|us)\b)\S+", re.IGNORECASE)
+
 _OCCUPANCY_CONFIRMATION_PHRASES = (
     "they'll come",
     "they will come",
@@ -120,7 +131,7 @@ SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."
 
 def _contains_unsafe_disclosure(text: str) -> bool:
     lowered = text.lower()
-    if _LET_SOMEONE_KNOW_RE.search(lowered):
+    if _LET_SOMEONE_KNOW_RE.search(lowered) or _NOTIFY_SOMEONE_RE.search(lowered):
         return True
     return any(
         phrase in lowered
