@@ -33,19 +33,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from knock.config import OllamaConfig
-from knock.core.audit import JSONLAuditLog
+from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.orchestrator import _LLM_CLASSIFIABLE_INTENTS
 from knock.core.training import (
+    TrainingMetadata,
     TrainingMetadataStore,
     TrainingReview,
     TrainingReviewStore,
     example_key,
 )
-from knock.core.training_correction import run_correction_loop
+from knock.core.training_correction import CorrectionAttempt, correct_response
+from knock.core.training_judge import JudgeAxisScores, aggregate_scores, score_candidate
 from knock.providers.llm.ollama import OllamaProvider
 
 _VALID_INTENTS = [*_LLM_CLASSIFIABLE_INTENTS, "unknown"]
@@ -120,41 +122,116 @@ def main() -> int:
     corrector = make_provider(args.corrector_model)
     judges = [(name, make_provider(name)) for name in judge_names]
 
-    accepted_count = 0
-    try:
-        for i, (entry, meta) in enumerate(eligible):
-            t0 = time.monotonic()
-            judge_reason = (
+    # Round-batched, not per-entry: generating/re-judging one entry at a
+    # time (the original shape here) meant corrector <-> judge-1 <->
+    # judge-2 <-> judge-3 reloaded from Ollama's single VRAM slot on every
+    # single entry -- confirmed live, the same ~17-20s swap cycle already
+    # fixed in judge_training_data.py. Each attempt round now loads the
+    # corrector once for every still-pending entry, then loads each judge
+    # once for every still-pending entry's new attempt, instead of
+    # swapping per entry. Total model loads for the whole run: at most
+    # max_attempts * (1 + len(judges)), regardless of how many entries are
+    # eligible.
+    @dataclass
+    class _EntryState:
+        entry: AuditEntry
+        meta: TrainingMetadata
+        current_response: str
+        current_reason: str
+        attempts: list[CorrectionAttempt] = field(default_factory=list)
+        accepted: bool = False
+        done: bool = False
+
+    states = [
+        _EntryState(
+            entry=entry,
+            meta=meta,
+            current_response=entry.response_text,
+            current_reason=(
                 meta.judge.per_judge[0].reason if meta.judge and meta.judge.per_judge else ""
-            )
-            result = run_correction_loop(
-                corrector,
-                judges,
-                visitor_text=entry.text,
-                intent=entry.intent or "unknown",
-                bad_response=entry.response_text,
-                judge_reason=judge_reason,
-                valid_intents=_VALID_INTENTS,
-                max_attempts=args.max_attempts,
-            )
-            elapsed = time.monotonic() - t0
-            tag = "ACCEPTED" if result.accepted else "STILL FAILS"
-            accepted_count += int(result.accepted)
-            print(
-                f"{i + 1:>4}/{len(eligible)} ({elapsed:5.1f}s) {tag} "
-                f"after {len(result.attempts)} attempt(s) -- {entry.text!r}"
-            )
-            if args.dry_run:
-                continue
-            key = example_key(entry)
-            meta.corrections = result.attempts
-            if result.accepted and result.attempts:
-                meta.judge = result.attempts[-1].rejudged
-            metadata_store.set(key, meta)
+            ),
+        )
+        for entry, meta in eligible
+    ]
+
+    try:
+        for attempt_num in range(1, args.max_attempts + 1):
+            pending = [s for s in states if not s.done]
+            if not pending:
+                break
+
+            print(f"\n--- Attempt {attempt_num}: generating with {args.corrector_model} ---")
+            corrected_by_state: dict[int, str] = {}
+            for i, s in enumerate(pending):
+                corrected_by_state[id(s)] = correct_response(
+                    corrector,
+                    s.entry.text,
+                    s.entry.intent or "unknown",
+                    s.current_response,
+                    s.current_reason,
+                )
+                print(f"  {i + 1:>4}/{len(pending)} generated -- {s.entry.text!r}")
+
+            scores_by_state: dict[int, list[JudgeAxisScores]] = {id(s): [] for s in pending}
+            for judge_name, judge_provider in judges:
+                print(f"--- Attempt {attempt_num}: re-judging with {judge_name} ---")
+                for i, s in enumerate(pending):
+                    score = score_candidate(
+                        judge_provider,
+                        judge_name,
+                        s.entry.text,
+                        s.entry.intent or "unknown",
+                        corrected_by_state[id(s)],
+                        _VALID_INTENTS,
+                    )
+                    if score is not None:
+                        scores_by_state[id(s)].append(score)
+                    print(f"  {i + 1:>4}/{len(pending)} -- {s.entry.text!r}")
+
+            for s in pending:
+                corrected = corrected_by_state[id(s)]
+                result = aggregate_scores(scores_by_state[id(s)])
+                accepted = not result.voice_veto and not result.safety_veto
+                s.attempts.append(
+                    CorrectionAttempt(
+                        attempt=attempt_num,
+                        original_response=s.current_response,
+                        corrected_response=corrected,
+                        judge_reason=s.current_reason,
+                        rejudged=result,
+                        accepted=accepted,
+                    )
+                )
+                if accepted:
+                    s.accepted = True
+                    s.done = True
+                else:
+                    s.current_response = corrected
+                    s.current_reason = (
+                        result.per_judge[0].reason if result.per_judge else s.current_reason
+                    )
+                    if attempt_num == args.max_attempts:
+                        s.done = True
     finally:
         corrector.close()
         for _name, provider in judges:
             provider.close()
+
+    accepted_count = 0
+    print("\n=== Results ===")
+    for i, s in enumerate(states):
+        tag = "ACCEPTED" if s.accepted else "STILL FAILS"
+        accepted_count += int(s.accepted)
+        print(
+            f"{i + 1:>4}/{len(states)} {tag} after {len(s.attempts)} attempt(s) -- {s.entry.text!r}"
+        )
+        if args.dry_run:
+            continue
+        key = example_key(s.entry)
+        s.meta.corrections = s.attempts
+        if s.accepted and s.attempts:
+            s.meta.judge = s.attempts[-1].rejudged
+        metadata_store.set(key, s.meta)
 
     if args.dry_run:
         print("\n(--dry-run: no metadata was actually written)")
