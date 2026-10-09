@@ -504,6 +504,7 @@ Add optional image and video understanding.
 - Safety analysis
 - Event summaries
 - Known visitor recognition
+- Streaming video understanding
 
 ## Important
 
@@ -527,6 +528,90 @@ who gets greeted, managed from Settings). Worth flagging early: this means
 storing biometric data (faces) locally, which needs the same
 written-with-care posture secrets already get in the config store, not
 just another settings field.
+
+### Streaming video understanding
+
+Today's vision is one-shot: on a ring or detection, the UniFi/Frigate
+bridge grabs a single snapshot and calls `VisionProvider.describe(image)`.
+If that one frame catches the back of someone's head, or the moment
+before they set a package down, that's all KNOCK ever "sees." The goal
+here is for KNOCK to keep watching while a visitor is actually at the
+door.
+
+**What this is, and isn't.** This means sampling frames during an
+*active visitor session* and stopping when the session ends. It does not
+mean round-the-clock video analysis. Continuous detection is already
+Frigate's job, and KNOCK shouldn't duplicate it: the GPU cost and the
+privacy cost both go against Local-first and Safety-first.
+
+**No external script needed, and Ollama stays.** Local vision models
+(Ollama's included) take images, not live streams. "Streaming" in
+practice means KNOCK pulls frames off the camera's RTSP(S) stream itself
+and hands them to the model. The plumbing already exists:
+`_capture_rtsp_audio` in the UniFi bridge opens the same RTSPS stream
+with PyAV for audio, so frame grabbing is a sibling of that, inside the
+existing bridges. Ollama's `/api/generate` already accepts a list of
+`images`, so sending a few frames per request works with the current
+provider.
+
+Worth being honest about: no local model does truly continuous
+streaming. Even "video" VLMs sample a clip into frames under the hood.
+What a native video model adds is reasoning about motion and order
+across those frames (temporal reasoning), not a live feed.
+
+**Staged plan:**
+
+- **Stage A: frame burst on trigger.** Instead of one snapshot, grab N
+  frames over ~2-3 seconds, pick the sharpest or most-changed one (a
+  cheap PIL diff is enough), and either describe that frame or send
+  several in one multi-image request. Smallest change, fixes the
+  "bad snapshot" problem, works on today's Ollama setup.
+- **Stage B: rolling description during a session.** A per-session
+  sampler task at a low rate (e.g. one frame every 2-5 seconds) that
+  skips near-duplicate frames and only re-describes on a real change
+  ("visitor set down a package," "a second person arrived"). Updates go
+  into the session context the orchestrator already uses. Hard cap on
+  frames per session; the sampler stops when the session ends.
+- **Stage C: native video input (optional).** A new
+  `OpenAICompatVisionProvider` that talks to a vLLM server (its own
+  optional Docker container, the same way Ollama is today) running a
+  video-capable VLM such as Qwen2.5-VL. KNOCK sends a short clip or
+  timestamped frame sequence, so the model can follow what happened
+  instead of judging separate stills. Tradeoff: this needs an NVIDIA GPU
+  with real VRAM and has no CPU fallback, so it stays opt-in and Ollama
+  stays the default. Running models in-process inside KNOCK
+  (transformers/torch in the main container) is explicitly *not* the
+  plan, because it would force GPU dependencies on every install and
+  break the swappable-provider design.
+
+**Architecture sketch:**
+
+- A `FrameSource`: a per-camera RTSP frame sampler that reuses the
+  `rtsp_transport=tcp` and self-signed-cert handling from
+  `_capture_rtsp_audio`.
+- An optional `describe_sequence(frames: list[bytes])` on
+  `VisionProvider`, with a default that falls back to describing the
+  best single frame, so the mock and existing providers keep working
+  unchanged.
+- Every description, single-frame or sequence, still goes through
+  `vision.safety.sanitize_description`. More frames means more chances
+  for a model to hallucinate something alarming, not fewer.
+
+**Constraints and risks:**
+
+- Latency: moondream is fast enough for doorbell timing; bigger models
+  on small GPUs may not be, especially with several images per request.
+- Context windows: multiple images add up fast. The existing 1024px
+  downscale in `OllamaVisionProvider` helps, but frame count still needs
+  a cap.
+- Privacy: frames are held in memory for the session only. No recording
+  by default.
+- Battery doorbells can't stream (see Phase 6), so they stay on
+  single-snapshot vision.
+
+Related: Phase 7's live intercom / live video preview (same RTSP
+plumbing), and Phase 9's per-task model routing (the vision model can be
+configured separately from the text model).
 
 ---
 
@@ -817,7 +902,8 @@ foundation-building:
   ESPHome support are both done now)
 - Phase 7 gaps: live intercom mode, real multi-voice switching
 - Phase 8 gaps: known visitor recognition, structured vision detection
-  (today's vision is one generic description, not separate categories)
+  (today's vision is one generic description, not separate categories),
+  streaming video understanding (frame sampling during a session)
 - Phase 9: everything except self-hosted OIDC sign-in (done)
 
 The project has moved past "stabilize the foundation" into "pick which
