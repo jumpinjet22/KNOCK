@@ -67,6 +67,22 @@ _ENTRY_INVITATION_PHRASES = (
 # live: "could you please let me know what you need?" -- a natural,
 # useful clarifying-question pattern -- was getting incorrectly
 # suppressed before "me"/"us" were added to the exclusion.
+#
+# IMPORTANT, found via a later discussion: bare "I'll let the resident
+# know" / "I'll notify the homeowner" is just describing the relay
+# *mechanism* -- it doesn't assert anyone is physically present or
+# reachable right now, same information content as this file's own
+# SAFE_RESPONSE_FALLBACK ("I'll pass that along"). A home's existence
+# isn't a secret; whether someone's inside it *right now* is the actual
+# thing worth protecting. So this alone is deliberately NOT sufficient to
+# flag a response -- see `_ASSERTS_PRESENT_AWARENESS_RE` below, which is
+# required *in addition* before this counts as a real disclosure. This
+# narrowing matters for the original defect that justified this rule
+# existing at all: real audited training data contained the verbatim
+# phrase "I'll let the resident know you're here" -- note the "you're
+# here" clause. That's what made it unsafe (an explicit claim that a
+# named person is aware of this visit right now), not the bare "let ...
+# know" relay structure by itself.
 _LET_SOMEONE_KNOW_RE = re.compile(
     r"\blet\s+(?!(?:you|me|us)\b)(?:\S+\s+){0,4}know\b", re.IGNORECASE
 )
@@ -74,13 +90,21 @@ _LET_SOMEONE_KNOW_RE = re.compile(
 # Same shape of leak as "let THEM know", different verb -- found live via
 # training-data correction: a judge flagged "Thanks, I'll pass that along!"
 # (this project's own designed-in canonical safe phrase) as an occupancy
-# hint, while "okay let me notify the homeowner, give me a second" --
-# genuinely more revealing, since it names a specific person and implies
-# they're actively available right now -- sailed through this backstop
-# completely untouched (no "know" anywhere in it). Same "not you/me/us"
-# exclusion as above, for the same reason: "I'll notify you" is the
-# visitor and the assistant addressing each other, not a third-party leak.
+# hint, while "okay let me notify the homeowner, give me a second" sailed
+# through this backstop completely untouched (no "know" anywhere in it).
+# Same "not you/me/us" exclusion as above, same "mechanism alone isn't
+# enough" narrowing -- see _ASSERTS_PRESENT_AWARENESS_RE.
 _NOTIFY_SOMEONE_RE = re.compile(r"\bnotify\s+(?!(?:you|me|us)\b)\S+", re.IGNORECASE)
+
+# The actual presence/awareness claim that turns a bare relay-mechanism
+# phrase (harmless) into a real disclosure (unsafe): explicitly telling
+# the visitor that a third party is already aware of their visit right
+# now, which only makes sense if that person is reachable/home. Required
+# alongside _LET_SOMEONE_KNOW_RE/_NOTIFY_SOMEONE_RE below, not on its own.
+_ASSERTS_PRESENT_AWARENESS_RE = re.compile(
+    r"you(?:'re| are)\s+(?:here|there)|you(?:'ve| have)\s+arrived|you\s+stopped\s+by",
+    re.IGNORECASE,
+)
 
 _OCCUPANCY_CONFIRMATION_PHRASES = (
     "they'll come",
@@ -131,7 +155,10 @@ SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."
 
 def _contains_unsafe_disclosure(text: str) -> bool:
     lowered = text.lower()
-    if _LET_SOMEONE_KNOW_RE.search(lowered) or _NOTIFY_SOMEONE_RE.search(lowered):
+    relays_to_third_party = bool(
+        _LET_SOMEONE_KNOW_RE.search(lowered) or _NOTIFY_SOMEONE_RE.search(lowered)
+    )
+    if relays_to_third_party and _ASSERTS_PRESENT_AWARENESS_RE.search(lowered):
         return True
     return any(
         phrase in lowered

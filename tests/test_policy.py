@@ -151,38 +151,71 @@ def test_apply_style_does_not_flag_a_hedged_occupancy_decline() -> None:
         assert engine.apply_style(phrase) == phrase
 
 
-def test_apply_style_catches_a_weaker_models_bare_and_person_variants() -> None:
-    # A second, weaker model (llama3.1:8b) found still more variants the
-    # first pass of this backstop missed -- "I'll let them know." with no
-    # trailing clause at all, and "the person"/"the person inside" used in
-    # place of "them"/"the homeowner". Confirms this backstop is
-    # best-effort, not a one-time-complete list -- same stated philosophy
-    # as providers/vision/safety.py's own alarming-language filter.
+def test_apply_style_catches_person_variants_with_awareness_claim() -> None:
+    # A second, weaker model (llama3.1:8b) found still more variants of
+    # the "name the person, claim they're aware you're here" pattern --
+    # "the person"/"the person inside" used in place of "them"/"the
+    # homeowner". The bare "I'll let them know."/"I'll let the person
+    # know to expect a signature." variants this test used to include
+    # are deliberately NOT here anymore -- see
+    # test_apply_style_does_not_flag_a_bare_relay_to_a_third_party --
+    # since neither makes any claim about present awareness, just relay
+    # mechanism.
     engine = PolicyEngine()
     for phrase in [
-        "Thanks, I'll let them know.",
-        "I'll let the person know to expect a signature.",
         "I'll let the person inside know you're here.",
         "I'll let the person in the house know you're here.",
     ]:
         assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 
 
-def test_apply_style_catches_any_noun_before_let_someone_know() -> None:
-    # Broadened to a structural regex after testing across 7 different
-    # models in one night surfaced more nouns than any fixed list could
-    # keep up with: "the resident," "the family," "whoever is inside,"
-    # "the appropriate person" -- matching "let" ... "know" with a short
-    # bounded gap catches any of these (and whatever the next model
-    # invents) without needing to enumerate them.
+def test_apply_style_does_not_flag_a_bare_relay_to_a_third_party() -> None:
+    # Reconsidered after discussion: "I'll let the resident know"/"I'll
+    # notify the homeowner" only describes the relay *mechanism* -- it
+    # doesn't assert anyone's physically present or reachable right now,
+    # same information content as SAFE_RESPONSE_FALLBACK itself ("I'll
+    # pass that along"). A home having a resident/homeowner isn't a
+    # secret; whether someone's inside it *right now* is the actual thing
+    # worth protecting, and bare relay phrasing doesn't claim that either
+    # way. Previously over-flagged here before this file's "let/notify
+    # someone know" rules were narrowed to require an explicit
+    # you're-here/you're-there awareness claim alongside them.
     engine = PolicyEngine()
     for phrase in [
         "I'll let the resident know that a package is here.",
         "Thanks, I'll let the family know it's here.",
+        "I'll notify the homeowner, give me a second.",
+        "Let me notify them, give me a second.",
+        "Thanks, I'll let them know.",
+        "I'll let the person know to expect a signature.",
+    ]:
+        assert engine.apply_style(phrase) == phrase
+
+
+def test_apply_style_catches_let_or_notify_someone_combined_with_awareness_claim() -> None:
+    # The actual original defect, preserved: real audited training data
+    # contained the verbatim phrase "I'll let the resident know you're
+    # here" -- the "you're here"/"you're there" clause is what makes it
+    # unsafe (an explicit claim that a named person is aware of this
+    # visit right now, which only makes sense if they're home), not the
+    # bare relay structure alone.
+    engine = PolicyEngine()
+    for phrase in [
         "I can't open the door, but I'll let whoever is inside know you're there!",
-        "I'll let the appropriate person know so they can come out to sign for it.",
+        "I'll let the resident know you're here.",
+        "I'll notify the homeowner that you're here.",
     ]:
         assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_still_catches_come_out_regardless_of_relay_wording() -> None:
+    # Unaffected by the relay-wording narrowing above -- "come out" is
+    # its own direct occupancy-confirmation phrase, matched independently
+    # of whatever relay verb precedes it.
+    styled = PolicyEngine().apply_style(
+        "I'll let the appropriate person know so they can come out to sign for it."
+    )
+    assert styled == "Thanks, I'll pass that along."
 
 
 def test_apply_style_does_not_flag_let_you_know() -> None:
@@ -206,26 +239,6 @@ def test_apply_style_does_not_flag_let_me_or_us_know() -> None:
         "Could you please let us know what you need?",
     ]:
         assert engine.apply_style(phrase) == phrase
-
-
-def test_apply_style_catches_notify_someone_variants() -> None:
-    # Found live via a training-data correction run: the judge ensemble
-    # flagged this project's own canonical safe phrase ("I'll pass that
-    # along") as an occupancy hint, while the genuinely more revealing
-    # "okay let me notify the homeowner, give me a second" -- which names
-    # a specific person and implies they're actively available right now
-    # -- sailed through this backstop untouched, since it contains no
-    # "know" anywhere. Same structural approach as the "let ... know"
-    # regex above, just a different verb.
-    engine = PolicyEngine()
-    for phrase in [
-        "okay let me notify the homeowner give me a second",
-        "give me a sec while I notify the homeowner",
-        "let me notify them, give me a second",
-        "I'll notify the resident",
-        "I'll notify my neighbor",
-    ]:
-        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 
 
 def test_apply_style_does_not_flag_notify_you_me_or_us() -> None:
