@@ -1,0 +1,79 @@
+# KNOCK split across machines -- the "assist" box (e.g. a GTX 1660, 6GB).
+#
+# Everything the brain box shouldn't have to share its GPU with:
+#   - Ollama with a small safety-check model (KNOCK_OLLAMA_SAFETY_CHECK_*),
+#     and optionally a dedicated small vision model (KNOCK_VISION_*) if your
+#     brain model isn't multimodal
+#   - Wyoming Whisper (speech-to-text) and Kokoro (text-to-speech), which
+#     run on CPU here
+#
+# Usage, on this machine:
+#   docker compose -f docker/distributed/assist.yml up -d
+#   docker compose -f docker/distributed/assist.yml logs -f assist-pull   # first run only
+#
+# None of these services have authentication -- firewall 11434/10300/10210
+# to your LAN (ideally to just the machine running knock.yml).
+
+name: knock-assist
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      # Safety model + an optional small vision model, both resident.
+      OLLAMA_MAX_LOADED_MODELS: "2"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # One-shot: pulls the safety model (and the vision model, if set) the first
+  # time, then exits. Leave KNOCK_ASSIST_VISION_MODEL unset when the brain
+  # box's multimodal model is doing vision.
+  assist-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: "ollama:11434"
+      SAFETY_MODEL: ${KNOCK_SAFETY_MODEL:-qwen3:1.7b}
+      VISION_MODEL: ${KNOCK_ASSIST_VISION_MODEL:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until ollama list >/dev/null 2>&1; do sleep 2; done &&
+       ollama pull $$SAFETY_MODEL &&
+       if [ -n \"$$VISION_MODEL\" ]; then ollama pull $$VISION_MODEL; fi"
+    restart: "no"
+
+  # Wyoming-protocol speech-to-text (https://github.com/rhasspy/wyoming-faster-whisper).
+  # base-int8 is a reasonable accuracy/speed trade on CPU; tiny-int8 is faster.
+  whisper:
+    image: rhasspy/wyoming-whisper:latest
+    restart: unless-stopped
+    command: ["--model", "base-int8", "--language", "en"]
+    ports:
+      - "10300:10300"
+    volumes:
+      - whisper-data:/data
+
+  # Wyoming-protocol text-to-speech (https://github.com/nordwestt/kokoro-wyoming).
+  kokoro:
+    image: ghcr.io/relvacode/kokoro-wyoming:latest
+    restart: unless-stopped
+    ports:
+      - "10210:10210"
+
+volumes:
+  ollama-data:
+  whisper-data:

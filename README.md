@@ -304,6 +304,30 @@ docker compose -f docker/compose.demo.yml logs -f ollama-pull   # first run only
 
 Open `http://localhost:8080`, finish the first-run admin setup, and head to the Debug page -- the Conversation Simulator exercises the full policy/intent/LLM pipeline by typing what a visitor might say, and the Vision/LLM/STT/TTS panels talk to the real providers above directly. No physical doorbell or camera bridge required. See the comments in the compose file for notes on swapping in a larger Ollama model for better intent-classification results.
 
+### Splitting KNOCK across machines
+
+Every model KNOCK talks to has its own host/port setting, so each one can live on a different machine. `docker/distributed/` has one compose file per role, laid out for a two-GPU home setup:
+
+| File | Machine | Runs |
+|---|---|---|
+| `brain.yml` | Biggest GPU (e.g. RTX 2060 Super, 8GB) | Ollama with the main LLM. A multimodal model (e.g. `qwen3.5:9b`) does vision too, so there's only one model in VRAM and nothing to swap on a ring |
+| `assist.yml` | Second GPU (e.g. GTX 1660, 6GB) | Ollama with a small safety-check model (default `qwen3:1.7b`) plus an optional dedicated vision model, and Whisper and Kokoro on CPU |
+| `knock.yml` | Anything, no GPU needed | The KNOCK app, web UI and camera bridges, built from this checkout and configured by `knock.env` |
+
+```bash
+# on the brain machine
+docker compose -f docker/distributed/brain.yml up -d
+# on the assist machine
+docker compose -f docker/distributed/assist.yml up -d
+# on the KNOCK machine, after filling in the other machines' LAN addresses
+cp docker/distributed/knock.env.example docker/distributed/knock.env
+docker compose -f docker/distributed/knock.yml up -d --build
+```
+
+Both Ollama servers set `OLLAMA_KEEP_ALIVE=-1` (models stay loaded between rings), flash attention, and a `q8_0` KV cache (about half the context memory). Run `ollama ps` on a box after a ring to confirm its models show `100% GPU`. A CPU/GPU split, or models appearing and disappearing between calls, means it's out of VRAM.
+
+**Ollama and the Wyoming servers have no authentication.** Anything that can reach those ports can use them. Firewall them to your LAN, ideally to just the KNOCK machine.
+
 ## Future Roadmap
 
 See:
