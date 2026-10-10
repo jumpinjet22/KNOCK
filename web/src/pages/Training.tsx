@@ -12,6 +12,7 @@ import { useUIMode } from "../lib/uiMode"
 
 const DISAGREEMENT_WARNING_THRESHOLD = 2.5
 const PAGE_SIZE = 25
+const AUTO_RETRY_MAX_ATTEMPTS = 5
 
 function AxisBadge({ label, value }: { label: string; value: number }) {
   const tone =
@@ -301,6 +302,7 @@ export function Training() {
       // rather than wait on a refetch, then reconcile counts/total from
       // the server so they stay authoritative.
       setLastCorrectionAccepted(null)
+      setLastAttemptsMade(null)
       const remaining = items.filter((i) => i.key !== item.key)
       setItems(remaining)
       setTotal((t) => Math.max(0, t - 1))
@@ -328,6 +330,14 @@ export function Training() {
   const [judgeModels, setJudgeModels] = useState("qwen2.5:14b,gemma2:9b,llama3.1:8b")
   const [correctingKey, setCorrectingKey] = useState<string | null>(null)
   const [lastCorrectionAccepted, setLastCorrectionAccepted] = useState<boolean | null>(null)
+  const [lastAttemptsMade, setLastAttemptsMade] = useState<number | null>(null)
+  // Off by default: a single click should do one call, not silently fire
+  // off up to 5. Capped at 5 server-side regardless (see
+  // training_routes.py's SuggestCorrectionRequest).
+  const [autoRetry, setAutoRetry] = useState(false)
+  // Off by default: "passes" means cleared the same safety/voice-veto
+  // bar a fresh candidate has to -- not also "every axis scores high."
+  const [requireHighScores, setRequireHighScores] = useState(false)
 
   async function suggestCorrection(item: TrainingQueueItem) {
     const edit = editFor(item)
@@ -341,17 +351,18 @@ export function Training() {
     }
     setCorrectingKey(item.key)
     setLastCorrectionAccepted(null)
+    setLastAttemptsMade(null)
     setError(null)
     try {
-      const { corrected_response, metadata, accepted } = await trainingApi.suggestCorrection(
-        item.key,
-        {
+      const { corrected_response, metadata, accepted, attempts_made } =
+        await trainingApi.suggestCorrection(item.key, {
           corrector_model: correctorModel,
           judge_models: judgeModelList,
           current_response: edit.response,
           human_note: edit.comment || null,
-        },
-      )
+          max_attempts: autoRetry ? AUTO_RETRY_MAX_ATTEMPTS : 1,
+          require_high_scores: requireHighScores,
+        })
       setEdits((current) => ({
         ...current,
         [item.key]: { ...edit, response: corrected_response },
@@ -363,6 +374,7 @@ export function Training() {
         current.map((i) => (i.key === item.key ? { ...i, metadata } : i)),
       )
       setLastCorrectionAccepted(accepted)
+      setLastAttemptsMade(attempts_made)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -468,6 +480,11 @@ export function Training() {
             correctingKey={correctingKey}
             suggestCorrection={suggestCorrection}
             lastCorrectionAccepted={lastCorrectionAccepted}
+            lastAttemptsMade={lastAttemptsMade}
+            autoRetry={autoRetry}
+            setAutoRetry={setAutoRetry}
+            requireHighScores={requireHighScores}
+            setRequireHighScores={setRequireHighScores}
           />
         ) : items.length === 0 ? (
           <p className="text-sm text-steel">No {filter} entries yet.</p>
@@ -554,6 +571,11 @@ function PendingTriage({
   correctingKey,
   suggestCorrection,
   lastCorrectionAccepted,
+  lastAttemptsMade,
+  autoRetry,
+  setAutoRetry,
+  requireHighScores,
+  setRequireHighScores,
 }: {
   current: TrainingQueueItem | null
   totalRemaining: number
@@ -574,6 +596,11 @@ function PendingTriage({
   correctingKey: string | null
   suggestCorrection: (item: TrainingQueueItem) => Promise<void>
   lastCorrectionAccepted: boolean | null
+  lastAttemptsMade: number | null
+  autoRetry: boolean
+  setAutoRetry: Dispatch<SetStateAction<boolean>>
+  requireHighScores: boolean
+  setRequireHighScores: Dispatch<SetStateAction<boolean>>
 }) {
   const sortToggle = (
     <label className="flex items-center gap-1.5 text-xs text-steel">
@@ -691,9 +718,31 @@ function PendingTriage({
                   : "bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300"
               }`}
             >
-              {lastCorrectionAccepted ? "Passed re-judging" : "Still flagged after correction"}
+              {lastCorrectionAccepted ? "Passed re-judging" : "Still flagged"}
+              {lastAttemptsMade !== null &&
+                ` (${lastAttemptsMade} attempt${lastAttemptsMade === 1 ? "" : "s"})`}
             </span>
           )}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-1.5 text-xs text-steel">
+            <input
+              type="checkbox"
+              checked={autoRetry}
+              onChange={(e) => setAutoRetry(e.target.checked)}
+              className="accent-porch"
+            />
+            Keep retrying until it passes (up to {AUTO_RETRY_MAX_ATTEMPTS} attempts)
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-steel">
+            <input
+              type="checkbox"
+              checked={requireHighScores}
+              onChange={(e) => setRequireHighScores(e.target.checked)}
+              className="accent-porch"
+            />
+            Require high scores, not just "not vetoed"
+          </label>
         </div>
         <p className="mt-1.5 text-xs text-steel">
           Rewrites the Response box above, then re-judges it with the full ensemble (same bar a
