@@ -8,6 +8,7 @@ from knock.core.training_judge import (
     build_classification_dpo_pairs,
     build_dpo_pairs,
     classify_scenario_voice,
+    combined_judge_reasons,
     group_by_intent,
     group_by_scenario,
     score_candidate,
@@ -260,6 +261,43 @@ def test_aggregate_scores_fails_closed_on_empty_list() -> None:
     assert result.voice_veto is True
     assert result.safety_veto is True
     assert result.per_judge == []
+
+
+# -- combined_judge_reasons -----------------------------------------------------------
+
+
+def test_combined_judge_reasons_includes_every_judge_not_just_the_first() -> None:
+    # Using only per_judge[0] (this project's earlier behavior, in both
+    # the interactive correction route and the batch script) silently
+    # discarded whatever the other judges flagged -- most costly exactly
+    # when they disagreed about what's wrong.
+    result = aggregate_scores(
+        [
+            JudgeAxisScores(
+                visitor_voice=9,
+                category_correct=8,
+                safety_compliant=2,
+                natural_quality=9,
+                reason="Leaks occupancy.",
+                judge_model="judge-a",
+            ),
+            JudgeAxisScores(
+                visitor_voice=9,
+                category_correct=3,
+                safety_compliant=9,
+                natural_quality=9,
+                reason="Wrong category entirely.",
+                judge_model="judge-b",
+            ),
+        ]
+    )
+    combined = combined_judge_reasons(result)
+    assert "judge-a: Leaks occupancy." in combined
+    assert "judge-b: Wrong category entirely." in combined
+
+
+def test_combined_judge_reasons_empty_when_no_judges_scored() -> None:
+    assert combined_judge_reasons(aggregate_scores([])) == ""
 
 
 # -- grouping -----------------------------------------------------------------------

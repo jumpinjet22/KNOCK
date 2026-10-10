@@ -47,7 +47,12 @@ from knock.core.training import (
     example_key,
 )
 from knock.core.training_correction import CorrectionAttempt, correct_response
-from knock.core.training_judge import JudgeAxisScores, aggregate_scores, score_candidate
+from knock.core.training_judge import (
+    JudgeAxisScores,
+    aggregate_scores,
+    combined_judge_reasons,
+    score_candidate,
+)
 from knock.providers.llm.ollama import OllamaProvider
 
 _VALID_INTENTS = [*_LLM_CLASSIFIABLE_INTENTS, "unknown"]
@@ -147,9 +152,7 @@ def main() -> int:
             entry=entry,
             meta=meta,
             current_response=entry.response_text,
-            current_reason=(
-                meta.judge.per_judge[0].reason if meta.judge and meta.judge.per_judge else ""
-            ),
+            current_reason=combined_judge_reasons(meta.judge) if meta.judge else "",
         )
         for entry, meta in eligible
     ]
@@ -207,9 +210,7 @@ def main() -> int:
                     s.done = True
                 else:
                     s.current_response = corrected
-                    s.current_reason = (
-                        result.per_judge[0].reason if result.per_judge else s.current_reason
-                    )
+                    s.current_reason = combined_judge_reasons(result) or s.current_reason
                     if attempt_num == args.max_attempts:
                         s.done = True
     finally:

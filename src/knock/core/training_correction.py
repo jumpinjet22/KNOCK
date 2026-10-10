@@ -24,7 +24,12 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, Field
 
-from knock.core.training_judge import AggregatedJudgeResult, aggregate_scores, score_candidate
+from knock.core.training_judge import (
+    AggregatedJudgeResult,
+    aggregate_scores,
+    combined_judge_reasons,
+    score_candidate,
+)
 from knock.providers.llm.base import LLMProvider
 
 
@@ -158,7 +163,7 @@ def run_correction_loop(
         if accepted:
             return CorrectionResult(attempts=attempts, final_response=corrected, accepted=True)
         current_response = corrected
-        current_reason = rejudged.per_judge[0].reason if rejudged.per_judge else current_reason
+        current_reason = combined_judge_reasons(rejudged) or current_reason
 
     return CorrectionResult(
         attempts=attempts, final_response=attempts[-1].corrected_response, accepted=False

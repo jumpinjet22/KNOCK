@@ -158,6 +158,19 @@ class AggregatedJudgeResult(BaseModel):
     per_judge: list[JudgeAxisScores] = Field(default_factory=list)
 
 
+def combined_judge_reasons(result: AggregatedJudgeResult) -> str:
+    """Every judge's own reason, combined into one multi-line string --
+    for feeding back to a corrector model (see training_correction.py)
+    or displaying to a human. Using only the first judge's reason (this
+    project's earlier behavior, in both the interactive correction route
+    and the batch correction script) silently discarded whatever the
+    *other* judges flagged, which matters most when they disagreed about
+    what's actually wrong -- exactly the entries most worth a careful
+    correction attempt in the first place.
+    """
+    return "\n".join(f"{j.judge_model}: {j.reason}" for j in result.per_judge)
+
+
 _VOICE_VETO_THRESHOLD = 3
 _SAFETY_VETO_THRESHOLD = 3
 

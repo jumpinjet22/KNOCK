@@ -30,7 +30,7 @@ from knock.core.training import (
     training_mode_enabled,
 )
 from knock.core.training_correction import CorrectionAttempt, correct_response
-from knock.core.training_judge import aggregate_scores, score_candidate
+from knock.core.training_judge import aggregate_scores, combined_judge_reasons, score_candidate
 from knock.providers.llm.ollama import OllamaProvider
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -343,7 +343,7 @@ def suggest_correction(
 
     meta = metadata_store.all().get(key) or TrainingMetadata()
     intent = entry.intent or "unknown"
-    judge_reason = meta.judge.per_judge[0].reason if meta.judge and meta.judge.per_judge else ""
+    judge_reason = combined_judge_reasons(meta.judge) if meta.judge else ""
 
     def make_provider(model: str) -> OllamaProvider:
         return OllamaProvider(
