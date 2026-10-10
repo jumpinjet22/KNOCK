@@ -52,6 +52,14 @@ losing the *entire* run's work, including judges that had already fully
 finished. Each checkpoint aggregates whatever judges have scored so far,
 so an interruption only costs progress since the last completed judge,
 not the whole run.
+
+Also checkpoints WITHIN a single judge's pass, every --checkpoint-interval
+seconds (default 180), not only between judges -- found live that a slow
+27B judge mid-pass can hold ~90 minutes of real, correct scoring in
+memory with nothing on disk if a judge's own single pass takes longer
+than that to finish; a time-based (not candidate-count-based) interval
+means this adapts automatically whether a judge runs at ~1s/call or
+~10s/call.
 """
 
 from __future__ import annotations
@@ -171,10 +179,12 @@ def _checkpoint(
     judges_so_far: int,
     total_judges: int,
     dry_run: bool,
+    progress_note: str = "",
 ) -> None:
     """Aggregates whatever judges have scored so far and writes it to
-    disk -- called after every judge's pass, not just the last one, so an
-    interruption only costs progress since the last checkpoint. Minority-
+    disk -- called after every judge's pass, and also periodically mid-
+    pass (see `progress_note`), so an interruption only costs progress
+    since the last checkpoint, never a whole judge's pass. Minority-
     veto scores are safe to checkpoint early: more judges can only ever
     *add* a veto, never remove one already found, so an early voice_veto
     is never a false positive, only possibly incomplete until the last
@@ -196,7 +206,7 @@ def _checkpoint(
             else:
                 already_decided_skipped += 1
     print(
-        f"  [checkpoint {judges_so_far}/{total_judges} judges] wrote metadata for "
+        f"  [checkpoint {judges_so_far}/{total_judges} judges{progress_note}] wrote metadata for "
         f"{len(candidates)} candidates ({group_rejected} newly auto-rejected via voice veto"
         + (
             f", {already_decided_skipped} already-decided left untouched"
@@ -253,6 +263,18 @@ def main() -> int:
             "real candidates to time against every judge before the full run, to project an "
             "ETA. The first sample always pays that model's load cost and is excluded from the "
             "average -- needs at least 2 (use 0 to skip calibration/ETA entirely)."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=float,
+        default=180.0,
+        help=(
+            "seconds between in-progress checkpoints within a single judge's pass (0 disables "
+            "mid-pass checkpointing, keeping only the once-per-judge checkpoint). Bounds how "
+            "much work an interruption can lose to about this many seconds, not a whole judge's "
+            "pass -- a slow judge model can otherwise hold an hour-plus of real scoring in "
+            "memory with nothing on disk."
         ),
     )
     args = parser.parse_args()
@@ -368,6 +390,7 @@ def main() -> int:
                 )
                 + "..."
             )
+            last_checkpoint = time.monotonic()
             for i, entry in enumerate(remaining):
                 t0 = time.monotonic()
                 intent = entry.intent or "unknown"
@@ -387,6 +410,23 @@ def main() -> int:
                     f"[{judge_name}] {i + 1:>4}/{len(remaining)} ({elapsed:5.1f}s) -- "
                     f"{entry.text!r}"
                 )
+                if (
+                    args.checkpoint_interval > 0
+                    and time.monotonic() - last_checkpoint >= args.checkpoint_interval
+                ):
+                    _checkpoint(
+                        candidates=candidates,
+                        scores_by_key=scores_by_key,
+                        existing_metadata=existing_metadata,
+                        metadata_store=metadata_store,
+                        review_store=review_store,
+                        original_status=original_status,
+                        judges_so_far=judge_idx,
+                        total_judges=len(judges),
+                        dry_run=args.dry_run,
+                        progress_note=f", {judge_name} mid-pass {i + 1}/{len(remaining)}",
+                    )
+                    last_checkpoint = time.monotonic()
 
             _checkpoint(
                 candidates=candidates,
