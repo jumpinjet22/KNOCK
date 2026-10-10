@@ -267,6 +267,20 @@ Example:
 - detected package,
 - previous clarification question.
 
+**Known gap, found live** (2026-10): "remembered" here means stored in
+`SessionState` (`history`, `last_intent`), not actually *used* yet.
+`classify_intent()`/`_refine_unknown_intent()` run on each turn's own
+text alone -- a clarifying question's follow-up reply is classified in
+isolation, with no access to what was asked or what the visitor said
+before. Concretely: if turn 1 is ambiguous ("anybody here like dogs?"),
+gets a clarifying reply, and the visitor's turn 2 answer confirms a
+real intent ("yeah, I'm a dog walker, offering my services"), turn 2
+classifies correctly on its own merits -- but that's circumstantial,
+not because the system used the conversation so far to interpret it.
+A genuinely context-aware classifier (e.g. feeding recent turns into
+`_classification_prompt`) is a real architecture change, not yet
+started.
+
 ---
 
 # Phase 5 — Provider System
@@ -898,6 +912,11 @@ sign-in) all actually work today, not just on paper.
 What's left is genuinely the "advanced features" tier now, not
 foundation-building:
 
+- Phase 4 follow-on, found live: intent classification doesn't actually
+  use conversation context yet, despite `SessionState` tracking it --
+  each turn is classified on its own text alone, not helped or hurt by
+  what was asked or said earlier in the same visit. See Phase 4's
+  Context definition for specifics.
 - Phase 6 gaps: ONVIF, SIP/VoIP (per-camera trigger selection and basic
   ESPHome support are both done now)
 - Phase 7 gaps: live intercom mode, real multi-voice switching
