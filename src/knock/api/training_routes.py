@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from knock.api.auth_routes import CurrentUserDep
 from knock.config import OllamaConfig
@@ -289,6 +289,21 @@ class SuggestCorrectionRequest(BaseModel):
     # box. Additive to the judge's own flagged reason (if this entry has
     # been judged), not a replacement for it.
     human_note: str | None = None
+    # 1 (the default) is the original single-shot behavior -- a human is
+    # driving this one call at a time and can just click again. >1 loops
+    # correct -> re-judge -> retry (same shape as the batch script's
+    # --max-attempts) up to this many times, stopping as soon as one
+    # attempt passes. Capped at 5: an interactive click shouldn't be able
+    # to kick off an unbounded chain of model calls.
+    max_attempts: int = Field(default=1, ge=1, le=5)
+    # False (the default): "passes" means the same bar a fresh candidate
+    # has to clear -- no safety/voice veto, nothing more. True: also
+    # requires category_correct_avg/natural_quality_avg to both clear
+    # _LOW_SCORE_THRESHOLD (same bar _needs_attention uses elsewhere) --
+    # a stricter "actually good," not just "not vetoed." A low-scoring
+    # but technically-safe correction (e.g. "could be more specific" or
+    # "a bit stilted") otherwise still counts as accepted.
+    require_high_scores: bool = False
     ollama_host: str = "127.0.0.1"
     ollama_port: int = 11434
     ollama_timeout: float = 120.0
@@ -298,6 +313,7 @@ class SuggestCorrectionResponse(BaseModel):
     corrected_response: str
     metadata: TrainingMetadata
     accepted: bool
+    attempts_made: int
 
 
 @router.post("/queue/{key}/suggest-correction", response_model=SuggestCorrectionResponse)
@@ -313,21 +329,26 @@ def suggest_correction(
     page -- an interactive counterpart to scripts/correct_training_data.py's
     batch flow: one corrector call, then re-judged through the full judge
     ensemble (not a cheaper check) before being trusted, same bar a fresh
-    candidate has to clear. No retry loop, unlike the batch script -- a
-    human is driving this one call at a time and can just click again
-    (with a refined `human_note`) if the first attempt doesn't pass.
+    candidate has to clear. `max_attempts=1` (the default) stops after one
+    call either way -- a human is driving this and can just click again
+    (with a refined `human_note`) if it doesn't pass. `max_attempts>1`
+    loops correct -> re-judge -> retry itself, same shape as the batch
+    script, stopping early as soon as one attempt passes.
 
     Quotes the judge's own flagged reason back to the corrector the same
-    way the batch script does, if this entry has been judged, plus the
-    reviewer's own `human_note` if one was given.
+    way the batch script does (refreshed each retry from that attempt's
+    own re-judge, same as the batch script), plus the reviewer's own
+    `human_note` if one was given -- applied on every attempt, not just
+    the first, since it's a standing instruction, not a one-off aside.
 
-    Writes the judge/correction *metadata* immediately (consistent with
-    every other judging path in this project -- metadata always reflects
-    the latest scoring, regardless of human review status). It does NOT
-    touch review status or response_override: the corrected text is only
-    returned for the reviewer's edit box to show, same as typing a
-    correction by hand. An explicit Approve/Reject still has to follow
-    before anything is actually used as training data.
+    Writes the judge/correction *metadata* immediately after every
+    attempt, accepted or not (consistent with every other judging path in
+    this project -- metadata always reflects the latest scoring,
+    regardless of human review status). It does NOT touch review status
+    or response_override: the corrected text is only returned for the
+    reviewer's edit box to show, same as typing a correction by hand. An
+    explicit Approve/Reject still has to follow before anything is
+    actually used as training data.
     """
     if len(body.judge_models) < 2:
         raise HTTPException(
@@ -357,53 +378,70 @@ def suggest_correction(
 
     corrector = make_provider(body.corrector_model)
     judges = [(name, make_provider(name)) for name in body.judge_models]
+    current_response = body.current_response
+    current_reason = judge_reason
+    corrected = current_response
+    accepted = False
+    attempts_made = 0
     try:
-        corrected = correct_response(
-            corrector,
-            entry.text,
-            intent,
-            body.current_response,
-            judge_reason,
-            human_note=body.human_note,
-        )
-        scores = [
-            score
-            for judge_name, judge_provider in judges
-            if (
-                score := score_candidate(
-                    judge_provider,
-                    judge_name,
-                    entry.text,
-                    intent,
-                    corrected,
-                    sorted(VALID_TRAINING_INTENTS),
-                )
+        for _attempt_num in range(1, body.max_attempts + 1):
+            corrected = correct_response(
+                corrector,
+                entry.text,
+                intent,
+                current_response,
+                current_reason,
+                human_note=body.human_note,
             )
-            is not None
-        ]
+            scores = [
+                score
+                for judge_name, judge_provider in judges
+                if (
+                    score := score_candidate(
+                        judge_provider,
+                        judge_name,
+                        entry.text,
+                        intent,
+                        corrected,
+                        sorted(VALID_TRAINING_INTENTS),
+                    )
+                )
+                is not None
+            ]
+            result = aggregate_scores(scores)
+            accepted = not result.voice_veto and not result.safety_veto
+            if accepted and body.require_high_scores:
+                accepted = (
+                    result.category_correct_avg >= _LOW_SCORE_THRESHOLD
+                    and result.natural_quality_avg >= _LOW_SCORE_THRESHOLD
+                )
+            attempts_made += 1
+            meta.corrections = [
+                *meta.corrections,
+                CorrectionAttempt(
+                    attempt=len(meta.corrections) + 1,
+                    original_response=current_response,
+                    corrected_response=corrected,
+                    judge_reason=current_reason or (body.human_note or ""),
+                    rejudged=result,
+                    accepted=accepted,
+                ),
+            ]
+            if accepted:
+                meta.judge = result
+                break
+            current_response = corrected
+            current_reason = combined_judge_reasons(result) or current_reason
     finally:
         corrector.close()
         for _name, judge_provider in judges:
             judge_provider.close()
 
-    result = aggregate_scores(scores)
-    accepted = not result.voice_veto and not result.safety_veto
-    meta.corrections = [
-        *meta.corrections,
-        CorrectionAttempt(
-            attempt=len(meta.corrections) + 1,
-            original_response=body.current_response,
-            corrected_response=corrected,
-            judge_reason=judge_reason or (body.human_note or ""),
-            rejudged=result,
-            accepted=accepted,
-        ),
-    ]
-    if accepted:
-        meta.judge = result
     metadata_store.set(key, meta)
 
-    return SuggestCorrectionResponse(corrected_response=corrected, metadata=meta, accepted=accepted)
+    return SuggestCorrectionResponse(
+        corrected_response=corrected, metadata=meta, accepted=accepted, attempts_made=attempts_made
+    )
 
 
 @router.get("/export")

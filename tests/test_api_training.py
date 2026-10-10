@@ -595,9 +595,152 @@ def test_suggest_correction_reports_not_accepted_when_still_unsafe(
     assert resp.status_code == 200
     body = resp.json()
     assert body["accepted"] is False
+    assert body["attempts_made"] == 1
     assert body["metadata"]["corrections"][0]["accepted"] is False
     # Not accepted -- meta.judge must NOT be overwritten with the failing result.
     assert body["metadata"]["judge"] is None
+
+
+@respx.mock
+def test_suggest_correction_stops_at_max_attempts_when_never_accepted(client, audit_log) -> None:
+    _login(client)
+    entry = _entry(text="Is anyone home?", response_text="Yes, I'm home alone right now.")
+    audit_log.record(entry)
+    key = example_key(entry)
+
+    def _side_effect(request: httpx.Request) -> httpx.Response:
+        prompt = json.loads(request.content).get("prompt", "")
+        if "quality-reviewing one training example" in prompt:
+            return httpx.Response(
+                200,
+                json={
+                    "response": '{"category_correct": 9, "safety_compliant": 1, '
+                    '"natural_quality": 9, "reason": "still confirms occupancy"}'
+                },
+            )
+        if "spoken BY a visitor" in prompt:
+            return httpx.Response(200, json={"response": "VISITOR"})
+        return httpx.Response(200, json={"response": "Still home alone, come on in."})
+
+    respx.post("http://127.0.0.1:11434/api/generate").mock(side_effect=_side_effect)
+
+    resp = _post(
+        client,
+        f"/api/training/queue/{key}/suggest-correction",
+        {
+            "corrector_model": "qwen3.5:9b",
+            "judge_models": ["qwen2.5:14b", "gemma2:9b"],
+            "current_response": entry.response_text,
+            "max_attempts": 3,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["accepted"] is False
+    assert body["attempts_made"] == 3
+    assert len(body["metadata"]["corrections"]) == 3
+    assert all(not c["accepted"] for c in body["metadata"]["corrections"])
+    assert body["metadata"]["judge"] is None
+
+
+@respx.mock
+def test_suggest_correction_stops_early_once_an_attempt_passes(client, audit_log) -> None:
+    _login(client)
+    entry = _entry(text="Is anyone home?", response_text="Yes, I'm home alone right now.")
+    audit_log.record(entry)
+    key = example_key(entry)
+    call_count = {"n": 0}
+
+    def _side_effect(request: httpx.Request) -> httpx.Response:
+        prompt = json.loads(request.content).get("prompt", "")
+        if "spoken BY a visitor" in prompt:
+            return httpx.Response(200, json={"response": "VISITOR"})
+        if "quality-reviewing one training example" in prompt:
+            call_count["n"] += 1
+            # Both judges' first-attempt calls fail; every call after passes.
+            safety = 1 if call_count["n"] <= 2 else 9
+            return httpx.Response(
+                200,
+                json={
+                    "response": f'{{"category_correct": 9, "safety_compliant": {safety}, '
+                    '"natural_quality": 9, "reason": "ok"}'
+                },
+            )
+        return httpx.Response(200, json={"response": "Thanks, I'll pass that along."})
+
+    respx.post("http://127.0.0.1:11434/api/generate").mock(side_effect=_side_effect)
+
+    resp = _post(
+        client,
+        f"/api/training/queue/{key}/suggest-correction",
+        {
+            "corrector_model": "qwen3.5:9b",
+            "judge_models": ["qwen2.5:14b", "gemma2:9b"],
+            "current_response": entry.response_text,
+            "max_attempts": 3,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["accepted"] is True
+    assert body["attempts_made"] == 2
+    assert len(body["metadata"]["corrections"]) == 2
+    assert body["metadata"]["corrections"][0]["accepted"] is False
+    assert body["metadata"]["corrections"][1]["accepted"] is True
+    assert body["metadata"]["judge"]["safety_compliant_avg"] == 9.0
+
+
+@respx.mock
+def test_suggest_correction_require_high_scores_rejects_a_low_category_score(
+    client, audit_log
+) -> None:
+    _login(client)
+    entry = _entry(text="Is anyone home?", response_text="Yes, I'm home alone right now.")
+    audit_log.record(entry)
+    key = example_key(entry)
+
+    def _side_effect(request: httpx.Request) -> httpx.Response:
+        prompt = json.loads(request.content).get("prompt", "")
+        if "spoken BY a visitor" in prompt:
+            return httpx.Response(200, json={"response": "VISITOR"})
+        if "quality-reviewing one training example" in prompt:
+            # Not vetoed on safety -- but category_correct is well below
+            # the "actually good" bar require_high_scores checks for.
+            return httpx.Response(
+                200,
+                json={
+                    "response": '{"category_correct": 3, "safety_compliant": 9, '
+                    '"natural_quality": 9, "reason": "category could be more specific"}'
+                },
+            )
+        return httpx.Response(200, json={"response": "Thanks, I'll pass that along."})
+
+    respx.post("http://127.0.0.1:11434/api/generate").mock(side_effect=_side_effect)
+
+    lenient = _post(
+        client,
+        f"/api/training/queue/{key}/suggest-correction",
+        {
+            "corrector_model": "qwen3.5:9b",
+            "judge_models": ["qwen2.5:14b", "gemma2:9b"],
+            "current_response": entry.response_text,
+        },
+    )
+    assert lenient.json()["accepted"] is True
+
+    strict = _post(
+        client,
+        f"/api/training/queue/{key}/suggest-correction",
+        {
+            "corrector_model": "qwen3.5:9b",
+            "judge_models": ["qwen2.5:14b", "gemma2:9b"],
+            "current_response": entry.response_text,
+            "require_high_scores": True,
+        },
+    )
+    assert strict.json()["accepted"] is False
 
 
 # -- ui-mode ----------------------------------------------------------------

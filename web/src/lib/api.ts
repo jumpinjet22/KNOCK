@@ -470,12 +470,16 @@ export const trainingApi = {
       judge_models: string[]
       current_response: string
       human_note?: string | null
+      max_attempts?: number
+      require_high_scores?: boolean
     },
   ) =>
-    apiFetch<{ corrected_response: string; metadata: TrainingMetadata; accepted: boolean }>(
-      `/api/training/queue/${key}/suggest-correction`,
-      { method: "POST", body },
-    ),
+    apiFetch<{
+      corrected_response: string
+      metadata: TrainingMetadata
+      accepted: boolean
+      attempts_made: number
+    }>(`/api/training/queue/${key}/suggest-correction`, { method: "POST", body }),
   exportUrl: "/api/training/export",
   exportDpoUrl: "/api/training/export/dpo",
 }
