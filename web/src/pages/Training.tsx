@@ -201,6 +201,14 @@ export function Training() {
   const [total, setTotal] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  // Needs-attention-first by default on the pending tab: a safety veto,
+  // judge disagreement, or a low category/quality score surfaces before
+  // the clean, high-agreement entries, so review time goes to the ones
+  // that actually need a judgment call -- the rest move fast behind them
+  // instead of being interleaved in whatever order they were generated.
+  const [sortMode, setSortMode] = useState<"newest" | "needs_attention_first">(
+    "needs_attention_first",
+  )
 
   const loadCounts = useCallback(() => {
     trainingApi
@@ -209,14 +217,17 @@ export function Training() {
       .catch((err) => setError(errorMessage(err)))
   }, [])
 
-  const loadPage = useCallback((status: StatusFilter, offset: number) => {
-    return trainingApi.queue({ status, offset, limit: PAGE_SIZE }).then((page) => {
-      setItems((current) => (offset === 0 ? page.items : [...current, ...page.items]))
-      setTotal(page.total)
-      setHasMore(page.has_more)
-      return page
-    })
-  }, [])
+  const loadPage = useCallback(
+    (status: StatusFilter, offset: number) => {
+      return trainingApi.queue({ status, sort: sortMode, offset, limit: PAGE_SIZE }).then((page) => {
+        setItems((current) => (offset === 0 ? page.items : [...current, ...page.items]))
+        setTotal(page.total)
+        setHasMore(page.has_more)
+        return page
+      })
+    },
+    [sortMode],
+  )
 
   useEffect(() => {
     setItems([])
@@ -381,6 +392,8 @@ export function Training() {
             goBack={goBack}
             canGoBack={history.length > 0}
             reviewedCount={reviewedCount}
+            sortMode={sortMode}
+            setSortMode={setSortMode}
           />
         ) : items.length === 0 ? (
           <p className="text-sm text-steel">No {filter} entries yet.</p>
@@ -458,6 +471,8 @@ function PendingTriage({
   goBack,
   canGoBack,
   reviewedCount,
+  sortMode,
+  setSortMode,
 }: {
   current: TrainingQueueItem | null
   totalRemaining: number
@@ -469,7 +484,21 @@ function PendingTriage({
   goBack: () => Promise<void>
   canGoBack: boolean
   reviewedCount: number
+  sortMode: "newest" | "needs_attention_first"
+  setSortMode: Dispatch<SetStateAction<"newest" | "needs_attention_first">>
 }) {
+  const sortToggle = (
+    <label className="flex items-center gap-1.5 text-xs text-steel">
+      <input
+        type="checkbox"
+        checked={sortMode === "needs_attention_first"}
+        onChange={(e) => setSortMode(e.target.checked ? "needs_attention_first" : "newest")}
+        className="accent-porch"
+      />
+      Flagged ones first
+    </label>
+  )
+
   if (!current) {
     return (
       <div className="rounded-lg border border-steel/20 bg-paper px-6 py-10 text-center dark:bg-dusk">
@@ -489,9 +518,17 @@ function PendingTriage({
     <div>
       <div className="mb-3 flex items-center justify-between text-xs text-steel">
         <span>{totalRemaining} left to review</span>
-        {reviewedCount > 0 && <span>{reviewedCount} done this session</span>}
+        <div className="flex items-center gap-3">
+          {reviewedCount > 0 && <span>{reviewedCount} done this session</span>}
+          {sortToggle}
+        </div>
       </div>
       <div className="rounded-lg border border-steel/20 bg-paper px-5 py-5 dark:bg-dusk">
+        {current.needs_attention && (
+          <p className="mb-3 inline-block rounded px-2 py-0.5 text-xs font-medium text-amber-800 bg-amber-100 dark:bg-amber-950/50 dark:text-amber-300">
+            Flagged for review -- safety concern, judge disagreement, or low confidence
+          </p>
+        )}
         <EntryFields
           item={current}
           edit={edit}

@@ -235,6 +235,107 @@ def test_queue_paginates_with_offset_and_limit(client, audit_log) -> None:
     assert second_page["items"][0]["entry"]["text"] != first_page["items"][0]["entry"]["text"]
 
 
+def test_queue_item_needs_attention_defaults_true_when_unjudged(client, audit_log) -> None:
+    _login(client)
+    audit_log.record(_entry())
+
+    resp = client.get("/api/training/queue")
+
+    assert resp.json()["items"][0]["needs_attention"] is True
+
+
+def test_queue_needs_attention_flags_disagreement_and_low_scores(
+    client, audit_log, metadata_store
+) -> None:
+    _login(client)
+    clean = _entry(text="clean one")
+    disagreement = _entry(text="judges disagreed")
+    low_category = _entry(text="wrong category probably")
+    audit_log.record(clean)
+    audit_log.record(disagreement)
+    audit_log.record(low_category)
+
+    def _judge(**overrides: object) -> AggregatedJudgeResult:
+        base = dict(
+            visitor_voice_avg=9.0,
+            category_correct_avg=9.0,
+            safety_compliant_avg=9.0,
+            natural_quality_avg=9.0,
+            voice_veto=False,
+            safety_veto=False,
+            disagreement=0.5,
+            per_judge=[],
+        )
+        base.update(overrides)
+        return AggregatedJudgeResult(**base)
+
+    metadata_store.set(example_key(clean), TrainingMetadata(judge=_judge()))
+    metadata_store.set(example_key(disagreement), TrainingMetadata(judge=_judge(disagreement=3.0)))
+    metadata_store.set(
+        example_key(low_category), TrainingMetadata(judge=_judge(category_correct_avg=3.0))
+    )
+
+    resp = client.get("/api/training/queue")
+
+    by_text = {item["entry"]["text"]: item["needs_attention"] for item in resp.json()["items"]}
+    assert by_text == {
+        "clean one": False,
+        "judges disagreed": True,
+        "wrong category probably": True,
+    }
+
+
+def test_queue_sort_needs_attention_first_reorders_regardless_of_recency(
+    client, audit_log, metadata_store
+) -> None:
+    _login(client)
+    older_flagged = _entry(text="older but flagged")
+    newer_clean = _entry(text="newer and clean")
+    audit_log.record(older_flagged)
+    audit_log.record(newer_clean)
+    metadata_store.set(
+        example_key(older_flagged),
+        TrainingMetadata(
+            judge=AggregatedJudgeResult(
+                visitor_voice_avg=9.0,
+                category_correct_avg=9.0,
+                safety_compliant_avg=9.0,
+                natural_quality_avg=9.0,
+                voice_veto=False,
+                safety_veto=True,
+                disagreement=0.5,
+                per_judge=[],
+            )
+        ),
+    )
+    metadata_store.set(
+        example_key(newer_clean),
+        TrainingMetadata(
+            judge=AggregatedJudgeResult(
+                visitor_voice_avg=9.0,
+                category_correct_avg=9.0,
+                safety_compliant_avg=9.0,
+                natural_quality_avg=9.0,
+                voice_veto=False,
+                safety_veto=False,
+                disagreement=0.5,
+                per_judge=[],
+            )
+        ),
+    )
+
+    default_order = [
+        item["entry"]["text"] for item in client.get("/api/training/queue").json()["items"]
+    ]
+    attention_first = [
+        item["entry"]["text"]
+        for item in client.get("/api/training/queue?sort=needs_attention_first").json()["items"]
+    ]
+
+    assert default_order == ["newer and clean", "older but flagged"]
+    assert attention_first == ["older but flagged", "newer and clean"]
+
+
 def test_queue_counts_reflect_the_full_history_not_just_one_page(
     client, audit_log, review_store
 ) -> None:

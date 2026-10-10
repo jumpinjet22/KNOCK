@@ -400,6 +400,7 @@ export interface TrainingQueueItem {
   entry: AuditEntry
   review: TrainingReview
   metadata: TrainingMetadata
+  needs_attention: boolean
 }
 
 export interface TrainingQueuePage {
@@ -432,9 +433,17 @@ export const trainingApi = {
   // filtered client-side) silently hid most of an actually-reviewed
   // history once the dataset outgrew it. offset/limit here page through
   // the full, status-filtered history instead.
-  queue: (params: { status?: TrainingReview["status"]; offset?: number; limit?: number } = {}) => {
+  queue: (
+    params: {
+      status?: TrainingReview["status"]
+      sort?: "newest" | "needs_attention_first"
+      offset?: number
+      limit?: number
+    } = {},
+  ) => {
     const query = new URLSearchParams()
     if (params.status) query.set("status", params.status)
+    if (params.sort) query.set("sort", params.sort)
     query.set("offset", String(params.offset ?? 0))
     query.set("limit", String(params.limit ?? 25))
     return apiFetch<TrainingQueuePage>(`/api/training/queue?${query.toString()}`)

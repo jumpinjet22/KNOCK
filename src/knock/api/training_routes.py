@@ -61,6 +61,7 @@ class TrainingQueueItem(BaseModel):
     entry: AuditEntry
     review: TrainingReview
     metadata: TrainingMetadata = TrainingMetadata()
+    needs_attention: bool = False
 
 
 class TrainingQueuePage(BaseModel):
@@ -69,6 +70,32 @@ class TrainingQueuePage(BaseModel):
     offset: int
     limit: int
     has_more: bool
+
+
+# Mirrors the frontend's own DISAGREEMENT_WARNING_THRESHOLD (Training.tsx) --
+# kept as a plain float rather than importing across the API boundary.
+_DISAGREEMENT_THRESHOLD = 2.5
+_LOW_SCORE_THRESHOLD = 6.0
+
+
+def _needs_attention(item: TrainingQueueItem) -> bool:
+    """A quick, deterministic "does a human actually need to think about
+    this one" signal, computed from judge scores already on hand -- not a
+    new LLM call, just a threshold over data Stage 3 already produced.
+
+    Unjudged entries default to True (nothing to rubber-stamp confidently
+    without scores) -- this only ever matters in practice for very recent
+    entries a judging pass hasn't reached yet.
+    """
+    judge = item.metadata.judge
+    if judge is None:
+        return True
+    return (
+        judge.safety_veto
+        or judge.disagreement >= _DISAGREEMENT_THRESHOLD
+        or judge.category_correct_avg < _LOW_SCORE_THRESHOLD
+        or judge.natural_quality_avg < _LOW_SCORE_THRESHOLD
+    )
 
 
 class TrainingQueueCounts(BaseModel):
@@ -100,14 +127,14 @@ def _all_queue_items(
         if entry.intent is None:
             continue
         key = example_key(entry)
-        items.append(
-            TrainingQueueItem(
-                key=key,
-                entry=entry,
-                review=reviews.get(key, TrainingReview()),
-                metadata=metadata.get(key, TrainingMetadata()),
-            )
+        item = TrainingQueueItem(
+            key=key,
+            entry=entry,
+            review=reviews.get(key, TrainingReview()),
+            metadata=metadata.get(key, TrainingMetadata()),
         )
+        item.needs_attention = _needs_attention(item)
+        items.append(item)
     return items
 
 
@@ -157,13 +184,14 @@ def get_training_queue(
     review_store: ReviewStoreDep,
     metadata_store: MetadataStoreDep,
     status: Literal["pending", "approved", "rejected"] | None = Query(default=None),
+    sort: Literal["newest", "needs_attention_first"] = Query(default="newest"),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> TrainingQueuePage:
     """A page of audit entries with something to train on (skips
     emergency/blocked requests, which never reach `classify_intent()`),
-    newest first, each paired with its current review status and -- if
-    the judge stage has scored it -- its judge/correction metadata.
+    each paired with its current review status and -- if the judge stage
+    has scored it -- its judge/correction metadata.
 
     Filters by `status` (if given) *before* paginating, across the full
     history -- not a recent-N window truncated before filtering. That
@@ -174,12 +202,21 @@ def get_training_queue(
     -- most of an actually-reviewed history, in practice -- silently
     stopped appearing in the Approved/Rejected tabs at all, with no
     indication anything was missing.
+
+    `sort="needs_attention_first"` puts every item `_needs_attention`
+    flags (a safety veto, judge disagreement, or a low category/quality
+    score) ahead of the rest, newest-first within each group -- lets a
+    reviewer spend real attention on the ones that actually need a
+    judgment call and move quickly through the rest, rather than hitting
+    both in whatever order they happened to be generated.
     """
     matching = [
         item
         for item in _all_queue_items(audit_log, review_store, metadata_store)
         if status is None or item.review.status == status
     ]
+    if sort == "needs_attention_first":
+        matching.sort(key=lambda item: not item.needs_attention)
     total = len(matching)
     page = matching[offset : offset + limit]
     return TrainingQueuePage(
