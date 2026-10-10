@@ -99,6 +99,7 @@ class TrainingReview(BaseModel):
     status: ReviewStatus = "pending"
     intent_override: str | None = None
     response_override: str | None = None
+    comment: str | None = None
 
 
 class TrainingReviewStore:

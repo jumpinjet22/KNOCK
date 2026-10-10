@@ -58,6 +58,30 @@ def test_correct_response_falls_back_to_original_on_blank_reply() -> None:
     assert result == "original bad"
 
 
+def test_correct_response_includes_the_reviewers_human_note_in_the_prompt() -> None:
+    # The comment box on the Training page is an instruction for the
+    # rewrite, not a private note -- it must actually reach the prompt,
+    # clearly distinguished from the judge's own automated reasoning.
+    corrector = _FakeCorrector("Corrected reply.")
+    correct_response(
+        corrector,
+        "visitor text",
+        "unknown",
+        "bad response",
+        "unsafe",
+        human_note="make it shorter",
+    )
+    assert len(corrector.prompts) == 1
+    assert "make it shorter" in corrector.prompts[0]
+    assert "reviewer specifically asked" in corrector.prompts[0]
+
+
+def test_correct_response_omits_the_note_block_when_no_human_note_given() -> None:
+    corrector = _FakeCorrector("Corrected reply.")
+    correct_response(corrector, "visitor text", "unknown", "bad response", "unsafe")
+    assert "reviewer specifically asked" not in corrector.prompts[0]
+
+
 # -- run_correction_loop -------------------------------------------------------------
 
 

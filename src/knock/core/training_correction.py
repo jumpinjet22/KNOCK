@@ -28,12 +28,26 @@ from knock.core.training_judge import AggregatedJudgeResult, aggregate_scores, s
 from knock.providers.llm.base import LLMProvider
 
 
-def _correction_prompt(visitor_text: str, intent: str, bad_response: str, judge_reason: str) -> str:
+def _correction_prompt(
+    visitor_text: str,
+    intent: str,
+    bad_response: str,
+    judge_reason: str,
+    human_note: str | None = None,
+) -> str:
+    reason_block = f"A reviewer flagged a problem with it: {judge_reason}\n" if judge_reason else ""
+    # The human's own instruction, when given, is a direct editorial
+    # request (e.g. "make this shorter", "don't mention the dog") -- kept
+    # as its own clearly-labeled line rather than folded into
+    # `judge_reason` so the model doesn't have to guess which parts of
+    # the prompt are an automated score's reasoning vs. an explicit ask.
+    note_block = f"The reviewer specifically asked for this: {human_note}\n" if human_note else ""
     return (
         f'A visitor at the door said: "{visitor_text}"\n'
         f"The correct category for this is: {intent}\n\n"
         f'A smart doorbell assistant said this in reply: "{bad_response}"\n'
-        f"A reviewer flagged a problem with it: {judge_reason}\n\n"
+        f"{reason_block}"
+        f"{note_block}\n"
         "Write a corrected reply that fixes this specific problem while "
         "staying a short, natural, polite sentence for the same situation. "
         "Never say whether anyone is home, share the household's schedule, "
@@ -44,17 +58,26 @@ def _correction_prompt(visitor_text: str, intent: str, bad_response: str, judge_
 
 
 def correct_response(
-    provider: LLMProvider, visitor_text: str, intent: str, bad_response: str, judge_reason: str
+    provider: LLMProvider,
+    visitor_text: str,
+    intent: str,
+    bad_response: str,
+    judge_reason: str,
+    human_note: str | None = None,
 ) -> str:
     """One correction attempt. Returns the corrected text, or the original
     `bad_response` unchanged if generation fails/comes back blank --
     callers should still re-judge the result either way, since an
     unchanged response will simply fail the same check again and surface
     in the correction history as a failed attempt, which is honest.
+
+    `human_note` is a reviewer's own instruction for the rewrite (e.g.
+    from the Training page's comment box) -- optional, and additive to
+    `judge_reason`, not a replacement for it.
     """
     try:
         corrected = provider.generate(
-            _correction_prompt(visitor_text, intent, bad_response, judge_reason)
+            _correction_prompt(visitor_text, intent, bad_response, judge_reason, human_note)
         ).strip()
     except Exception:  # noqa: BLE001 - best-effort, caller re-judges regardless
         return bad_response

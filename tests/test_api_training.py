@@ -3,6 +3,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
 from knock.api.app import app
@@ -23,7 +24,7 @@ from knock.core.training import (
     TrainingReviewStore,
     example_key,
 )
-from knock.core.training_judge import AggregatedJudgeResult
+from knock.core.training_judge import AggregatedJudgeResult, JudgeAxisScores
 
 
 @pytest.fixture
@@ -411,6 +412,98 @@ def test_put_review_rejects_an_invalid_intent_override(client) -> None:
         {"status": "approved", "intent_override": "not_a_real_intent"},
     )
     assert resp.status_code == 400
+
+
+def test_put_review_saves_a_comment(client, audit_log) -> None:
+    _login(client)
+    entry = _entry()
+    audit_log.record(entry)
+    key = example_key(entry)
+
+    resp = _put(
+        client,
+        f"/api/training/queue/{key}",
+        {"status": "pending", "comment": "borderline, revisit"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["comment"] == "borderline, revisit"
+
+    queue = client.get("/api/training/queue").json()
+    assert queue["items"][0]["review"]["comment"] == "borderline, revisit"
+
+
+# -- suggest-correction -------------------------------------------------------
+
+
+def test_suggest_correction_requires_authentication(client) -> None:
+    resp = _post(
+        client,
+        "/api/training/queue/abc123/suggest-correction",
+        {"corrector_model": "m", "current_response": "x"},
+    )
+    assert resp.status_code == 401
+
+
+def test_suggest_correction_returns_404_for_unknown_key(client) -> None:
+    _login(client)
+    resp = _post(
+        client,
+        "/api/training/queue/doesnotexist/suggest-correction",
+        {"corrector_model": "m", "current_response": "x"},
+    )
+    assert resp.status_code == 404
+
+
+@respx.mock
+def test_suggest_correction_returns_the_corrected_text(client, audit_log, metadata_store) -> None:
+    _login(client)
+    entry = _entry(text="Is anyone home?", response_text="Yes, I'm home alone right now.")
+    audit_log.record(entry)
+    key = example_key(entry)
+    metadata_store.set(
+        key,
+        TrainingMetadata(
+            judge=AggregatedJudgeResult(
+                visitor_voice_avg=9.0,
+                category_correct_avg=9.0,
+                safety_compliant_avg=1.0,
+                natural_quality_avg=9.0,
+                voice_veto=False,
+                safety_veto=True,
+                disagreement=0.0,
+                per_judge=[
+                    JudgeAxisScores(
+                        visitor_voice=9,
+                        category_correct=9,
+                        safety_compliant=1,
+                        natural_quality=9,
+                        reason="Confirms occupancy directly.",
+                        judge_model="qwen2.5:14b",
+                    )
+                ],
+            )
+        ),
+    )
+    route = respx.post("http://127.0.0.1:11434/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "Thanks, I'll pass that along."})
+    )
+
+    resp = _post(
+        client,
+        f"/api/training/queue/{key}/suggest-correction",
+        {
+            "corrector_model": "qwen3.5:9b",
+            "current_response": entry.response_text,
+            "human_note": "make it shorter",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["corrected_response"] == "Thanks, I'll pass that along."
+    sent_prompt = route.calls.last.request.content.decode()
+    assert "make it shorter" in sent_prompt
+    assert "Confirms occupancy directly." in sent_prompt
 
 
 # -- ui-mode ----------------------------------------------------------------

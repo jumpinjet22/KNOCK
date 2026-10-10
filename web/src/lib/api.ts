@@ -359,6 +359,7 @@ export interface TrainingReview {
   status: "pending" | "approved" | "rejected"
   intent_override: string | null
   response_override: string | null
+  comment: string | null
 }
 
 export interface JudgeAxisScores {
@@ -455,8 +456,21 @@ export const trainingApi = {
       status: TrainingReview["status"]
       intent_override?: string | null
       response_override?: string | null
+      comment?: string | null
     },
   ) => apiFetch<TrainingReview>(`/api/training/queue/${key}`, { method: "PUT", body }),
+  // One-shot interactive correction -- lighter-weight than the batch
+  // correct_training_data.py script (one corrector call, no re-judging,
+  // no retry loop). Returns the suggested text only; it's never saved
+  // until the reviewer explicitly Approves/Rejects afterward.
+  suggestCorrection: (
+    key: string,
+    body: { corrector_model: string; current_response: string; human_note?: string | null },
+  ) =>
+    apiFetch<{ corrected_response: string }>(`/api/training/queue/${key}/suggest-correction`, {
+      method: "POST",
+      body,
+    }),
   exportUrl: "/api/training/export",
   exportDpoUrl: "/api/training/export/dpo",
 }

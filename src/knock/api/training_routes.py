@@ -15,6 +15,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from knock.api.auth_routes import CurrentUserDep
+from knock.config import OllamaConfig
 from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.script_runner import RunState, ScriptName, ScriptRunner
 from knock.core.training import (
@@ -28,6 +29,8 @@ from knock.core.training import (
     export_training_jsonl,
     training_mode_enabled,
 )
+from knock.core.training_correction import correct_response
+from knock.providers.llm.ollama import OllamaProvider
 
 router = APIRouter(prefix="/api/training", tags=["training"])
 
@@ -245,6 +248,7 @@ class ReviewRequest(BaseModel):
     status: Literal["pending", "approved", "rejected"]
     intent_override: str | None = None
     response_override: str | None = None
+    comment: str | None = None
 
 
 @router.put("/queue/{key}", response_model=TrainingReview)
@@ -264,9 +268,84 @@ def set_training_review(
         status=body.status,
         intent_override=body.intent_override,
         response_override=body.response_override,
+        comment=body.comment,
     )
     review_store.set(key, review)
     return review
+
+
+class SuggestCorrectionRequest(BaseModel):
+    corrector_model: str
+    current_response: str
+    # The reviewer's own instruction for the rewrite (e.g. "make this
+    # shorter", "don't mention the dog") -- the Training page's comment
+    # box. Additive to the judge's own flagged reason (if this entry has
+    # been judged), not a replacement for it.
+    human_note: str | None = None
+    ollama_host: str = "127.0.0.1"
+    ollama_port: int = 11434
+    ollama_timeout: float = 120.0
+
+
+class SuggestCorrectionResponse(BaseModel):
+    corrected_response: str
+
+
+@router.post("/queue/{key}/suggest-correction", response_model=SuggestCorrectionResponse)
+def suggest_correction(
+    key: str,
+    body: SuggestCorrectionRequest,
+    current_user: CurrentUserDep,
+    *,
+    audit_log: AuditLogDep,
+    metadata_store: MetadataStoreDep,
+) -> SuggestCorrectionResponse:
+    """On-demand, single-shot correction for one entry, triggered from the
+    Training page -- a lighter-weight interactive counterpart to
+    scripts/correct_training_data.py's batch flow (one corrector call, no
+    re-judging, no retry loop). Quotes the judge's own flagged reason back
+    to the corrector the same way the batch script does, if this entry
+    has been judged, plus the reviewer's own `human_note` instruction if
+    one was given -- see `correct_response`'s docstring for how the two
+    combine.
+
+    Writes nothing itself: the corrected text is only returned for the
+    reviewer's edit box to show, same as typing a correction by hand.
+    Only an explicit Approve/Reject afterward actually saves anything --
+    this never bypasses that gate.
+    """
+    entry = next(
+        (e for e in audit_log.recent(limit=100_000) if example_key(e) == key),
+        None,
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No audit entry with that key")
+
+    meta = metadata_store.all().get(key)
+    judge_reason = (
+        meta.judge.per_judge[0].reason if meta and meta.judge and meta.judge.per_judge else ""
+    )
+
+    provider = OllamaProvider(
+        config=OllamaConfig(
+            host=body.ollama_host,
+            port=body.ollama_port,
+            model=body.corrector_model,
+            timeout=body.ollama_timeout,
+        )
+    )
+    try:
+        corrected = correct_response(
+            provider,
+            entry.text,
+            entry.intent or "unknown",
+            body.current_response,
+            judge_reason,
+            human_note=body.human_note,
+        )
+    finally:
+        provider.close()
+    return SuggestCorrectionResponse(corrected_response=corrected)
 
 
 @router.get("/export")

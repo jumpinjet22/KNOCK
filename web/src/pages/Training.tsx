@@ -121,6 +121,7 @@ function formatTimestamp(value: string): string {
 interface EditState {
   intent: string
   response: string
+  comment: string
 }
 
 function EntryFields({
@@ -164,6 +165,15 @@ function EntryFields({
           value={edit.response}
           onChange={(e) => onChange({ ...edit, response: e.target.value })}
           rows={responseRows}
+          className={inputClass}
+        />
+
+        <label className="text-xs font-medium text-steel sm:pt-2">Correction note</label>
+        <textarea
+          value={edit.comment}
+          onChange={(e) => onChange({ ...edit, comment: e.target.value })}
+          placeholder="Tell the correction model what to fix (e.g. 'make it shorter', 'don't mention the dog') -- sent to it when you click Send to correction model."
+          rows={2}
           className={inputClass}
         />
       </div>
@@ -260,12 +270,14 @@ export function Training() {
           item.review.response_override ??
           lastCorrection?.corrected_response ??
           item.entry.response_text,
+        comment: item.review.comment ?? "",
       }
     )
   }
 
   async function setStatus(item: TrainingQueueItem, status: TrainingReview["status"]) {
     const edit = editFor(item)
+    const statusChanged = status !== item.review.status
     setSavingKey(item.key)
     setError(null)
     try {
@@ -273,9 +285,17 @@ export function Training() {
       const responseChanged = edit.response !== item.entry.response_text
       const updated = await trainingApi.review(item.key, {
         status,
-        intent_override: intentChanged ? edit.intent : null,
-        response_override: responseChanged ? edit.response : null,
+        intent_override: intentChanged ? edit.intent : item.review.intent_override,
+        response_override: responseChanged ? edit.response : item.review.response_override,
+        comment: edit.comment || null,
       })
+      if (!statusChanged) {
+        // Saving a comment (or an edit) without actually changing status
+        // -- update in place, it still belongs in whichever tab it's
+        // currently shown in.
+        setItems((current) => current.map((i) => (i.key === item.key ? { ...i, review: updated } : i)))
+        return
+      }
       // The item no longer matches the active tab's filter (it moved to
       // a different status) -- drop it from the current page locally
       // rather than wait on a refetch, then reconcile counts/total from
@@ -300,6 +320,30 @@ export function Training() {
       setError(errorMessage(err))
     } finally {
       setSavingKey(null)
+    }
+  }
+
+  const [correctorModel, setCorrectorModel] = useState("qwen3.5:9b")
+  const [correctingKey, setCorrectingKey] = useState<string | null>(null)
+
+  async function suggestCorrection(item: TrainingQueueItem) {
+    const edit = editFor(item)
+    setCorrectingKey(item.key)
+    setError(null)
+    try {
+      const { corrected_response } = await trainingApi.suggestCorrection(item.key, {
+        corrector_model: correctorModel,
+        current_response: edit.response,
+        human_note: edit.comment || null,
+      })
+      setEdits((current) => ({
+        ...current,
+        [item.key]: { ...edit, response: corrected_response },
+      }))
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setCorrectingKey(null)
     }
   }
 
@@ -394,6 +438,10 @@ export function Training() {
             reviewedCount={reviewedCount}
             sortMode={sortMode}
             setSortMode={setSortMode}
+            correctorModel={correctorModel}
+            setCorrectorModel={setCorrectorModel}
+            correctingKey={correctingKey}
+            suggestCorrection={suggestCorrection}
           />
         ) : items.length === 0 ? (
           <p className="text-sm text-steel">No {filter} entries yet.</p>
@@ -473,6 +521,10 @@ function PendingTriage({
   reviewedCount,
   sortMode,
   setSortMode,
+  correctorModel,
+  setCorrectorModel,
+  correctingKey,
+  suggestCorrection,
 }: {
   current: TrainingQueueItem | null
   totalRemaining: number
@@ -486,6 +538,10 @@ function PendingTriage({
   reviewedCount: number
   sortMode: "newest" | "needs_attention_first"
   setSortMode: Dispatch<SetStateAction<"newest" | "needs_attention_first">>
+  correctorModel: string
+  setCorrectorModel: Dispatch<SetStateAction<string>>
+  correctingKey: string | null
+  suggestCorrection: (item: TrainingQueueItem) => Promise<void>
 }) {
   const sortToggle = (
     <label className="flex items-center gap-1.5 text-xs text-steel">
@@ -513,6 +569,7 @@ function PendingTriage({
 
   const edit = editFor(current)
   const saving = savingKey === current.key
+  const correcting = correctingKey === current.key
 
   return (
     <div>
@@ -536,7 +593,7 @@ function PendingTriage({
           responseRows={4}
           onChange={(next) => setEdits((prev) => ({ ...prev, [current.key]: next }))}
         />
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-4 flex flex-wrap items-center gap-2">
           <button
             type="button"
             disabled={saving}
@@ -555,12 +612,41 @@ function PendingTriage({
           </button>
           <button
             type="button"
+            disabled={saving}
+            onClick={() => void setStatus(current, current.review.status)}
+            className={`${buttonClass} border border-steel/30 text-ink hover:border-porch dark:text-mist`}
+          >
+            Save comment
+          </button>
+          <button
+            type="button"
             disabled={saving || !canGoBack}
             onClick={() => void goBack()}
-            className={`${buttonClass} ml-auto text-steel hover:text-ink dark:hover:text-mist`}
+            className={`${buttonClass} text-steel hover:text-ink dark:hover:text-mist`}
           >
             ← Back
           </button>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-steel/20 pt-3">
+          <input
+            type="text"
+            value={correctorModel}
+            onChange={(e) => setCorrectorModel(e.target.value)}
+            placeholder="corrector model, e.g. qwen3.5:9b"
+            className={`${inputClass} w-48 py-1.5 text-xs`}
+          />
+          <button
+            type="button"
+            disabled={correcting}
+            onClick={() => void suggestCorrection(current)}
+            className={`${buttonClass} border border-steel/30 text-ink hover:border-porch dark:text-mist`}
+          >
+            {correcting ? "Correcting…" : "Send to correction model"}
+          </button>
+          <span className="text-xs text-steel">
+            Rewrites the Response box above using the correction note -- review before approving.
+          </span>
         </div>
       </div>
     </div>
