@@ -254,6 +254,32 @@ def test_apply_style_does_not_flag_notify_you_me_or_us() -> None:
         assert engine.apply_style(phrase) == phrase
 
 
+def test_apply_style_catches_verifying_with_a_resident() -> None:
+    # Found live via the interactive correction feature: unlike bare
+    # "notify X" (a one-way relay, safe alone), "verify/check/confirm
+    # ... WITH my owner/the homeowner/the resident" implies a live,
+    # two-way consultation happening right now -- a presence signal on
+    # its own, no awareness-clause pairing needed. A correction attempt
+    # produced "please wait at the door until I can verify their
+    # identity with my owner" and it passed judge re-scoring untouched.
+    engine = PolicyEngine()
+    for phrase in [
+        "please wait at the door until I can verify their identity with my owner",
+        "I need to check that with the homeowner",
+        "let me confirm with the resident",
+        "I will check with my owner and get back to you",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_does_not_flag_checking_with_the_visitor() -> None:
+    # "with you" -- the visitor themselves, not a third party -- must not
+    # get swept up by the structural "with ... owner/homeowner/resident"
+    # regex above (it doesn't match "you" at all, but worth pinning).
+    styled = PolicyEngine().apply_style("I need to check with you about that")
+    assert styled == "I need to check with you about that"
+
+
 def test_apply_style_still_truncates_to_140_chars() -> None:
     styled = PolicyEngine().apply_style("x" * 200)
     assert len(styled) == 140
