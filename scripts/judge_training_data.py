@@ -98,16 +98,26 @@ def calibrate(
     scores_by_key: dict[str, list[JudgeAxisScores]],
 ) -> dict[str, float]:
     """Times `sample_entries` against every judge model and returns each
-    model's average seconds/call. The scores produced here are written
-    straight into `scores_by_key` -- real candidates, real scores, reused
-    in the main pass below rather than thrown away, so calibrating an ETA
-    costs nothing beyond the time it would have taken anyway.
+    model's average warm seconds/call. The scores produced here are
+    written straight into `scores_by_key` -- real candidates, real
+    scores, reused in the main pass below rather than thrown away, so
+    calibrating an ETA costs nothing beyond the time it would have taken
+    anyway.
+
+    The first sample's timing is deliberately excluded from the average:
+    it necessarily includes that model's one-time disk-load cost (Ollama
+    only keeps one model resident at a time), which badly inflates a
+    small sample's average -- found live on a real 7-model run, where
+    `qwen3.8:latest` (27B) calibrated at 14.29s/call but actually ran at
+    a small fraction of that once warm. Needs at least 2 samples so
+    there's something left to average after discarding the first;
+    main() enforces that.
     """
     print(f"\n=== Calibrating: {len(sample_entries)} sample prompt(s) per judge model ===")
     per_model_seconds: dict[str, float] = {}
     for judge_name, provider in judges:
-        elapsed_total = 0.0
-        for entry in sample_entries:
+        warm_elapsed_total = 0.0
+        for i, entry in enumerate(sample_entries):
             t0 = time.monotonic()
             score = score_candidate(
                 provider,
@@ -120,12 +130,17 @@ def calibrate(
                 # separately-estimated voice-check cost.
                 visitor_voice_score=9,
             )
-            elapsed_total += time.monotonic() - t0
+            elapsed = time.monotonic() - t0
+            if i > 0:  # first call pays this model's one-time load cost
+                warm_elapsed_total += elapsed
             if score is not None:
                 scores_by_key[example_key(entry)].append(score)
-        avg = elapsed_total / len(sample_entries)
+        avg = warm_elapsed_total / (len(sample_entries) - 1)
         per_model_seconds[judge_name] = avg
-        print(f"  {judge_name}: {avg:5.2f}s/call avg (loaded + {len(sample_entries)} sample(s))")
+        print(
+            f"  {judge_name}: {avg:5.2f}s/call warm avg "
+            f"(load + {len(sample_entries)} sample(s), first discarded)"
+        )
     return per_model_seconds
 
 
@@ -234,9 +249,15 @@ def main() -> int:
         "--calibration-samples",
         type=int,
         default=3,
-        help="real candidates to time against every judge before the full run, to project an ETA",
+        help=(
+            "real candidates to time against every judge before the full run, to project an "
+            "ETA. The first sample always pays that model's load cost and is excluded from the "
+            "average -- needs at least 2 (use 0 to skip calibration/ETA entirely)."
+        ),
     )
     args = parser.parse_args()
+    if args.calibration_samples not in (0,) and args.calibration_samples < 2:
+        parser.error("--calibration-samples must be 0 (skip) or at least 2")
 
     judge_names = [m.strip() for m in args.judge_models.split(",") if m.strip()]
     if len(judge_names) < 2:
@@ -301,7 +322,12 @@ def main() -> int:
 
     scores_by_key: dict[str, list[JudgeAxisScores]] = {example_key(e): [] for e in candidates}
     try:
-        calibration_count = min(max(0, args.calibration_samples), len(candidates))
+        # Fewer than 2 candidates total means there's nothing left to
+        # average after discarding the first (load-inflated) sample --
+        # skip calibration/ETA entirely rather than divide by zero.
+        calibration_count = (
+            min(args.calibration_samples, len(candidates)) if len(candidates) >= 2 else 0
+        )
         calibration_entries = candidates[:calibration_count]
         per_model_seconds = (
             calibrate(judges, calibration_entries, scores_by_key) if calibration_count else {}
