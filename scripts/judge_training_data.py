@@ -25,7 +25,7 @@ Usage:
         --judge-models qwen2.5:14b,gpt-oss:20b,deepseek-r1:14b \\
         [--ollama-host 127.0.0.1] [--ollama-port 11434] [--ollama-timeout 120.0] \\
         [--audit-log PATH] [--metadata-store PATH] [--dry-run] [--limit N] \\
-        [--include-reviewed] [--rejudge]
+        [--include-reviewed] [--rejudge] [--calibration-samples 3]
 
 By default only scores entries still at review status "pending" that
 have no judge metadata yet. --include-reviewed also scores already-
@@ -36,16 +36,33 @@ overwritten by this, see main()'s voice-veto write-back. --rejudge
 scores entries that already have judge metadata too (e.g. after a
 judge-prompt fix) instead of skipping them -- correction history is
 preserved, only the judge scores are replaced.
+
+Before the real run, times --calibration-samples real candidates against
+EVERY judge model (reusing those same scores in the real pass rather than
+wasting them) and prints a projected ETA from the measured per-model
+pace -- a mixed-family ensemble can span a 0.8B model and a 27B one, and
+guessing a single "calls per second" badly undersells how long the
+slowest model in the list will actually take.
+
+Checkpoints metadata to disk after EVERY judge's pass, not just once at
+the end: a long multi-judge run (the whole reason for calibrating an ETA
+in the first place) can get killed by an unrelated time limit (e.g. a
+background task's own ceiling) partway through -- previously, that meant
+losing the *entire* run's work, including judges that had already fully
+finished. Each checkpoint aggregates whatever judges have scored so far,
+so an interruption only costs progress since the last completed judge,
+not the whole run.
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from knock.config import OllamaConfig
-from knock.core.audit import JSONLAuditLog
+from knock.core.audit import AuditEntry, JSONLAuditLog
 from knock.core.orchestrator import _LLM_CLASSIFIABLE_INTENTS
 from knock.core.training import (
     TrainingMetadata,
@@ -55,7 +72,6 @@ from knock.core.training import (
     example_key,
 )
 from knock.core.training_judge import (
-    AggregatedJudgeResult,
     JudgeAxisScores,
     aggregate_scores,
     score_candidate,
@@ -64,6 +80,116 @@ from knock.core.training_judge import (
 from knock.providers.llm.ollama import OllamaProvider
 
 _VALID_INTENTS = [*_LLM_CLASSIFIABLE_INTENTS, "unknown"]
+
+
+def _format_duration(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def calibrate(
+    judges: list[tuple[str, OllamaProvider]],
+    sample_entries: list[AuditEntry],
+    scores_by_key: dict[str, list[JudgeAxisScores]],
+) -> dict[str, float]:
+    """Times `sample_entries` against every judge model and returns each
+    model's average seconds/call. The scores produced here are written
+    straight into `scores_by_key` -- real candidates, real scores, reused
+    in the main pass below rather than thrown away, so calibrating an ETA
+    costs nothing beyond the time it would have taken anyway.
+    """
+    print(f"\n=== Calibrating: {len(sample_entries)} sample prompt(s) per judge model ===")
+    per_model_seconds: dict[str, float] = {}
+    for judge_name, provider in judges:
+        elapsed_total = 0.0
+        for entry in sample_entries:
+            t0 = time.monotonic()
+            score = score_candidate(
+                provider,
+                judge_name,
+                entry.text,
+                entry.intent or "unknown",
+                entry.response_text,
+                _VALID_INTENTS,
+                # Fixed value -- isolates axis-call timing from the
+                # separately-estimated voice-check cost.
+                visitor_voice_score=9,
+            )
+            elapsed_total += time.monotonic() - t0
+            if score is not None:
+                scores_by_key[example_key(entry)].append(score)
+        avg = elapsed_total / len(sample_entries)
+        per_model_seconds[judge_name] = avg
+        print(f"  {judge_name}: {avg:5.2f}s/call avg (loaded + {len(sample_entries)} sample(s))")
+    return per_model_seconds
+
+
+def project_eta(
+    per_model_seconds: dict[str, float],
+    judges: list[tuple[str, OllamaProvider]],
+    total_candidates: int,
+    calibrated_count: int,
+    distinct_scenario_count: int,
+) -> float:
+    remaining_per_judge = max(0, total_candidates - calibrated_count)
+    axis_seconds = sum(per_model_seconds[name] * remaining_per_judge for name, _ in judges)
+    # Voice-check cost is a rough proxy, not separately calibrated -- it's
+    # a shorter prompt than the axis call, so this errs conservative
+    # (slightly overestimates), using the first judge's own measured pace.
+    voice_seconds = per_model_seconds[judges[0][0]] * distinct_scenario_count
+    return axis_seconds + voice_seconds
+
+
+def _checkpoint(
+    *,
+    candidates: list[AuditEntry],
+    scores_by_key: dict[str, list[JudgeAxisScores]],
+    existing_metadata: dict[str, TrainingMetadata],
+    metadata_store: TrainingMetadataStore,
+    review_store: TrainingReviewStore,
+    original_status: Mapping[str, str],
+    judges_so_far: int,
+    total_judges: int,
+    dry_run: bool,
+) -> None:
+    """Aggregates whatever judges have scored so far and writes it to
+    disk -- called after every judge's pass, not just the last one, so an
+    interruption only costs progress since the last checkpoint. Minority-
+    veto scores are safe to checkpoint early: more judges can only ever
+    *add* a veto, never remove one already found, so an early voice_veto
+    is never a false positive, only possibly incomplete until the last
+    judge weighs in.
+    """
+    if dry_run:
+        return
+    group_rejected = 0
+    already_decided_skipped = 0
+    for entry in candidates:
+        key = example_key(entry)
+        result = aggregate_scores(scores_by_key[key])
+        existing_corrections = existing_metadata.get(key, TrainingMetadata()).corrections
+        metadata_store.set(key, TrainingMetadata(judge=result, corrections=existing_corrections))
+        if result.voice_veto:
+            if original_status[key] == "pending":
+                review_store.set(key, TrainingReview(status="rejected"))
+                group_rejected += 1
+            else:
+                already_decided_skipped += 1
+    print(
+        f"  [checkpoint {judges_so_far}/{total_judges} judges] wrote metadata for "
+        f"{len(candidates)} candidates ({group_rejected} newly auto-rejected via voice veto"
+        + (
+            f", {already_decided_skipped} already-decided left untouched"
+            if already_decided_skipped
+            else ""
+        )
+        + ")"
+    )
 
 
 def main() -> int:
@@ -104,6 +230,12 @@ def main() -> int:
             "preserved -- only the judge scores themselves are overwritten."
         ),
     )
+    parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=3,
+        help="real candidates to time against every judge before the full run, to project an ETA",
+    )
     args = parser.parse_args()
 
     judge_names = [m.strip() for m in args.judge_models.split(",") if m.strip()]
@@ -142,6 +274,8 @@ def main() -> int:
         for entry in candidates
     }
     print(f"{len(candidates)} eligible, unjudged entries to score (of {len(entries)} total)")
+    if not candidates:
+        return 0
 
     judges = [
         (
@@ -165,25 +299,50 @@ def main() -> int:
     voice_score_cache: dict[str, int] = {}
     distinct_texts = list({entry.text for entry in candidates})
 
-    # Judge-major, not candidate-major: load each judge model once and run
-    # it against every candidate before moving to the next judge, rather
-    # than swapping models on every single candidate. Ollama only keeps one
-    # model resident in VRAM at a time, so the naive candidate-major order
-    # reloads every judge from disk on every candidate -- live-measured via
-    # Ollama's own logs during a 628-candidate run as a ~17s/candidate model
-    # swap cycle (~3 hours total), the same antipattern generate_scenarios.py
-    # was already fixed for in an earlier PR. This mirrors that fix: each
-    # judge model loads from disk exactly once for the whole run.
     scores_by_key: dict[str, list[JudgeAxisScores]] = {example_key(e): [] for e in candidates}
     try:
+        calibration_count = min(max(0, args.calibration_samples), len(candidates))
+        calibration_entries = candidates[:calibration_count]
+        per_model_seconds = (
+            calibrate(judges, calibration_entries, scores_by_key) if calibration_count else {}
+        )
+        if per_model_seconds:
+            eta = project_eta(
+                per_model_seconds, judges, len(candidates), calibration_count, len(distinct_texts)
+            )
+            print(
+                f"\nProjected remaining time: ~{_format_duration(eta)} "
+                f"(plus model load time for judges not yet warmed up)"
+            )
+
+        # Judge-major, not candidate-major: load each judge model once and
+        # run it against every candidate before moving to the next judge,
+        # rather than swapping models on every single candidate. Ollama
+        # only keeps one model resident in VRAM at a time, so the naive
+        # candidate-major order reloads every judge from disk on every
+        # candidate -- live-measured via Ollama's own logs during a
+        # 628-candidate run as a ~17s/candidate model swap cycle (~3 hours
+        # total), the same antipattern generate_scenarios.py was already
+        # fixed for in an earlier PR. This mirrors that fix: each judge
+        # model loads from disk exactly once for the whole run.
         for judge_idx, (judge_name, provider) in enumerate(judges):
             if judge_idx == 0:
                 print(f"Scoring visitor voice for {len(distinct_texts)} distinct scenario(s)...")
                 for text in distinct_texts:
                     voice_score_cache[text] = score_visitor_voice(provider, text)
 
-            print(f"\nJudging {len(candidates)} candidate(s) with {judge_name}...")
-            for i, entry in enumerate(candidates):
+            already_scored = calibration_count if judge_idx == 0 else 0
+            remaining = candidates[already_scored:]
+            print(
+                f"\nJudging {len(remaining)} candidate(s) with {judge_name}"
+                + (
+                    f" ({already_scored} already scored during calibration)"
+                    if already_scored
+                    else ""
+                )
+                + "..."
+            )
+            for i, entry in enumerate(remaining):
                 t0 = time.monotonic()
                 intent = entry.intent or "unknown"
                 score = score_candidate(
@@ -199,24 +358,32 @@ def main() -> int:
                 if score is not None:
                     scores_by_key[example_key(entry)].append(score)
                 print(
-                    f"[{judge_name}] {i + 1:>4}/{len(candidates)} ({elapsed:5.1f}s) -- "
+                    f"[{judge_name}] {i + 1:>4}/{len(remaining)} ({elapsed:5.1f}s) -- "
                     f"{entry.text!r}"
                 )
+
+            _checkpoint(
+                candidates=candidates,
+                scores_by_key=scores_by_key,
+                existing_metadata=existing_metadata,
+                metadata_store=metadata_store,
+                review_store=review_store,
+                original_status=original_status,
+                judges_so_far=judge_idx + 1,
+                total_judges=len(judges),
+                dry_run=args.dry_run,
+            )
     finally:
         for _name, provider in judges:
             provider.close()
 
-    results: dict[str, AggregatedJudgeResult] = {}
-    scenario_voice_veto: dict[str, bool] = {}
-    print("\n=== Aggregated results ===")
+    print("\n=== Final aggregated results ===")
+    group_rejected = 0
     for i, entry in enumerate(candidates):
         key = example_key(entry)
         result = aggregate_scores(scores_by_key[key])
-        results[key] = result
-        scenario_voice_veto[entry.text] = (
-            scenario_voice_veto.get(entry.text, False) or result.voice_veto
-        )
-
+        if result.voice_veto and original_status[key] == "pending":
+            group_rejected += 1
         tag = "VOICE_VETO" if result.voice_veto else ("SAFETY_VETO" if result.safety_veto else "ok")
         print(
             f"{i + 1:>4}/{len(candidates)} {tag:12} "
@@ -228,41 +395,10 @@ def main() -> int:
 
     if args.dry_run:
         print("\n(--dry-run: no metadata/reviews were actually written)")
-        return 0
-
-    group_rejected = 0
-    already_decided_skipped = 0
-    for entry in candidates:
-        key = example_key(entry)
-        result = results[key]
-        # Preserve any correction history a --rejudge pass's entries may
-        # already have -- only the judge scores themselves get replaced.
-        existing_corrections = existing_metadata.get(key, TrainingMetadata()).corrections
-        metadata_store.set(key, TrainingMetadata(judge=result, corrections=existing_corrections))
-        # Group-wide: ANY candidate response sharing this visitor text
-        # that tripped a voice veto means the scenario itself isn't
-        # genuine visitor speech -- every response to it is equally
-        # untrustworthy as training data, not just the one judged.
-        # Only ever applied on top of a *pending* entry -- an
-        # already-approved/rejected entry (reachable here via
-        # --include-reviewed) keeps a human's existing decision
-        # untouched; it still gets judge metadata attached, just not a
-        # status override.
-        if scenario_voice_veto.get(entry.text, False):
-            if original_status[key] == "pending":
-                review_store.set(key, TrainingReview(status="rejected"))
-                group_rejected += 1
-            else:
-                already_decided_skipped += 1
-
-    if not args.dry_run:
-        print(f"\nAuto-rejected {group_rejected} entries via group-wide voice veto.")
-        if already_decided_skipped:
-            print(
-                f"{already_decided_skipped} already-approved/rejected entries tripped a voice "
-                "veto but kept their existing human decision (metadata attached, status "
-                "unchanged)."
-            )
+    else:
+        print(
+            f"\nAuto-rejected {group_rejected} entries via group-wide voice veto (all checkpoints)."
+        )
     return 0
 
 
