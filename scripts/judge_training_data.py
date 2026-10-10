@@ -25,14 +25,17 @@ Usage:
         --judge-models qwen2.5:14b,gpt-oss:20b,deepseek-r1:14b \\
         [--ollama-host 127.0.0.1] [--ollama-port 11434] [--ollama-timeout 120.0] \\
         [--audit-log PATH] [--metadata-store PATH] [--dry-run] [--limit N] \\
-        [--include-reviewed]
+        [--include-reviewed] [--rejudge]
 
-By default only scores entries still at review status "pending".
---include-reviewed also scores already-approved/rejected entries that
-predate this pipeline (so they become eligible for DPO pair
-construction, which needs judge metadata regardless of review status)
--- a human's existing decision is never overwritten by this, see
-main()'s voice-veto write-back.
+By default only scores entries still at review status "pending" that
+have no judge metadata yet. --include-reviewed also scores already-
+approved/rejected entries that predate this pipeline (so they become
+eligible for DPO pair construction, which needs judge metadata
+regardless of review status) -- a human's existing decision is never
+overwritten by this, see main()'s voice-veto write-back. --rejudge
+scores entries that already have judge metadata too (e.g. after a
+judge-prompt fix) instead of skipping them -- correction history is
+preserved, only the judge scores are replaced.
 """
 
 from __future__ import annotations
@@ -92,6 +95,15 @@ def main() -> int:
             "write-back below); only the metadata gets attached."
         ),
     )
+    parser.add_argument(
+        "--rejudge",
+        action="store_true",
+        help=(
+            "re-score entries that already have judge metadata too (e.g. after a judge-prompt "
+            "fix) instead of skipping anything already judged. Existing correction history is "
+            "preserved -- only the judge scores themselves are overwritten."
+        ),
+    )
     args = parser.parse_args()
 
     judge_names = [m.strip() for m in args.judge_models.split(",") if m.strip()]
@@ -118,7 +130,7 @@ def main() -> int:
         for entry in entries
         if entry.intent is not None
         and reviews.get(example_key(entry), TrainingReview()).status in eligible_statuses
-        and example_key(entry) not in existing_metadata
+        and (args.rejudge or example_key(entry) not in existing_metadata)
     ]
     if args.limit is not None:
         candidates = candidates[: args.limit]
@@ -223,7 +235,10 @@ def main() -> int:
     for entry in candidates:
         key = example_key(entry)
         result = results[key]
-        metadata_store.set(key, TrainingMetadata(judge=result))
+        # Preserve any correction history a --rejudge pass's entries may
+        # already have -- only the judge scores themselves get replaced.
+        existing_corrections = existing_metadata.get(key, TrainingMetadata()).corrections
+        metadata_store.set(key, TrainingMetadata(judge=result, corrections=existing_corrections))
         # Group-wide: ANY candidate response sharing this visitor text
         # that tripped a voice veto means the scenario itself isn't
         # genuine visitor speech -- every response to it is equally
