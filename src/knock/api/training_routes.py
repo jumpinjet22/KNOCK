@@ -29,7 +29,8 @@ from knock.core.training import (
     export_training_jsonl,
     training_mode_enabled,
 )
-from knock.core.training_correction import correct_response
+from knock.core.training_correction import CorrectionAttempt, correct_response
+from knock.core.training_judge import aggregate_scores, score_candidate
 from knock.providers.llm.ollama import OllamaProvider
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -276,6 +277,12 @@ def set_training_review(
 
 class SuggestCorrectionRequest(BaseModel):
     corrector_model: str
+    # 2+ models, same requirement as the batch judge/correction scripts --
+    # a single judge isn't a real ensemble. Re-judging is not optional
+    # here: an unverified correction is worse than no correction, since
+    # it'd otherwise look trustworthy in the edit box without actually
+    # having cleared the bar a fresh candidate has to.
+    judge_models: list[str]
     current_response: str
     # The reviewer's own instruction for the rewrite (e.g. "make this
     # shorter", "don't mention the dog") -- the Training page's comment
@@ -289,6 +296,8 @@ class SuggestCorrectionRequest(BaseModel):
 
 class SuggestCorrectionResponse(BaseModel):
     corrected_response: str
+    metadata: TrainingMetadata
+    accepted: bool
 
 
 @router.post("/queue/{key}/suggest-correction", response_model=SuggestCorrectionResponse)
@@ -300,20 +309,31 @@ def suggest_correction(
     audit_log: AuditLogDep,
     metadata_store: MetadataStoreDep,
 ) -> SuggestCorrectionResponse:
-    """On-demand, single-shot correction for one entry, triggered from the
-    Training page -- a lighter-weight interactive counterpart to
-    scripts/correct_training_data.py's batch flow (one corrector call, no
-    re-judging, no retry loop). Quotes the judge's own flagged reason back
-    to the corrector the same way the batch script does, if this entry
-    has been judged, plus the reviewer's own `human_note` instruction if
-    one was given -- see `correct_response`'s docstring for how the two
-    combine.
+    """On-demand correction for one entry, triggered from the Training
+    page -- an interactive counterpart to scripts/correct_training_data.py's
+    batch flow: one corrector call, then re-judged through the full judge
+    ensemble (not a cheaper check) before being trusted, same bar a fresh
+    candidate has to clear. No retry loop, unlike the batch script -- a
+    human is driving this one call at a time and can just click again
+    (with a refined `human_note`) if the first attempt doesn't pass.
 
-    Writes nothing itself: the corrected text is only returned for the
-    reviewer's edit box to show, same as typing a correction by hand.
-    Only an explicit Approve/Reject afterward actually saves anything --
-    this never bypasses that gate.
+    Quotes the judge's own flagged reason back to the corrector the same
+    way the batch script does, if this entry has been judged, plus the
+    reviewer's own `human_note` if one was given.
+
+    Writes the judge/correction *metadata* immediately (consistent with
+    every other judging path in this project -- metadata always reflects
+    the latest scoring, regardless of human review status). It does NOT
+    touch review status or response_override: the corrected text is only
+    returned for the reviewer's edit box to show, same as typing a
+    correction by hand. An explicit Approve/Reject still has to follow
+    before anything is actually used as training data.
     """
+    if len(body.judge_models) < 2:
+        raise HTTPException(
+            status_code=400, detail="judge_models needs at least 2 models for a real ensemble"
+        )
+
     entry = next(
         (e for e in audit_log.recent(limit=100_000) if example_key(e) == key),
         None,
@@ -321,31 +341,69 @@ def suggest_correction(
     if entry is None:
         raise HTTPException(status_code=404, detail="No audit entry with that key")
 
-    meta = metadata_store.all().get(key)
-    judge_reason = (
-        meta.judge.per_judge[0].reason if meta and meta.judge and meta.judge.per_judge else ""
-    )
+    meta = metadata_store.all().get(key) or TrainingMetadata()
+    intent = entry.intent or "unknown"
+    judge_reason = meta.judge.per_judge[0].reason if meta.judge and meta.judge.per_judge else ""
 
-    provider = OllamaProvider(
-        config=OllamaConfig(
-            host=body.ollama_host,
-            port=body.ollama_port,
-            model=body.corrector_model,
-            timeout=body.ollama_timeout,
+    def make_provider(model: str) -> OllamaProvider:
+        return OllamaProvider(
+            config=OllamaConfig(
+                host=body.ollama_host,
+                port=body.ollama_port,
+                model=model,
+                timeout=body.ollama_timeout,
+            )
         )
-    )
+
+    corrector = make_provider(body.corrector_model)
+    judges = [(name, make_provider(name)) for name in body.judge_models]
     try:
         corrected = correct_response(
-            provider,
+            corrector,
             entry.text,
-            entry.intent or "unknown",
+            intent,
             body.current_response,
             judge_reason,
             human_note=body.human_note,
         )
+        scores = [
+            score
+            for judge_name, judge_provider in judges
+            if (
+                score := score_candidate(
+                    judge_provider,
+                    judge_name,
+                    entry.text,
+                    intent,
+                    corrected,
+                    sorted(VALID_TRAINING_INTENTS),
+                )
+            )
+            is not None
+        ]
     finally:
-        provider.close()
-    return SuggestCorrectionResponse(corrected_response=corrected)
+        corrector.close()
+        for _name, judge_provider in judges:
+            judge_provider.close()
+
+    result = aggregate_scores(scores)
+    accepted = not result.voice_veto and not result.safety_veto
+    meta.corrections = [
+        *meta.corrections,
+        CorrectionAttempt(
+            attempt=len(meta.corrections) + 1,
+            original_response=body.current_response,
+            corrected_response=corrected,
+            judge_reason=judge_reason or (body.human_note or ""),
+            rejudged=result,
+            accepted=accepted,
+        ),
+    ]
+    if accepted:
+        meta.judge = result
+    metadata_store.set(key, meta)
+
+    return SuggestCorrectionResponse(corrected_response=corrected, metadata=meta, accepted=accepted)
 
 
 @router.get("/export")

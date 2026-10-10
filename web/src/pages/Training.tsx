@@ -300,6 +300,7 @@ export function Training() {
       // a different status) -- drop it from the current page locally
       // rather than wait on a refetch, then reconcile counts/total from
       // the server so they stay authoritative.
+      setLastCorrectionAccepted(null)
       const remaining = items.filter((i) => i.key !== item.key)
       setItems(remaining)
       setTotal((t) => Math.max(0, t - 1))
@@ -324,22 +325,44 @@ export function Training() {
   }
 
   const [correctorModel, setCorrectorModel] = useState("qwen3.5:9b")
+  const [judgeModels, setJudgeModels] = useState("qwen2.5:14b,gemma2:9b,llama3.1:8b")
   const [correctingKey, setCorrectingKey] = useState<string | null>(null)
+  const [lastCorrectionAccepted, setLastCorrectionAccepted] = useState<boolean | null>(null)
 
   async function suggestCorrection(item: TrainingQueueItem) {
     const edit = editFor(item)
+    const judgeModelList = judgeModels
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean)
+    if (judgeModelList.length < 2) {
+      setError("Need at least 2 comma-separated judge models to re-judge a correction.")
+      return
+    }
     setCorrectingKey(item.key)
+    setLastCorrectionAccepted(null)
     setError(null)
     try {
-      const { corrected_response } = await trainingApi.suggestCorrection(item.key, {
-        corrector_model: correctorModel,
-        current_response: edit.response,
-        human_note: edit.comment || null,
-      })
+      const { corrected_response, metadata, accepted } = await trainingApi.suggestCorrection(
+        item.key,
+        {
+          corrector_model: correctorModel,
+          judge_models: judgeModelList,
+          current_response: edit.response,
+          human_note: edit.comment || null,
+        },
+      )
       setEdits((current) => ({
         ...current,
         [item.key]: { ...edit, response: corrected_response },
       }))
+      // Re-judged metadata (updated scores, new correction-attempt record)
+      // is already persisted server-side -- reflect it locally too so the
+      // judge panel/correction history update immediately, no refetch.
+      setItems((current) =>
+        current.map((i) => (i.key === item.key ? { ...i, metadata } : i)),
+      )
+      setLastCorrectionAccepted(accepted)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -440,8 +463,11 @@ export function Training() {
             setSortMode={setSortMode}
             correctorModel={correctorModel}
             setCorrectorModel={setCorrectorModel}
+            judgeModels={judgeModels}
+            setJudgeModels={setJudgeModels}
             correctingKey={correctingKey}
             suggestCorrection={suggestCorrection}
+            lastCorrectionAccepted={lastCorrectionAccepted}
           />
         ) : items.length === 0 ? (
           <p className="text-sm text-steel">No {filter} entries yet.</p>
@@ -523,8 +549,11 @@ function PendingTriage({
   setSortMode,
   correctorModel,
   setCorrectorModel,
+  judgeModels,
+  setJudgeModels,
   correctingKey,
   suggestCorrection,
+  lastCorrectionAccepted,
 }: {
   current: TrainingQueueItem | null
   totalRemaining: number
@@ -540,8 +569,11 @@ function PendingTriage({
   setSortMode: Dispatch<SetStateAction<"newest" | "needs_attention_first">>
   correctorModel: string
   setCorrectorModel: Dispatch<SetStateAction<string>>
+  judgeModels: string
+  setJudgeModels: Dispatch<SetStateAction<string>>
   correctingKey: string | null
   suggestCorrection: (item: TrainingQueueItem) => Promise<void>
+  lastCorrectionAccepted: boolean | null
 }) {
   const sortToggle = (
     <label className="flex items-center gap-1.5 text-xs text-steel">
@@ -634,7 +666,14 @@ function PendingTriage({
             value={correctorModel}
             onChange={(e) => setCorrectorModel(e.target.value)}
             placeholder="corrector model, e.g. qwen3.5:9b"
-            className={`${inputClass} w-48 py-1.5 text-xs`}
+            className={`${inputClass} w-44 py-1.5 text-xs`}
+          />
+          <input
+            type="text"
+            value={judgeModels}
+            onChange={(e) => setJudgeModels(e.target.value)}
+            placeholder="judge models, comma-separated (2+)"
+            className={`${inputClass} w-64 py-1.5 text-xs`}
           />
           <button
             type="button"
@@ -642,12 +681,25 @@ function PendingTriage({
             onClick={() => void suggestCorrection(current)}
             className={`${buttonClass} border border-steel/30 text-ink hover:border-porch dark:text-mist`}
           >
-            {correcting ? "Correcting…" : "Send to correction model"}
+            {correcting ? "Correcting & re-judging…" : "Send to correction model"}
           </button>
-          <span className="text-xs text-steel">
-            Rewrites the Response box above using the correction note -- review before approving.
-          </span>
+          {lastCorrectionAccepted !== null && (
+            <span
+              className={`rounded px-2 py-0.5 text-xs font-medium ${
+                lastCorrectionAccepted
+                  ? "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300"
+                  : "bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300"
+              }`}
+            >
+              {lastCorrectionAccepted ? "Passed re-judging" : "Still flagged after correction"}
+            </span>
+          )}
         </div>
+        <p className="mt-1.5 text-xs text-steel">
+          Rewrites the Response box above, then re-judges it with the full ensemble (same bar a
+          fresh candidate has to clear) before you decide -- review the updated judge panel above,
+          then Approve/Reject yourself either way.
+        </p>
       </div>
     </div>
   )

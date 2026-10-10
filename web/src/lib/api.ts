@@ -465,12 +465,17 @@ export const trainingApi = {
   // until the reviewer explicitly Approves/Rejects afterward.
   suggestCorrection: (
     key: string,
-    body: { corrector_model: string; current_response: string; human_note?: string | null },
+    body: {
+      corrector_model: string
+      judge_models: string[]
+      current_response: string
+      human_note?: string | null
+    },
   ) =>
-    apiFetch<{ corrected_response: string }>(`/api/training/queue/${key}/suggest-correction`, {
-      method: "POST",
-      body,
-    }),
+    apiFetch<{ corrected_response: string; metadata: TrainingMetadata; accepted: boolean }>(
+      `/api/training/queue/${key}/suggest-correction`,
+      { method: "POST", body },
+    ),
   exportUrl: "/api/training/export",
   exportDpoUrl: "/api/training/export/dpo",
 }
