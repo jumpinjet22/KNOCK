@@ -18,6 +18,11 @@ left `pending` with its full correction history recorded in
 TrainingMetadata -- a human reviewer sees what was tried and why it
 didn't pass, rather than it silently disappearing.
 
+Checkpoints metadata to disk after every attempt round, not just once at
+the end -- a run this long (corrector + full judge ensemble per entry
+per attempt) can get killed partway through, and without per-round
+checkpointing that would lose every attempt made so far.
+
 Not part of the automated test suite -- a manual, hands-on dev tool, like
 scripts/smoke_test_providers.py.
 
@@ -191,6 +196,7 @@ def main() -> int:
                         scores_by_state[id(s)].append(score)
                     print(f"  {i + 1:>4}/{len(pending)} -- {s.entry.text!r}")
 
+            round_accepted = 0
             for s in pending:
                 corrected = corrected_by_state[id(s)]
                 result = aggregate_scores(scores_by_state[id(s)])
@@ -208,11 +214,30 @@ def main() -> int:
                 if accepted:
                     s.accepted = True
                     s.done = True
+                    round_accepted += 1
                 else:
                     s.current_response = corrected
                     s.current_reason = combined_judge_reasons(result) or s.current_reason
                     if attempt_num == args.max_attempts:
                         s.done = True
+
+            # Written after every round, not just once at the end -- a
+            # correction run can be as long as the judge ensemble run
+            # itself (corrector + full re-judge per entry per attempt),
+            # and without this an interruption mid-run would lose every
+            # attempt made so far, the same class of bug fixed in
+            # judge_training_data.py's checkpointing.
+            if not args.dry_run:
+                for s in pending:
+                    key = example_key(s.entry)
+                    s.meta.corrections = s.attempts
+                    if s.accepted:
+                        s.meta.judge = s.attempts[-1].rejudged
+                    metadata_store.set(key, s.meta)
+                print(
+                    f"  [checkpoint attempt {attempt_num}/{args.max_attempts}] wrote metadata "
+                    f"for {len(pending)} entries ({round_accepted} accepted this round)"
+                )
     finally:
         corrector.close()
         for _name, provider in judges:
@@ -226,13 +251,6 @@ def main() -> int:
         print(
             f"{i + 1:>4}/{len(states)} {tag} after {len(s.attempts)} attempt(s) -- {s.entry.text!r}"
         )
-        if args.dry_run:
-            continue
-        key = example_key(s.entry)
-        s.meta.corrections = s.attempts
-        if s.accepted and s.attempts:
-            s.meta.judge = s.attempts[-1].rejudged
-        metadata_store.set(key, s.meta)
 
     if args.dry_run:
         print("\n(--dry-run: no metadata was actually written)")
