@@ -189,12 +189,23 @@ def _checkpoint(
     *add* a veto, never remove one already found, so an early voice_veto
     is never a false positive, only possibly incomplete until the last
     judge weighs in.
+
+    Candidates with an empty score list are skipped entirely rather than
+    aggregated: aggregate_scores([]) deliberately fails closed (both
+    vetoes True) for a candidate every judge has actually failed/
+    abstained on, but during a MID-pass checkpoint, "not yet scored in
+    this pass" also looks like an empty list -- aggregating those would
+    wrongly veto candidates the current judge simply hasn't reached yet.
+    Confirmed live: the first mid-pass checkpoint of a 7-judge run wrote
+    bogus voice_veto rejections for ~800 not-yet-scored candidates before
+    this guard was added.
     """
     if dry_run:
         return
     group_rejected = 0
     already_decided_skipped = 0
-    for entry in candidates:
+    scored_candidates = [e for e in candidates if scores_by_key[example_key(e)]]
+    for entry in scored_candidates:
         key = example_key(entry)
         result = aggregate_scores(scores_by_key[key])
         existing_corrections = existing_metadata.get(key, TrainingMetadata()).corrections
@@ -207,7 +218,8 @@ def _checkpoint(
                 already_decided_skipped += 1
     print(
         f"  [checkpoint {judges_so_far}/{total_judges} judges{progress_note}] wrote metadata for "
-        f"{len(candidates)} candidates ({group_rejected} newly auto-rejected via voice veto"
+        f"{len(scored_candidates)}/{len(candidates)} candidates "
+        f"({group_rejected} newly auto-rejected via voice veto"
         + (
             f", {already_decided_skipped} already-decided left untouched"
             if already_decided_skipped
