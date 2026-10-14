@@ -1,3 +1,6 @@
+import base64
+import json
+
 import httpx
 import pytest
 import respx
@@ -203,3 +206,76 @@ def test_chat_with_tools_sends_messages_and_tools_in_the_request_body() -> None:
     sent_body = route.calls.last.request.content
     assert b"a very specific visitor line" in sent_body
     assert b"classify_intent" in sent_body
+
+
+# -- keep_alive / warm-up / images -----------------------------------------------
+
+
+@respx.mock
+def test_keep_alive_is_sent_only_when_configured() -> None:
+    unset = OllamaConfig()
+    generate = respx.post(f"{unset.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "ok"})
+    )
+    chat = respx.post(f"{unset.base_url}/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": "ok"}})
+    )
+
+    OllamaProvider(config=unset).generate("hi")
+    OllamaProvider(config=unset).chat_with_tools([{"role": "user", "content": "hi"}], [])
+    assert "keep_alive" not in json.loads(generate.calls.last.request.content)
+    assert "keep_alive" not in json.loads(chat.calls.last.request.content)
+
+    pinned = OllamaConfig(keep_alive="-1")
+    OllamaProvider(config=pinned).generate("hi")
+    OllamaProvider(config=pinned).chat_with_tools([{"role": "user", "content": "hi"}], [])
+    assert json.loads(generate.calls.last.request.content)["keep_alive"] == -1
+    assert json.loads(chat.calls.last.request.content)["keep_alive"] == -1
+
+
+@respx.mock
+def test_generate_with_images_sends_base64_images() -> None:
+    config = OllamaConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "Thanks!"})
+    )
+
+    result = OllamaProvider(config=config).generate_with_images("hi", [b"fake-jpeg"])
+
+    body = json.loads(route.calls.last.request.content)
+    assert result == "Thanks!"
+    assert body["images"] == [base64.b64encode(b"fake-jpeg").decode("ascii")]
+
+
+@respx.mock
+def test_plain_generate_sends_no_images_field() -> None:
+    config = OllamaConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "ok"})
+    )
+
+    OllamaProvider(config=config).generate("hi")
+
+    assert "images" not in json.loads(route.calls.last.request.content)
+
+
+@respx.mock
+def test_warm_up_sends_an_empty_load_request() -> None:
+    config = OllamaConfig(model="qwen3.5:9b", keep_alive="-1")
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"done": True})
+    )
+
+    assert OllamaProvider(config=config).warm_up() is True
+    assert json.loads(route.calls.last.request.content) == {
+        "model": "qwen3.5:9b",
+        "keep_alive": -1,
+    }
+
+
+@respx.mock
+def test_warm_up_failure_is_reported_not_raised() -> None:
+    config = OllamaConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(side_effect=httpx.ConnectError("refused"))
+
+    assert OllamaProvider(config=config).warm_up() is False

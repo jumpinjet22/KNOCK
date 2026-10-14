@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 
 from knock.core.audit import AuditEntry, JSONLAuditLog
+from knock.core.scene import SceneContext, SceneObservation
 from knock.core.training import (
     TrainingMetadata,
     TrainingMetadataStore,
@@ -299,3 +300,27 @@ def test_export_dpo_pairs_skips_entries_with_no_judge_metadata(tmp_path) -> None
     # No metadata_store.set() call -- this entry was never judged.
 
     assert export_dpo_pairs_jsonl(audit_log, review_store, metadata_store) == ""
+
+
+def test_training_records_carry_the_scene_the_model_saw() -> None:
+    # Fine-tuning has to see the same camera-observations block production
+    # prompts carry, or a tuned model never learns to use it.
+    entry = _entry(text="Hi there", intent="delivery").model_copy(
+        update={
+            "scene": SceneContext(observation=SceneObservation(uniform_or_logo="UPS")),
+        }
+    )
+
+    records = build_training_records(entry, TrainingReview(status="approved"))
+
+    assert len(records) == 2
+    for record in records:
+        assert '- uniform/logo: "UPS"' in record.instruction
+        assert "NOT something the visitor said" in record.instruction
+
+
+def test_training_records_without_scene_are_unchanged() -> None:
+    records = build_training_records(_entry(), TrainingReview(status="approved"))
+
+    assert records
+    assert all("Camera observations" not in r.instruction for r in records)

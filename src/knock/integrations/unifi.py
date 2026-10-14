@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import functools
 import io
 import logging
 import re
@@ -70,6 +71,7 @@ from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
+from knock.core.scene import SceneContext, SceneObservation
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.snapshot_store import SnapshotStore
 from knock.core.state import SessionState
@@ -93,7 +95,7 @@ from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.base import SynthesizedAudio, TTSProvider
 from knock.providers.tts.kokoro import KokoroTTSProvider
-from knock.providers.vision.base import VisionProvider
+from knock.providers.vision.base import VisionProvider, observe_scene
 from knock.providers.vision.ollama import OllamaVisionProvider
 
 logger = logging.getLogger(__name__)
@@ -138,6 +140,27 @@ _ERROR_SOUND = "error.wav"
 _ON_MY_WAY_PHRASE = "Good news, the homeowner says they're on their way."
 _TURN_AWAY_PHRASE = "I'm sorry, but the homeowner isn't able to accept this right now."
 _COMING_TO_DOOR_PHRASE = "Good news, they'll be right at the door."
+
+# Upper bound on how long a reply waits for the scene capture (snapshot +
+# vision) that was started in parallel with the greeting/listen window. In
+# the common case it finished long ago; this only matters when the vision
+# server is slow or down, and then the reply goes out without it rather
+# than leaving the visitor standing there.
+_SCENE_WAIT_SECONDS = 15.0
+
+
+def _merge_observations(main: SceneObservation, extra: SceneObservation) -> SceneObservation:
+    """Fold the package camera's view into the main camera's observation:
+    the package lens is what actually sees a box on the porch, the main
+    lens is what sees the person, so each contributes what it's good at.
+    """
+    carrying = list(dict.fromkeys([*main.carrying, *extra.carrying]))
+    package_visible = (
+        True
+        if main.package_visible or extra.package_visible
+        else (main.package_visible if main.package_visible is not None else extra.package_visible)
+    )
+    return main.model_copy(update={"carrying": carrying, "package_visible": package_visible})
 
 
 def _default_session_id(device_id: str) -> str:
@@ -189,11 +212,54 @@ def _write_wav(path: Path, audio: SynthesizedAudio) -> None:
         wav_file.writeframes(audio.audio)
 
 
+# How much loud audio counts as "the visitor has started talking" -- so a
+# single short noise (a car door, the tail of the chime) doesn't arm
+# end-of-speech detection and cut the listen window short before the
+# visitor has said anything.
+_MIN_SPEECH_SECONDS = 0.25
+
+
+class _EndOfSpeechDetector:
+    """Decides when a visitor has finished talking: at least
+    `_MIN_SPEECH_SECONDS` of audio louder than `threshold` (speech),
+    followed by `end_silence_seconds` of continuous audio below it. Counts
+    audio time from the samples themselves rather than wall-clock time, so
+    a bursty RTSP delivery can't cut a pause short.
+    """
+
+    def __init__(self, sample_rate: int, threshold: float, end_silence_seconds: float) -> None:
+        self._sample_rate = sample_rate
+        self._threshold = threshold
+        self._end_silence_seconds = end_silence_seconds
+        self._speech_seconds = 0.0
+        self._trailing_silence = 0.0
+
+    def feed(self, pcm: bytes) -> bool:
+        """Feed one chunk of 16-bit mono PCM; True once speech has ended."""
+        if self._end_silence_seconds <= 0 or not pcm:
+            return False
+        chunk_seconds = (len(pcm) // 2) / self._sample_rate
+        if _rms(pcm) >= self._threshold:
+            self._speech_seconds += chunk_seconds
+            self._trailing_silence = 0.0
+        else:
+            self._trailing_silence += chunk_seconds
+        heard_speech = self._speech_seconds >= _MIN_SPEECH_SECONDS
+        return heard_speech and self._trailing_silence >= self._end_silence_seconds
+
+
 def _capture_rtsp_audio(
-    rtsp_url: str, duration: float, sample_rate: int, verify_ssl: bool = True
+    rtsp_url: str,
+    duration: float,
+    sample_rate: int,
+    verify_ssl: bool = True,
+    *,
+    end_silence_seconds: float = 0.0,
+    silence_rms_threshold: float = 60.0,
 ) -> bytes:
     """Blocking: decode up to `duration` seconds of mono 16-bit PCM from an
-    RTSP(S) stream's audio track.
+    RTSP(S) stream's audio track -- or less, once `_EndOfSpeechDetector`
+    decides the visitor has finished talking (`end_silence_seconds` > 0).
 
     Runs in a worker thread (via `asyncio.to_thread`) since PyAV's decode
     loop is itself blocking -- same reasoning `uiprotect`'s own
@@ -202,6 +268,7 @@ def _capture_rtsp_audio(
     resampler = av.AudioResampler(format="s16", layout="mono", rate=sample_rate)
     chunks: list[bytes] = []
     start = time.monotonic()
+    end_of_speech = _EndOfSpeechDetector(sample_rate, silence_rms_threshold, end_silence_seconds)
 
     options = {"rtsp_transport": "tcp"}
     if not verify_ssl:
@@ -220,9 +287,12 @@ def _capture_rtsp_audio(
         audio_stream = container.streams.audio[0]
 
         for frame in container.decode(audio_stream):
+            speech_ended = False
             for resampled in resampler.resample(frame):
-                chunks.append(bytes(resampled.planes[0]))
-            if time.monotonic() - start >= duration:
+                pcm = bytes(resampled.planes[0])
+                chunks.append(pcm)
+                speech_ended = end_of_speech.feed(pcm) or speech_ended
+            if speech_ended or time.monotonic() - start >= duration:
                 break
 
     return b"".join(chunks)
@@ -260,7 +330,7 @@ class UnifiBridge:
         stt_provider: STTProvider | None = None,
         client: ProtectApiClient | None = None,
         talkback_stream_factory: Any = TalkbackStream,
-        rtsp_audio_capture: Callable[[str, float, int, bool], bytes] = _capture_rtsp_audio,
+        rtsp_audio_capture: Callable[[str, float, int, bool], bytes] | None = None,
         ha_notifier: HomeAssistantNotifier | None = None,
         snapshot_store: SnapshotStore | None = None,
         public_base_url: str | None = None,
@@ -293,7 +363,11 @@ class UnifiBridge:
             verify_ssl=self.config.verify_ssl,
         )
         self._talkback_stream_factory = talkback_stream_factory
-        self._rtsp_audio_capture = rtsp_audio_capture
+        self._rtsp_audio_capture = rtsp_audio_capture or functools.partial(
+            _capture_rtsp_audio,
+            end_silence_seconds=self.config.end_silence_seconds,
+            silence_rms_threshold=self.config.silence_rms_threshold,
+        )
 
     # -- pure logic: directly testable without a real console -----------------
 
@@ -449,6 +523,65 @@ class UnifiBridge:
         if self.tts_provider is not None:
             await self.speak_to_visitor(device_id, summary)
 
+    def _detector_scene(self, event: _ProtectEventLike) -> SceneContext:
+        """The scene context UniFi's own detector gives for free -- smart
+        detect types (person/package/vehicle) -- with no vision model
+        involved at all.
+        """
+        return SceneContext(
+            camera=event.device_id,
+            detected_labels=[str(t) for t in event.smart_detect_types],
+            captured_at=datetime.now(UTC),
+        )
+
+    async def _capture_scene(self, event: _ProtectEventLike) -> tuple[SceneContext, bytes | None]:
+        """Snapshot + structured vision observation for this event's camera,
+        plus the raw snapshot (for the opt-in send-image-to-brain path).
+
+        Best-effort like every other vision path here: no snapshot, or any
+        snapshot/vision failure, still returns the detector-only scene.
+        When UniFi's own detector already saw a package, the doorbell's
+        package camera is looked through too and merged in.
+        """
+        scene = self._detector_scene(event)
+        if self.vision_provider is None:
+            return scene, None
+        vision_provider = self.vision_provider
+        try:
+            snapshot = await self.client.get_public_api_camera_snapshot(event.device_id)
+            if snapshot is None:
+                return scene, None
+            observation = await asyncio.to_thread(observe_scene, vision_provider, snapshot)
+            if "package" in scene.detected_labels:
+                try:
+                    package_snapshot = await self.client.get_public_api_camera_snapshot(
+                        event.device_id, package=True
+                    )
+                    if package_snapshot is not None:
+                        package_observation = await asyncio.to_thread(
+                            observe_scene, vision_provider, package_snapshot
+                        )
+                        observation = _merge_observations(observation, package_observation)
+                except Exception as exc:  # noqa: BLE001 - package view is a bonus
+                    logger.info(
+                        "Package-camera observation failed for %s: %s", event.device_id, exc
+                    )
+            return scene.model_copy(update={"observation": observation}), snapshot
+        except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
+            logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
+            return scene, None
+
+    async def _await_scene(
+        self, task: asyncio.Task[tuple[SceneContext, bytes | None]], event: _ProtectEventLike
+    ) -> tuple[SceneContext, bytes | None]:
+        try:
+            return await asyncio.wait_for(task, timeout=_SCENE_WAIT_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - includes TimeoutError
+            logger.warning(
+                "Scene capture for %s not ready, replying without it: %s", event.device_id, exc
+            )
+            return self._detector_scene(event), None
+
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if not self.should_trigger(event):
             return None
@@ -468,6 +601,13 @@ class UnifiBridge:
         # text-only deployment (no tts_provider) still needs the orchestrator
         # to put it in the returned text, since nothing else ever said it.
         greeted_aloud = is_first_turn and self.tts_provider is not None
+
+        # Started now, not after listening: the snapshot + vision call run
+        # while the greeting plays and the visitor talks, so by the time
+        # there's a transcript to answer the scene is (usually) already
+        # there -- vision adds ~nothing to the reply delay instead of its
+        # full duration.
+        scene_task = asyncio.create_task(self._capture_scene(event))
 
         # A real doorbell intercom answers before waiting for the visitor to
         # speak into silence -- greet first (once per session), *then*
@@ -489,28 +629,17 @@ class UnifiBridge:
                 # so it's handled entirely here rather than through
                 # rules.json/PolicyEngine.
                 if is_systems_check_trigger(transcript):
+                    scene_task.cancel()
                     await self._run_systems_check_and_reply(event.device_id)
                     return None
             if self.tts_provider is not None:
                 await self._play_thinking_tone(event.device_id)
 
-        if self.vision_provider is not None:
-            try:
-                snapshot = await self.client.get_public_api_camera_snapshot(event.device_id)
-                if snapshot is not None:
-                    description = await asyncio.to_thread(self.vision_provider.describe, snapshot)
-                    # A bare ":" join (e.g. "Food delivery.: a man holding a
-                    # bag...") reads to the LLM like a label/definition pair
-                    # rather than "the same visitor, described two ways" --
-                    # found live in production: the model sometimes responded
-                    # as if a third party were reporting the delivery rather
-                    # than the visitor *being* the delivery. Explicit
-                    # framing removes the ambiguity.
-                    visitor_event = visitor_event.model_copy(
-                        update={"text": f"{visitor_event.text} (camera also shows: {description})"}
-                    )
-            except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
-                logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
+        # Camera context rides alongside the visitor's words, never inside
+        # them (see knock.core.scene) -- the policy/intent layers only ever
+        # see speech, and the LLM gets the scene as a separately framed block.
+        scene, snapshot = await self._await_scene(scene_task, event)
+        visitor_event = visitor_event.model_copy(update={"scene": scene})
 
         # The conversation itself: respond, speak it, then listen for a
         # reply and keep going as long as the visitor keeps talking. Ends
@@ -527,6 +656,7 @@ class UnifiBridge:
                 state=state,
                 audit_log=self.audit_log,
                 suppress_greeting=greeted_aloud,
+                image=snapshot,
             )
             self.session_store.save(state)
 
@@ -564,7 +694,7 @@ class UnifiBridge:
                 )
                 fallback = f"Unsure what a visitor at the door wants (camera: {event.device_id})."
                 details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback
+                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
                 )
                 summary = decision.review_summary or details.summary
                 # Main camera, not the package camera -- the uncertain case
@@ -589,7 +719,7 @@ class UnifiBridge:
                     else f"A food delivery is at the door (camera: {event.device_id})."
                 )
                 details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback
+                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
                 )
                 # The doorbell's package camera (a separate, downward-angled
                 # lens from the main view) shows the actual package instead
@@ -615,7 +745,7 @@ class UnifiBridge:
                     "ride_arrived": "A rideshare/taxi driver is here for pickup",
                 }[intent] + f" (camera: {event.device_id})."
                 details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback
+                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
                 )
                 image_url = await self._build_snapshot_url(event.device_id, package=False)
                 await self._notify_household(event.device_id, details.summary, image_url=image_url)
@@ -632,7 +762,7 @@ class UnifiBridge:
                     f"(camera: {event.device_id})."
                 )
                 details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback
+                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
                 )
                 image_url = await self._build_snapshot_url(event.device_id, package=False)
                 await self._notify_household(
@@ -660,8 +790,13 @@ class UnifiBridge:
                 )
                 break
 
+            # A fresh look each turn, again in parallel with listening --
+            # a visitor often holds up a package or badge only after being
+            # asked something.
+            scene_task = asyncio.create_task(self._capture_scene(event))
             reply = await self.listen_to_visitor(event.device_id)
             if not reply:
+                scene_task.cancel()
                 logger.info(
                     "Conversation with %s ending after turn %d: visitor went quiet",
                     event.device_id,
@@ -670,8 +805,9 @@ class UnifiBridge:
                 break
             if self.tts_provider is not None:
                 await self._play_thinking_tone(event.device_id)
+            scene, snapshot = await self._await_scene(scene_task, event)
             visitor_event = visitor_event.model_copy(
-                update={"text": reply, "timestamp": datetime.now(UTC)}
+                update={"text": reply, "timestamp": datetime.now(UTC), "scene": scene}
             )
 
         return decision
@@ -856,29 +992,35 @@ async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistant
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ollama_config = OllamaConfig.from_env()
+    vision_config = VisionConfig.from_env()
     # None (unset) leaves this whole layer off -- the deterministic
     # apply_style() backstop still applies regardless. When set, this is a
-    # second OllamaProvider pointed at a different model (same host/port/
-    # timeout) so a bigger/more careful model can be used for this one
-    # extra-opinion call without slowing down every-turn response phrasing.
+    # second OllamaProvider pointed at a different model (and optionally a
+    # different Ollama server, see OllamaConfig.safety_check_config) so a
+    # bigger/more careful model can be used for this one extra-opinion call
+    # without slowing down every-turn response phrasing.
+    safety_check_config = ollama_config.safety_check_config()
     safety_check_provider = (
-        OllamaProvider(
-            config=ollama_config.model_copy(update={"model": ollama_config.safety_check_model})
-        )
-        if ollama_config.safety_check_model
-        else None
+        OllamaProvider(config=safety_check_config) if safety_check_config is not None else None
     )
+    llm_provider = OllamaProvider(config=ollama_config)
+    vision_provider = OllamaVisionProvider(config=vision_config)
+    # Load every model now rather than on the first ring -- see warm_up().
+    for provider in (llm_provider, vision_provider, safety_check_provider):
+        if provider is not None:
+            provider.warm_up()
     orchestrator = Orchestrator(
-        llm_provider=OllamaProvider(config=ollama_config),
+        llm_provider=llm_provider,
         use_tool_calling=resolve_tool_calling(ollama_config),
         safety_check_provider=safety_check_provider,
+        send_image_to_brain=vision_config.send_image_to_brain,
     )
     ha_config = HomeAssistantConfig.from_env()
     knock_config = KnockConfig.from_env()
     bridge = UnifiBridge(
         config=UnifiConfig.from_env(),
         orchestrator=orchestrator,
-        vision_provider=OllamaVisionProvider(config=VisionConfig.from_env()),
+        vision_provider=vision_provider,
         stt_provider=WhisperSTTProvider(config=WhisperConfig.from_env()),
         tts_provider=KokoroTTSProvider(config=KokoroConfig.from_env()),
         # A no-op if KNOCK_HA_NOTIFY_SERVICE isn't set -- no need to check

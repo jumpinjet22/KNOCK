@@ -39,6 +39,26 @@ def _bool(value: str) -> bool:
     return value.strip().lower() not in ("false", "0", "no")
 
 
+def keep_alive_payload(value: str | None) -> int | float | str | None:
+    """Ollama's `keep_alive` request field from a config string.
+
+    Ollama reads a JSON *number* as seconds (negative = keep loaded
+    forever) but a JSON *string* as a Go duration that requires a unit --
+    so a plain "-1" sent as a string is rejected. Numeric-looking values go
+    out as numbers; anything else ("10m", "24h") passes through verbatim.
+    None/blank means "don't send it" -- the server's own default
+    (OLLAMA_KEEP_ALIVE, or 5 minutes) applies.
+    """
+    if value is None or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        number = float(raw)
+    except ValueError:
+        return raw
+    return int(number) if number.is_integer() else number
+
+
 class KnockConfig(BaseModel):
     """Application configuration with safe defaults."""
 
@@ -101,10 +121,36 @@ class OllamaConfig(BaseModel):
     # runs once per response rather than driving the whole conversation,
     # so the extra cost is easier to justify here.
     safety_check_model: str | None = None
+    # Where the safety-check model lives, when it isn't on the same Ollama
+    # server as `model` -- e.g. a small model pinned on a second, smaller
+    # GPU so it never competes with the main model for VRAM. None (the
+    # default) for either means "same as host/port".
+    safety_check_host: str | None = None
+    safety_check_port: int | None = None
+    # How long Ollama keeps the model loaded after a request -- see
+    # `keep_alive_payload`. A doorbell is bursty: with Ollama's 5-minute
+    # default the model has usually been unloaded by the next ring, and
+    # reloading it costs seconds the visitor spends waiting. "-1" pins it.
+    # None leaves the server's own default (OLLAMA_KEEP_ALIVE) in charge.
+    keep_alive: str | None = None
 
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+    def safety_check_config(self) -> OllamaConfig | None:
+        """This config retargeted at the safety-check model (and its own
+        host/port, when set), or None when the safety check is disabled.
+        """
+        if not self.safety_check_model:
+            return None
+        return self.model_copy(
+            update={
+                "model": self.safety_check_model,
+                "host": self.safety_check_host or self.host,
+                "port": self.safety_check_port or self.port,
+            }
+        )
 
     @classmethod
     def from_env(cls) -> OllamaConfig:
@@ -124,6 +170,13 @@ class OllamaConfig(BaseModel):
                 os.environ.get("KNOCK_OLLAMA_INTENT_REVIEW_CONFIDENCE_MARGIN", "0.15")
             ),
             safety_check_model=os.environ.get("KNOCK_OLLAMA_SAFETY_CHECK_MODEL"),
+            safety_check_host=os.environ.get("KNOCK_OLLAMA_SAFETY_CHECK_HOST"),
+            safety_check_port=(
+                int(os.environ["KNOCK_OLLAMA_SAFETY_CHECK_PORT"])
+                if os.environ.get("KNOCK_OLLAMA_SAFETY_CHECK_PORT")
+                else None
+            ),
+            keep_alive=os.environ.get("KNOCK_OLLAMA_KEEP_ALIVE"),
         )
 
     @classmethod
@@ -154,6 +207,13 @@ class OllamaConfig(BaseModel):
             safety_check_model=_resolve(
                 "KNOCK_OLLAMA_SAFETY_CHECK_MODEL", s, "safety_check_model", None
             ),
+            safety_check_host=_resolve(
+                "KNOCK_OLLAMA_SAFETY_CHECK_HOST", s, "safety_check_host", None
+            ),
+            safety_check_port=_resolve(
+                "KNOCK_OLLAMA_SAFETY_CHECK_PORT", s, "safety_check_port", None, int
+            ),
+            keep_alive=_resolve("KNOCK_OLLAMA_KEEP_ALIVE", s, "keep_alive", None),
         )
 
 
@@ -266,6 +326,14 @@ class VisionConfig(BaseModel):
         "visible. If uncertain, describe only the general shape or type of "
         "object you can plainly see."
     )
+    # Same meaning as `OllamaConfig.keep_alive`.
+    keep_alive: str | None = None
+    # Opt-in experiment: also hand the raw snapshot to the main LLM
+    # alongside the structured scene, for a multimodal main model. More
+    # context, but skips the vision safety backstop between camera and
+    # brain and opens a direct prompt-injection path via text visible in
+    # the image -- see `Orchestrator.send_image_to_brain`.
+    send_image_to_brain: bool = False
 
     @property
     def base_url(self) -> str:
@@ -279,6 +347,8 @@ class VisionConfig(BaseModel):
             model=os.environ.get("KNOCK_VISION_MODEL", "moondream"),
             timeout=float(os.environ.get("KNOCK_VISION_TIMEOUT", "30.0")),
             prompt=os.environ.get("KNOCK_VISION_PROMPT", cls.model_fields["prompt"].default),
+            keep_alive=os.environ.get("KNOCK_VISION_KEEP_ALIVE"),
+            send_image_to_brain=_bool(os.environ.get("KNOCK_VISION_SEND_IMAGE_TO_BRAIN", "false")),
         )
 
     @classmethod
@@ -290,6 +360,10 @@ class VisionConfig(BaseModel):
             model=_resolve("KNOCK_VISION_MODEL", s, "model", "moondream"),
             timeout=_resolve("KNOCK_VISION_TIMEOUT", s, "timeout", 30.0, float),
             prompt=_resolve("KNOCK_VISION_PROMPT", s, "prompt", cls.model_fields["prompt"].default),
+            keep_alive=_resolve("KNOCK_VISION_KEEP_ALIVE", s, "keep_alive", None),
+            send_image_to_brain=_resolve(
+                "KNOCK_VISION_SEND_IMAGE_TO_BRAIN", s, "send_image_to_brain", False, _bool
+            ),
         )
 
 
@@ -428,6 +502,13 @@ class UnifiConfig(BaseModel):
     # doorbell mic: ambient room noise alone reads around RMS 5-6, well
     # under this default, leaving a wide margin before actual speech.
     silence_rms_threshold: float = 60.0
+    # End-of-speech detection: once the visitor has said something (audio
+    # above `silence_rms_threshold`), stop listening after this many
+    # seconds of continuous quiet instead of always waiting out the full
+    # `listen_seconds` window -- a visitor who says "package" shouldn't sit
+    # through nine more seconds of dead air. `listen_seconds` stays the
+    # hard cap; 0 disables early stopping entirely.
+    end_silence_seconds: float = 1.0
     # Debounces a rapid second `ring` within this many seconds of the
     # session's last turn -- an impatient or accidental double-press
     # otherwise forces a full session restart (see
@@ -470,6 +551,7 @@ class UnifiConfig(BaseModel):
             silence_rms_threshold=float(
                 os.environ.get("KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", "60.0")
             ),
+            end_silence_seconds=float(os.environ.get("KNOCK_UNIFI_END_SILENCE_SECONDS", "1.0")),
             ring_cooldown_seconds=float(
                 os.environ.get("KNOCK_UNIFI_RING_COOLDOWN_SECONDS", "15.0")
             ),
@@ -501,6 +583,9 @@ class UnifiConfig(BaseModel):
             ),
             silence_rms_threshold=_resolve(
                 "KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", s, "silence_rms_threshold", 60.0, float
+            ),
+            end_silence_seconds=_resolve(
+                "KNOCK_UNIFI_END_SILENCE_SECONDS", s, "end_silence_seconds", 1.0, float
             ),
             ring_cooldown_seconds=_resolve(
                 "KNOCK_UNIFI_RING_COOLDOWN_SECONDS", s, "ring_cooldown_seconds", 15.0, float

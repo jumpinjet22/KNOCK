@@ -32,10 +32,11 @@ from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
+from knock.core.scene import SceneContext
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
 from knock.providers.llm.ollama import OllamaProvider
-from knock.providers.vision.base import VisionProvider
+from knock.providers.vision.base import VisionProvider, observe_scene
 from knock.providers.vision.ollama import OllamaVisionProvider
 
 logger = logging.getLogger(__name__)
@@ -152,23 +153,39 @@ class FrigateBridge:
     def handle_detection(self, detection: FrigateDetection) -> ResponseDecision:
         zones_text = ", ".join(detection.zones)
         text = f"{detection.label} detected entering {zones_text} on {detection.camera}"
+        # Frigate's own detector output is free, structured scene context;
+        # the vision model's observation (when available) is layered on top.
+        # Both stay out of `text` -- see knock.core.scene for why.
+        scene = SceneContext(
+            camera=detection.camera,
+            detected_labels=[detection.label],
+            zones=list(detection.zones),
+            captured_at=datetime.now(UTC),
+        )
+        snapshot: bytes | None = None
 
         if self.vision_provider is not None and detection.has_snapshot:
             try:
                 snapshot = self._fetch_snapshot(detection.event_id)
-                description = self.vision_provider.describe(snapshot)
-                text = f"{text}: {description}"
+                scene = scene.model_copy(
+                    update={"observation": observe_scene(self.vision_provider, snapshot)}
+                )
             except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
                 logger.warning("Vision enrichment failed for event %s: %s", detection.event_id, exc)
 
         session_id = _default_session_id(detection.camera)
         event = VisitorEvent(
-            source=f"frigate-{detection.camera}", text=text, timestamp=datetime.now(UTC)
+            source=f"frigate-{detection.camera}",
+            text=text,
+            timestamp=datetime.now(UTC),
+            scene=scene,
         )
         state = self.session_store.load(session_id) or SessionState(
             session_id=session_id, updated_at=event.timestamp
         )
-        decision = self.orchestrator.respond(event, state=state, audit_log=self.audit_log)
+        decision = self.orchestrator.respond(
+            event, state=state, audit_log=self.audit_log, image=snapshot
+        )
         self.session_store.save(state)
         return decision
 
@@ -181,11 +198,19 @@ class FrigateBridge:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    orchestrator = Orchestrator(llm_provider=OllamaProvider(config=OllamaConfig.from_env()))
+    vision_config = VisionConfig.from_env()
+    llm_provider = OllamaProvider(config=OllamaConfig.from_env())
+    vision_provider = OllamaVisionProvider(config=vision_config)
+    # Load both models now rather than on the first detection -- see warm_up().
+    llm_provider.warm_up()
+    vision_provider.warm_up()
+    orchestrator = Orchestrator(
+        llm_provider=llm_provider, send_image_to_brain=vision_config.send_image_to_brain
+    )
     bridge = FrigateBridge(
         config=FrigateConfig.from_env(),
         orchestrator=orchestrator,
-        vision_provider=OllamaVisionProvider(config=VisionConfig.from_env()),
+        vision_provider=vision_provider,
         # Without this, the bridge falls back to its class default
         # (NullAuditLog) and every real conversation silently never reaches
         # audit.jsonl / the web UI's History page -- the CLI and web API

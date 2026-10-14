@@ -6,28 +6,96 @@
       "flag": "occupancy",
       "action": "block",
       "weight": 1.0,
-      "phrases": ["are you home", "is anyone home", "home right now"]
+      "phrases": [
+        "are you home",
+        "is anyone home",
+        "is anybody home",
+        "anybody home",
+        "somebody home",
+        "someone home",
+        "home right now",
+        "home alone",
+        "by yourself right now",
+        "anybody there right now",
+        "anyone there right now",
+        "who's home right now"
+      ]
     },
     {
       "id": "schedule-direct",
       "flag": "schedule",
       "action": "block",
       "weight": 1.0,
-      "phrases": ["your schedule", "when do you leave", "what time are you away"]
+      "phrases": [
+        "your schedule",
+        "when do you leave",
+        "what time are you away",
+        "when do you usually leave",
+        "when are you not home",
+        "what time do you get back",
+        "when will you be back",
+        "when do you leave for work",
+        "your daily routine",
+        "your routine",
+        "when's everyone gone",
+        "when is everyone gone"
+      ]
     },
     {
       "id": "unlock-direct",
       "flag": "unlock",
       "action": "block",
       "weight": 1.0,
-      "phrases": ["unlock", "open the door", "let me in"]
+      "phrases": [
+        "unlock",
+        "open the door",
+        "let me in",
+        "buzz me in",
+        "open up the door",
+        "crack the door",
+        "pop the door",
+        "let me through",
+        "come inside",
+        "let me come in"
+      ]
     },
     {
       "id": "emergency-direct",
       "flag": "emergency",
       "action": "escalate",
       "weight": 1.0,
-      "phrases": ["help", "emergency", "fire", "medical", "police"]
+      "phrases": [
+        "help",
+        "emergency",
+        "fire",
+        "medical",
+        "police",
+        "911",
+        "ambulance",
+        "call 911",
+        "need an ambulance",
+        "heart attack",
+        "can't breathe",
+        "not breathing",
+        "unconscious",
+        "choking",
+        "overdose",
+        "bleeding",
+        "has a gun",
+        "has a knife",
+        "with a weapon",
+        "gunshot",
+        "shots fired",
+        "someone broke in",
+        "there's a break-in",
+        "forced entry",
+        "intruder",
+        "trapped inside",
+        "domestic violence",
+        "being attacked",
+        "stabbed",
+        "smell smoke"
+      ]
     }
   ]
 }

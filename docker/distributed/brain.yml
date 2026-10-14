@@ -1,0 +1,63 @@
+# KNOCK split across machines -- the "brain" box (e.g. an RTX 2060 Super).
+#
+# Runs one Ollama server with the main LLM. A multimodal main model (e.g.
+# qwen3.5) can serve as the vision model too: point KNOCK_VISION_HOST at this
+# box and KNOCK_VISION_MODEL at the same model, and there's only ever one
+# model resident in VRAM -- no swapping between "brain" and "vision" on a
+# ring. See README.md "Splitting KNOCK across machines".
+#
+# Usage, on this machine:
+#   docker compose -f docker/distributed/brain.yml up -d
+#   docker compose -f docker/distributed/brain.yml logs -f brain-pull   # first run only
+#
+# Ollama has NO authentication. Publishing 11434 makes it reachable by
+# anything that can reach this machine -- firewall it to your LAN (ideally
+# to just the machine running knock.yml).
+
+name: knock-brain
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      # Keep models resident between rings instead of unloading after Ollama's
+      # 5-minute idle default (KNOCK's own KNOCK_OLLAMA_KEEP_ALIVE overrides
+      # this per request when set).
+      OLLAMA_KEEP_ALIVE: "-1"
+      # Smaller KV cache (q8_0 roughly halves it vs f16) -- more context or
+      # headroom on an 8GB card, minimal quality cost. Needs flash attention.
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      # One model on this box. Raise this if you also put a separate vision
+      # model here and both fit in VRAM.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # One-shot: pulls the brain model the first time, then exits (`ollama pull`
+  # skips a model that's already present).
+  brain-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: "ollama:11434"
+      BRAIN_MODEL: ${KNOCK_BRAIN_MODEL:-qwen3.5:9b}
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until ollama list >/dev/null 2>&1; do sleep 2; done &&
+       ollama pull $$BRAIN_MODEL"
+    restart: "no"
+
+volumes:
+  ollama-data:

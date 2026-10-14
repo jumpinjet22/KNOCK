@@ -11,15 +11,26 @@ from knock.conversation.responses import response_for
 from knock.core.audit import AuditEntry, AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.responses import ResponseDecision
+from knock.core.scene import SceneContext, format_scene_for_prompt
 from knock.core.state import SessionState
 from knock.providers.llm.base import LLMProvider
 from knock.providers.llm.ollama import ChatToolResult
+from knock.providers.vision.safety import contains_alarming_language
 
 logger = logging.getLogger(__name__)
 
 
 def _with_greeting(text: str, *, is_first_turn: bool) -> str:
     return f"{GREETING} {text}" if is_first_turn else text
+
+
+def _scene_block(scene: SceneContext | None) -> str:
+    """`format_scene_for_prompt`'s block as a prompt fragment: "" with no
+    scene, so every prompt below is byte-for-byte unchanged for a
+    camera-less event.
+    """
+    block = format_scene_for_prompt(scene)
+    return f"{block}\n" if block else ""
 
 
 # Plain-English framing of each `classify_intent()` bucket, embedded in the
@@ -169,7 +180,7 @@ _INTENT_CLASSIFICATION_HINTS = {
 }
 
 
-def _classification_prompt(visitor_text: str) -> str:
+def _classification_prompt(visitor_text: str, scene: SceneContext | None = None) -> str:
     labels = (
         ", ".join(
             f"{name} ({_INTENT_CLASSIFICATION_HINTS[name]})" for name in _LLM_CLASSIFIABLE_INTENTS
@@ -178,6 +189,7 @@ def _classification_prompt(visitor_text: str) -> str:
     )
     return (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f"{_scene_block(scene)}"
         "The system's keyword rules found no match. Decide whether this "
         f"clearly and specifically fits one of these categories: {labels}.\n"
         "Only choose a specific category if it obviously and unambiguously "
@@ -189,11 +201,22 @@ def _classification_prompt(visitor_text: str) -> str:
     )
 
 
-def _response_prompt(intent: str, visitor_text: str) -> str:
+def _response_prompt(intent: str, visitor_text: str, scene: SceneContext | None = None) -> str:
     category = _INTENT_DESCRIPTIONS.get(intent, intent)
+    scene_block = _scene_block(scene)
+    scene_guidance = (
+        "You may use the camera observations to make the reply fit what's "
+        "actually there (e.g. acknowledge a visible package), but what the "
+        "visitor said comes first, and never describe the visitor's "
+        "appearance back to them.\n"
+        if scene_block
+        else ""
+    )
     return (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f"{scene_block}"
         f"The system's keyword classifier guesses this is: {category}.\n"
+        f"{scene_guidance}"
         "Reply with one short, natural, polite sentence a doorbell "
         "assistant could say back, consistent with that situation -- don't "
         "just recite the category. Never say whether anyone is home, share "
@@ -250,9 +273,10 @@ def _safety_check_prompt(response_text: str) -> str:
     )
 
 
-def _notification_summary_prompt(visitor_text: str) -> str:
+def _notification_summary_prompt(visitor_text: str, scene: SceneContext | None = None) -> str:
     return (
         f'Context from a doorbell visit: "{visitor_text}"\n'
+        f"{_scene_block(scene)}"
         "Write one short phrase (under 12 words) summarizing who's at the "
         'door, suitable as a phone push notification -- e.g. "A FedEx '
         'driver has a package for you" or "A UPS delivery needs a '
@@ -357,12 +381,15 @@ _EXTRACT_DETAILS_TOOL: dict[str, Any] = {
 }
 
 
-def _tool_classification_messages(visitor_text: str) -> list[dict[str, str]]:
+def _tool_classification_messages(
+    visitor_text: str, scene: SceneContext | None = None
+) -> list[dict[str, str]]:
     labels = ", ".join(
         f"{name} ({_INTENT_CLASSIFICATION_HINTS[name]})" for name in _LLM_CLASSIFIABLE_INTENTS
     )
     user_content = (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f"{_scene_block(scene)}"
         "The system's keyword rules found no match. Call classify_intent with your "
         "top 1-3 best-matching categories (confidence 0-1 each), choosing only from: "
         f"{labels}, unknown. If you are not confident any single category clearly "
@@ -375,10 +402,13 @@ def _tool_classification_messages(visitor_text: str) -> list[dict[str, str]]:
     ]
 
 
-def _extract_details_messages(visitor_text: str, intent: str) -> list[dict[str, str]]:
+def _extract_details_messages(
+    visitor_text: str, intent: str, scene: SceneContext | None = None
+) -> list[dict[str, str]]:
     category = _INTENT_DESCRIPTIONS.get(intent, intent)
     user_content = (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f"{_scene_block(scene)}"
         f"This has been classified as: {category}.\n"
         "Call extract_notification_details with a short natural summary (under 12 "
         "words) suitable for a phone push notification, plus any of these details "
@@ -464,6 +494,7 @@ class Orchestrator:
         llm_provider: LLMProvider | None = None,
         use_tool_calling: bool = False,
         safety_check_provider: LLMProvider | None = None,
+        send_image_to_brain: bool = False,
     ) -> None:
         self.policy = policy or PolicyEngine()
         self.audit_log = audit_log or NullAuditLog()
@@ -504,6 +535,16 @@ class Orchestrator:
         # OllamaProvider) -- any other provider silently keeps using the
         # plain-text path regardless of this flag.
         self.use_tool_calling = use_tool_calling
+        # Opt-in (VisionConfig.send_image_to_brain): when a caller passes a
+        # snapshot to respond(), a multimodal llm_provider also gets the raw
+        # image for response phrasing, on top of the structured scene
+        # block. Off by default because it bypasses the vision safety
+        # backstop between camera and brain, and text visible in the image
+        # (a sign held up to the camera) reaches the model unfiltered --
+        # the reply itself is therefore also run through the vision
+        # backstop's alarming-language check (see _text_for_intent), on top
+        # of the usual apply_style()/safety-check path every reply gets.
+        self.send_image_to_brain = send_image_to_brain
         ollama_config = getattr(llm_provider, "config", None)
         self._review_confidence_floor = getattr(
             ollama_config, "intent_review_confidence_floor", 0.5
@@ -519,7 +560,10 @@ class Orchestrator:
         audit_log: AuditLog | None = None,
         *,
         suppress_greeting: bool = False,
+        image: bytes | None = None,
     ) -> ResponseDecision:
+        # Speech only -- camera context (`event.scene`) never feeds the
+        # deterministic policy/intent layers, only the LLM prompts below.
         decision = self.policy.evaluate(event.text)
         intent: str | None = None
         # Read before any state mutation below -- true only for a session's
@@ -555,13 +599,15 @@ class Orchestrator:
             review_candidates: list[str] = []
             review_summary: str | None = None
             if intent == "unknown":
-                refinement = self._refine_unknown_intent(event.text)
+                refinement = self._refine_unknown_intent(event.text, event.scene)
                 intent = refinement.intent
                 needs_review = refinement.needs_review
                 review_candidates = refinement.review_candidates
                 review_summary = refinement.review_summary
             last_intent = intent
-            response_text = self.policy.apply_style(self._text_for_intent(intent, event.text))
+            response_text = self.policy.apply_style(
+                self._text_for_intent(intent, event.text, event.scene, image=image)
+            )
             if self.safety_check_provider is not None and self._llm_flags_as_unsafe(response_text):
                 response_text = SAFE_RESPONSE_FALLBACK
             response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
@@ -599,6 +645,7 @@ class Orchestrator:
                 allowed=decision.allowed,
                 reason=response.reason,
                 intent=intent,
+                scene=event.scene,
             )
         )
 
@@ -613,7 +660,9 @@ class Orchestrator:
 
         return response
 
-    def _refine_unknown_intent(self, visitor_text: str) -> _IntentRefinement:
+    def _refine_unknown_intent(
+        self, visitor_text: str, scene: SceneContext | None = None
+    ) -> _IntentRefinement:
         """One more chance to recognize a known-but-unlisted situation (a
         contractor, someone asking for a person by name, an official
         visit, concerning-but-not-emergency behavior) before `classify_intent`
@@ -631,14 +680,18 @@ class Orchestrator:
 
         if self.use_tool_calling and hasattr(self.llm_provider, "chat_with_tools"):
             try:
-                return self._refine_unknown_intent_via_tools(visitor_text)
+                return self._refine_unknown_intent_via_tools(visitor_text, scene)
             except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
                 logger.warning(
                     "Tool-calling classification failed, falling back to plain text: %s", exc
                 )
 
         try:
-            guess = self.llm_provider.generate(_classification_prompt(visitor_text)).strip().lower()
+            guess = (
+                self.llm_provider.generate(_classification_prompt(visitor_text, scene))
+                .strip()
+                .lower()
+            )
         except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
             logger.warning("LLM intent classification failed: %s", exc)
             return _IntentRefinement("unknown", False, [], None)
@@ -647,9 +700,11 @@ class Orchestrator:
         logger.info("LLM intent refinement: text=%r guess=%r -> %s", visitor_text, guess, result)
         return _IntentRefinement(result, False, [], None)
 
-    def _refine_unknown_intent_via_tools(self, visitor_text: str) -> _IntentRefinement:
+    def _refine_unknown_intent_via_tools(
+        self, visitor_text: str, scene: SceneContext | None = None
+    ) -> _IntentRefinement:
         result: ChatToolResult = self.llm_provider.chat_with_tools(  # type: ignore[union-attr]
-            _tool_classification_messages(visitor_text), _CLASSIFICATION_TOOLS
+            _tool_classification_messages(visitor_text, scene), _CLASSIFICATION_TOOLS
         )
         candidates = _parse_classify_intent_candidates(result)
         model_flagged, review_summary = _parse_flag_for_review(result)
@@ -684,14 +739,42 @@ class Orchestrator:
             top.category, uncertain, [c.category for c in candidates], review_summary
         )
 
-    def _text_for_intent(self, intent: str, visitor_text: str) -> str:
+    def _text_for_intent(
+        self,
+        intent: str,
+        visitor_text: str,
+        scene: SceneContext | None = None,
+        *,
+        image: bytes | None = None,
+    ) -> str:
         if self.llm_provider is None:
             return response_for(intent)
 
+        prompt = _response_prompt(intent, visitor_text, scene)
+        with_image = (
+            self.send_image_to_brain
+            and image is not None
+            and hasattr(self.llm_provider, "generate_with_images")
+        )
         try:
-            generated = self.llm_provider.generate(_response_prompt(intent, visitor_text)).strip()
+            if with_image:
+                generated = self.llm_provider.generate_with_images(  # type: ignore[attr-defined]
+                    prompt, [image]
+                ).strip()
+            else:
+                generated = self.llm_provider.generate(prompt).strip()
         except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
             logger.warning("LLM response generation failed for intent %r: %s", intent, exc)
+            return response_for(intent)
+
+        if with_image and contains_alarming_language(generated):
+            # The brain saw the raw image with no vision backstop in
+            # between, so its reply gets the same check a vision
+            # description would have.
+            logger.warning(
+                "Image-informed reply flagged as alarming/speculative, using canned: %r",
+                generated,
+            )
             return response_for(intent)
 
         return generated or response_for(intent)
@@ -726,7 +809,9 @@ class Orchestrator:
             )
         return flagged
 
-    def summarize_for_notification(self, visitor_text: str, *, fallback: str) -> str:
+    def summarize_for_notification(
+        self, visitor_text: str, *, fallback: str, scene: SceneContext | None = None
+    ) -> str:
         """A short, human-readable phrase for a push notification -- e.g.
         "A FedEx driver has a package for you" instead of a generic
         placeholder. Same best-effort pattern as `_text_for_intent`: no
@@ -736,7 +821,9 @@ class Orchestrator:
             return fallback
 
         try:
-            summary = self.llm_provider.generate(_notification_summary_prompt(visitor_text)).strip()
+            summary = self.llm_provider.generate(
+                _notification_summary_prompt(visitor_text, scene)
+            ).strip()
         except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
             logger.warning("LLM notification summary failed: %s", exc)
             return fallback
@@ -744,7 +831,12 @@ class Orchestrator:
         return summary or fallback
 
     def extract_notification_details(
-        self, visitor_text: str, intent: str, *, fallback: str
+        self,
+        visitor_text: str,
+        intent: str,
+        *,
+        fallback: str,
+        scene: SceneContext | None = None,
     ) -> NotificationDetails:
         """A richer replacement for `summarize_for_notification()`: the same
         natural-language summary, plus structured fields (visitor name,
@@ -761,21 +853,21 @@ class Orchestrator:
         """
         if self.use_tool_calling and hasattr(self.llm_provider, "chat_with_tools"):
             try:
-                return self._extract_notification_details_via_tools(visitor_text, intent)
+                return self._extract_notification_details_via_tools(visitor_text, intent, scene)
             except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
                 logger.warning(
                     "Tool-calling notification-detail extraction failed, falling back: %s", exc
                 )
 
         return NotificationDetails(
-            summary=self.summarize_for_notification(visitor_text, fallback=fallback)
+            summary=self.summarize_for_notification(visitor_text, fallback=fallback, scene=scene)
         )
 
     def _extract_notification_details_via_tools(
-        self, visitor_text: str, intent: str
+        self, visitor_text: str, intent: str, scene: SceneContext | None = None
     ) -> NotificationDetails:
         result: ChatToolResult = self.llm_provider.chat_with_tools(  # type: ignore[union-attr]
-            _extract_details_messages(visitor_text, intent), [_EXTRACT_DETAILS_TOOL]
+            _extract_details_messages(visitor_text, intent, scene), [_EXTRACT_DETAILS_TOOL]
         )
         for call in result.tool_calls:
             if call.name != "extract_notification_details":

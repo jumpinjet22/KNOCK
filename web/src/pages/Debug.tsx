@@ -7,6 +7,7 @@ import {
   type STTTranscribeResult,
   type TTSSynthesizeResult,
   type VisionDescribeResult,
+  type VisionObserveResult,
 } from "../lib/api"
 
 type TabKey = "vision" | "llm" | "stt" | "tts" | "conversation"
@@ -104,12 +105,28 @@ function VisionPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<VisionDescribeResult | null>(null)
+  const [observeLoading, setObserveLoading] = useState(false)
+  const [observeResult, setObserveResult] = useState<VisionObserveResult | null>(null)
 
   async function handleFile(file: File | undefined) {
     if (!file) return
     setImagePreview(URL.createObjectURL(file))
     setImageBase64(await fileToBase64(file))
     setResult(null)
+    setObserveResult(null)
+  }
+
+  async function handleObserve() {
+    if (!imageBase64) return
+    setObserveLoading(true)
+    setError(null)
+    try {
+      setObserveResult(await debugApi.observeVision(imageBase64))
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setObserveLoading(false)
+    }
   }
 
   async function handleSubmit(event: React.FormEvent) {
@@ -130,7 +147,7 @@ function VisionPanel() {
     <div>
       <PanelHeading
         title="Vision"
-        description="Send a snapshot to the configured vision model and compare its raw output against the safety-filtered version a visitor would actually hear."
+        description="Send a snapshot to the configured vision model and compare its raw output against the safety-filtered version a visitor would actually hear — or get the structured observation the bridges actually hand the LLM."
       />
       <form onSubmit={(event) => void handleSubmit(event)} className="space-y-4">
         <input
@@ -149,9 +166,19 @@ function VisionPanel() {
           placeholder="Prompt override (optional — uses the configured default prompt otherwise)"
           className={inputClass}
         />
-        <button type="submit" disabled={!imageBase64 || loading} className={buttonClass}>
-          {loading ? "Describing…" : "Describe image"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button type="submit" disabled={!imageBase64 || loading} className={buttonClass}>
+            {loading ? "Describing…" : "Describe image"}
+          </button>
+          <button
+            type="button"
+            disabled={!imageBase64 || observeLoading}
+            onClick={() => void handleObserve()}
+            className={buttonClass}
+          >
+            {observeLoading ? "Observing…" : "Structured observation"}
+          </button>
+        </div>
       </form>
       <ErrorBanner message={error} />
       {result && (
@@ -166,6 +193,20 @@ function VisionPanel() {
             {" · "}
             {result.latency_ms.toFixed(0)} ms
           </p>
+        </div>
+      )}
+      {observeResult && (
+        <div className="mt-6 space-y-4">
+          <ResultField label="Raw structured output" value={observeResult.raw} />
+          {observeResult.parse_error ? (
+            <ErrorBanner message={`Couldn't parse structured output: ${observeResult.parse_error}`} />
+          ) : (
+            <ResultField
+              label="What the LLM sees (safety-filtered)"
+              value={observeResult.prompt_block || "(nothing usable observed)"}
+            />
+          )}
+          <p className="text-sm text-steel">{observeResult.latency_ms.toFixed(0)} ms</p>
         </div>
       )}
     </div>

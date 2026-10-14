@@ -1,0 +1,36 @@
+# KNOCK split across machines -- the KNOCK app itself (web UI, API, and the
+# camera bridges it supervises). Any machine works; it needs no GPU.
+#
+# Built from this checkout (not a published image) so it always matches the
+# code next to it. Point it at the other boxes with docker/distributed/
+# knock.env -- copy knock.env.example and fill in their LAN addresses.
+#
+# Usage, from the repo root:
+#   cp docker/distributed/knock.env.example docker/distributed/knock.env
+#   docker compose -f docker/distributed/knock.yml up -d --build
+#   open http://<this-machine>:8080
+#
+# Then check every node from the web UI's Debug page, or by saying
+# "systems check" to the doorbell.
+
+name: knock
+
+services:
+  knock:
+    container_name: knock
+    restart: unless-stopped
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    env_file:
+      - path: knock.env
+        required: true
+    ports:
+      - "8080:8000"
+    volumes:
+      # Everything the web UI persists (settings, accounts, audit log,
+      # sessions) -- without this, replacing the container wipes it.
+      - knock-data:/root/.local/share/knock
+
+volumes:
+  knock-data:

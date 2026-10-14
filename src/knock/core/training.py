@@ -205,7 +205,7 @@ def build_training_records(entry: AuditEntry, review: TrainingReview) -> list[Tr
         records.append(
             TrainingRecord(
                 task="classification",
-                instruction=_classification_prompt(entry.text),
+                instruction=_classification_prompt(entry.text, entry.scene),
                 output=intent,
             )
         )
@@ -225,7 +225,7 @@ def build_training_records(entry: AuditEntry, review: TrainingReview) -> list[Tr
         records.append(
             TrainingRecord(
                 task="phrasing",
-                instruction=_response_prompt(intent, entry.text),
+                instruction=_response_prompt(intent, entry.text, entry.scene),
                 output=response_text,
             )
         )

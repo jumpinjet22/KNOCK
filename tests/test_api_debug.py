@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import threading
 import wave
 
@@ -122,6 +123,7 @@ class _BackgroundServer:
     "method,url",
     [
         ("post", "/api/debug/vision/describe"),
+        ("post", "/api/debug/vision/observe"),
         ("post", "/api/debug/llm/generate"),
         ("post", "/api/debug/stt/transcribe"),
         ("post", "/api/debug/tts/synthesize"),
@@ -156,6 +158,61 @@ def test_debug_vision_describe_returns_raw_and_sanitized(client, config_store) -
     assert body["sanitized"] == "A person with a box."
     assert body["alarming_language_detected"] is False
     assert body["latency_ms"] >= 0
+
+
+@respx.mock
+def test_debug_vision_observe_shows_what_the_llm_would_see(client, config_store) -> None:
+    _login(client)
+    config = VisionConfig.from_sources(config_store)
+    raw = json.dumps(
+        {
+            "people_count": 1,
+            "carrying": ["box", "a knife"],
+            "package_visible": True,
+            "uniform_or_logo": "UPS",
+            "vehicle": "",
+            "visible_text": "",
+            "summary": "A person holding a box.",
+        }
+    )
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": raw})
+    )
+
+    resp = _post(
+        client,
+        "/api/debug/vision/observe",
+        {"image_base64": base64.b64encode(b"fake-jpeg").decode("ascii")},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["raw"] == raw
+    assert body["parse_error"] is None
+    assert body["observation"]["carrying"] == ["box"]  # alarming item dropped
+    assert '- uniform/logo: "UPS"' in body["prompt_block"]
+    assert "knife" not in body["prompt_block"]
+
+
+@respx.mock
+def test_debug_vision_observe_reports_unparseable_output(client, config_store) -> None:
+    _login(client)
+    config = VisionConfig.from_sources(config_store)
+    respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": "a person, probably"})
+    )
+
+    resp = _post(
+        client,
+        "/api/debug/vision/observe",
+        {"image_base64": base64.b64encode(b"fake-jpeg").decode("ascii")},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["observation"] is None
+    assert body["parse_error"]
+    assert body["prompt_block"] == ""
 
 
 @respx.mock

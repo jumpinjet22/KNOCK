@@ -15,3 +15,7 @@ __pycache__/
 *.generated.txt
 *.generated.jsonl
 unsloth_compiled_cache/
+
+# Per-machine KNOCK settings for docker/distributed/knock.yml (holds LAN
+# addresses and possibly tokens/API keys) -- copied from knock.env.example.
+docker/distributed/knock.env
