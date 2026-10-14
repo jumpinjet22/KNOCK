@@ -18,9 +18,10 @@ from pydantic import BaseModel
 DEFAULT_PACKAGE_LOG_ENV_VAR = "KNOCK_PACKAGE_LOG"
 
 # detected: Protect reported a package. notified: the household notification
-# went out (possibly held back until the visitor left). acknowledged: someone
-# tapped "Got it".
-PackageEventKind = Literal["detected", "notified", "acknowledged"]
+# went out (possibly held back until the visitor left). reminded: a "still at
+# the door" reminder went out. removed: the package camera no longer shows it
+# and nobody tapped "Got it". acknowledged: someone tapped "Got it".
+PackageEventKind = Literal["detected", "notified", "reminded", "removed", "acknowledged"]
 
 
 class PackageEvent(BaseModel):
@@ -30,6 +31,9 @@ class PackageEvent(BaseModel):
     # Only meaningful for "detected": whether someone was still at the door,
     # i.e. whether the notification was held until they left.
     visitor_present: bool | None = None
+    # File names (inside the package media folder) of the photos/clip saved
+    # alongside this event -- only ever set on "removed".
+    media: list[str] = []
 
 
 class PackageLog(Protocol):

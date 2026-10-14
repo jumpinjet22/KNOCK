@@ -31,10 +31,8 @@ logged and does not affect the rest of the response.
 A Protect "package" smart-detect (the doorbell's package camera saw a box)
 never starts a conversation -- there's nobody to talk to. It sends a
 household notification with the package-camera photo and a "Got it" button
-instead, held back while a visitor is still at the door (an ongoing
-conversation, or an open person detection on that camera) and sent the
-moment they leave. "Got it" clears it from every phone and is logged to
-the package log (`core/package_log.py`).
+instead, held back until the visitor walks away -- plus optional reminders
+and "gone without a Got it" alerts. See `integrations/package_alerts.py`.
 
 The `uiprotect` event callback is synchronous (it's called directly by the
 library's websocket handler), but snapshot/speech/vision/talkback all need
@@ -78,13 +76,7 @@ from knock.conversation.prompts import GREETING
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
-from knock.core.package_log import (
-    JSONLPackageLog,
-    NullPackageLog,
-    PackageEvent,
-    PackageEventKind,
-    PackageLog,
-)
+from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
 from knock.core.responses import ResponseDecision
 from knock.core.scene import SceneContext, SceneObservation
 from knock.core.session_store import JSONFileSessionStore, SessionStore
@@ -105,7 +97,11 @@ from knock.integrations.homeassistant import (
     HomeAssistantActionListener,
     HomeAssistantNotifier,
     NotificationCategory,
-    package_notification_tag,
+)
+from knock.integrations.package_alerts import (
+    PackageAlerts,
+    default_package_media_dir,
+    record_rtsp_clip,
 )
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
@@ -164,11 +160,6 @@ _COMING_TO_DOOR_PHRASE = "Good news, they'll be right at the door."
 # server is slow or down, and then the reply goes out without it rather
 # than leaving the visitor standing there.
 _SCENE_WAIT_SECONDS = 15.0
-
-# An open person detection older than this no longer counts as "someone's at
-# the door" -- otherwise one lost ENDED event would hold every later package
-# alert on that camera for its full departure timeout, forever.
-_PERSON_EVENT_MAX_AGE_SECONDS = 600.0
 
 
 def _merge_observations(main: SceneObservation, extra: SceneObservation) -> SceneObservation:
@@ -360,6 +351,8 @@ class UnifiBridge:
         snapshot_store: SnapshotStore | None = None,
         public_base_url: str | None = None,
         package_log: PackageLog | None = None,
+        package_media_dir: Path | None = None,
+        clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -395,15 +388,12 @@ class UnifiBridge:
             silence_rms_threshold=self.config.silence_rms_threshold,
         )
         self.package_log = package_log or NullPackageLog()
-        # Who's at the door, per camera -- see `_visitor_present`. Only
-        # needed to decide when a held-back package alert can go out.
-        # camera -> {person event id: monotonic start time}
-        self._open_person_events: dict[str, dict[str, float]] = {}
-        self._active_conversations: dict[str, int] = {}
-        # A package alert waiting for the visitor to leave, per camera.
-        self._departures: dict[str, asyncio.Event] = {}
-        self._package_tasks: set[asyncio.Task[None]] = set()
-        self._last_package_detection: dict[str, float] = {}
+        # Where photos/clips of a package taken without a "Got it" are kept.
+        # None (the default) keeps nothing on disk -- the notification still
+        # carries the photo.
+        self.package_media_dir = package_media_dir
+        self._clip_recorder = clip_recorder or record_rtsp_clip
+        self.packages = PackageAlerts(self)
 
     # -- pure logic: directly testable without a real console -----------------
 
@@ -416,49 +406,12 @@ class UnifiBridge:
             return True
         if event_type in _SMART_DETECT_EVENT_TYPES:
             smart_types = {str(t) for t in event.smart_detect_types}
-            if self._is_package_detection(event) and smart_types == {"package"}:
-                # A box alone is handled by `_handle_package_detection` --
-                # never a conversation, even with "package" in trigger_on.
+            if self.packages.is_package_detection(event) and smart_types == {"package"}:
+                # A box alone is handled by `PackageAlerts` -- never a
+                # conversation, even with "package" in trigger_on.
                 return False
             return bool(smart_types & set(self.config.trigger_on))
         return False
-
-    def _is_package_detection(self, event: _ProtectEventLike) -> bool:
-        if not self.config.package_alerts:
-            return False
-        if self.config.trigger_camera_ids and event.device_id not in self.config.trigger_camera_ids:
-            return False
-        return str(event.type) in _SMART_DETECT_EVENT_TYPES and "package" in {
-            str(t) for t in event.smart_detect_types
-        }
-
-    def _visitor_present(self, device_id: str) -> bool:
-        """Someone's still at the door: a conversation is running, or
-        Protect has an open (not yet ENDED) person detection on this camera.
-        Person detections are tracked whether or not "person" is in
-        `trigger_on` -- a driver who drops a box without ringing never
-        starts a conversation, but is still standing there.
-        """
-        open_events = self._open_person_events.get(device_id, {})
-        cutoff = time.monotonic() - _PERSON_EVENT_MAX_AGE_SECONDS
-        for event_id in [eid for eid, started in open_events.items() if started < cutoff]:
-            del open_events[event_id]
-        return bool(open_events) or self._active_conversations.get(device_id, 0) > 0
-
-    def _track_presence(self, event: _ProtectEventLike, change: EventChange) -> None:
-        if "person" not in {str(t) for t in event.smart_detect_types}:
-            return
-        open_events = self._open_person_events.setdefault(event.device_id, {})
-        if change == EventChange.STARTED:
-            open_events[event.id] = time.monotonic()
-        elif change in (EventChange.ENDED, EventChange.REMOVED):
-            open_events.pop(event.id, None)
-            self._maybe_departed(event.device_id)
-
-    def _maybe_departed(self, device_id: str) -> None:
-        departed = self._departures.get(device_id)
-        if departed is not None and not self._visitor_present(device_id):
-            departed.set()
 
     def build_event(self, event: _ProtectEventLike) -> VisitorEvent:
         event_type = str(event.type)
@@ -570,6 +523,14 @@ class UnifiBridge:
             return None
         if snapshot is None:
             return None
+        return self._snapshot_url_for(snapshot)
+
+    def _snapshot_url_for(self, snapshot: bytes) -> str | None:
+        """A notification-attachable link for already-captured image bytes
+        (see `_build_snapshot_url`), or None without `public_base_url`.
+        """
+        if not self.public_base_url:
+            return None
         token = self.snapshot_store.put(snapshot)
         return f"{self.public_base_url.rstrip('/')}/api/snapshot/{token}"
 
@@ -665,7 +626,7 @@ class UnifiBridge:
             return self._detector_scene(event), None
 
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
-        is_package = self._is_package_detection(event)
+        is_package = self.packages.is_package_detection(event)
         converses = self.should_trigger(event)
         if not is_package and not converses:
             return None
@@ -673,19 +634,16 @@ class UnifiBridge:
         # Counted before the package check so a box seen mid-conversation is
         # held until the visitor leaves, not announced while they stand there.
         if converses:
-            self._active_conversations[event.device_id] = (
-                self._active_conversations.get(event.device_id, 0) + 1
-            )
+            self.packages.conversation_started(event.device_id)
         try:
             if is_package:
-                await self._handle_package_detection(event.device_id)
+                await self.packages.on_package_detected(event.device_id)
             if not converses:
                 return None
             return await self._run_conversation(event)
         finally:
             if converses:
-                self._active_conversations[event.device_id] -= 1
-                self._maybe_departed(event.device_id)
+                self.packages.conversation_ended(event.device_id)
 
     async def _run_conversation(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
@@ -914,89 +872,6 @@ class UnifiBridge:
 
         return decision
 
-    # -- package alerts ---------------------------------------------------------
-
-    async def _handle_package_detection(self, device_id: str) -> None:
-        now = time.monotonic()
-        last = self._last_package_detection.get(device_id)
-        if device_id in self._departures or (
-            last is not None and now - last < self.config.package_cooldown_seconds
-        ):
-            logger.info("Package on %s already reported recently, skipping", device_id)
-            return
-        self._last_package_detection[device_id] = now
-
-        present = self._visitor_present(device_id)
-        self._record_package(device_id, "detected", visitor_present=present)
-        if not present:
-            await self._send_package_alert(device_id, left_by_visitor=False)
-            return
-
-        departed = asyncio.Event()
-        self._departures[device_id] = departed
-        task = asyncio.get_running_loop().create_task(
-            self._alert_after_departure(device_id, departed)
-        )
-        self._package_tasks.add(task)
-        task.add_done_callback(self._package_tasks.discard)
-
-    async def _alert_after_departure(self, device_id: str, departed: asyncio.Event) -> None:
-        try:
-            await asyncio.wait_for(
-                departed.wait(), timeout=self.config.package_departure_timeout_seconds
-            )
-        except TimeoutError:
-            logger.info("Visitor at %s never seen leaving, sending package alert anyway", device_id)
-        finally:
-            if self._departures.get(device_id) is departed:
-                del self._departures[device_id]
-        await self._send_package_alert(device_id, left_by_visitor=True)
-
-    async def _send_package_alert(self, device_id: str, *, left_by_visitor: bool) -> None:
-        message = (
-            f"A package was left at the door (camera: {device_id})."
-            if left_by_visitor
-            else f"A package was detected at the door (camera: {device_id})."
-        )
-        image_url = await self._build_snapshot_url(device_id, package=True)
-        ack = f"{KNOCK_PACKAGE_ACK_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
-        await self._notify_household(
-            device_id,
-            message,
-            actions=[{"action": ack, "title": "Got it"}],
-            category="package",
-            image_url=image_url,
-            tag=package_notification_tag(device_id),
-        )
-        self._record_package(device_id, "notified")
-
-    async def _acknowledge_package(self, device_id: str) -> None:
-        if self.ha_notifier is not None:
-            try:
-                await asyncio.to_thread(self.ha_notifier.clear, package_notification_tag(device_id))
-            except Exception as exc:  # noqa: BLE001 - still log the acknowledgement
-                logger.warning("Clearing package notification for %s failed: %s", device_id, exc)
-        self._record_package(device_id, "acknowledged")
-
-    def _record_package(
-        self,
-        device_id: str,
-        kind: PackageEventKind,
-        *,
-        visitor_present: bool | None = None,
-    ) -> None:
-        try:
-            self.package_log.record(
-                PackageEvent(
-                    timestamp=datetime.now(UTC),
-                    device_id=device_id,
-                    kind=kind,
-                    visitor_present=visitor_present,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - logging never blocks an alert
-            logger.warning("Package log write failed for %s: %s", device_id, exc)
-
     async def handle_notification_action(self, action_id: str, device_id: str) -> None:
         """React to a Home Assistant mobile app notification-action tap --
         the "I'm on my way" / "Turn them away" buttons on a
@@ -1016,11 +891,17 @@ class UnifiBridge:
             await self.speak_to_visitor(device_id, _COMING_TO_DOOR_PHRASE)
         elif action_id == KNOCK_PACKAGE_ACK_ACTION:
             # Nothing spoken -- the visitor who left it is long gone.
-            await self._acknowledge_package(device_id)
+            await self.packages.acknowledge(device_id)
         else:
             logger.warning(
                 "Unrecognized notification action %r for device %s", action_id, device_id
             )
+
+    def _rtsp_url(self, device_id: str) -> str | None:
+        camera = self.client.public_bootstrap.cameras.get(device_id)
+        streams = camera.rtsps_streams if camera is not None else None
+        url = streams.get_stream_url(self.config.rtsp_quality) if streams else None
+        return str(url) if url else None
 
     async def listen_to_visitor(self, device_id: str) -> str:
         """Capture a short audio window from `device_id`'s mic and transcribe it.
@@ -1039,9 +920,7 @@ class UnifiBridge:
             # `PublicOnlyModeError` on it. `public_bootstrap.cameras` is kept
             # primed by `update_public()` (called once in `run()`, before any
             # event can fire), including each camera's `rtsps_streams`.
-            camera = self.client.public_bootstrap.cameras.get(device_id)
-            streams = camera.rtsps_streams if camera is not None else None
-            url = streams.get_stream_url(self.config.rtsp_quality) if streams else None
+            url = self._rtsp_url(device_id)
             if not url:
                 logger.info("No RTSPS stream available for %s; skipping speech capture", device_id)
                 return ""
@@ -1150,7 +1029,7 @@ class UnifiBridge:
     def _on_event(self, event: _ProtectEventLike, change: EventChange) -> None:
         # uiprotect swallows (and so silently loses) anything this raises.
         try:
-            self._track_presence(event, change)
+            self.packages.track_presence(event, change)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Presence tracking failed for %s: %s", event.device_id, exc)
         if change != EventChange.STARTED:
@@ -1225,6 +1104,7 @@ def main() -> None:
         # already construct a real JSONLAuditLog() the same way.
         audit_log=JSONLAuditLog(),
         package_log=JSONLPackageLog(),
+        package_media_dir=default_package_media_dir(),
         public_base_url=knock_config.public_base_url,
     )
     logger.info(

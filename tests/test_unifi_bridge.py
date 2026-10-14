@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from uiprotect import EventChange
 
+import knock.integrations.package_alerts as package_alerts_module
 import knock.integrations.unifi as unifi_module
 from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
@@ -2381,7 +2382,7 @@ def test_person_events_on_other_cameras_do_not_hold_the_alert(tmp_path) -> None:
 def test_a_stale_person_detection_does_not_hold_the_alert(tmp_path, monkeypatch) -> None:
     # A person event whose ENDED was lost must stop counting eventually.
     bridge, notifier, log, mock_client = _package_bridge(tmp_path)
-    monkeypatch.setattr(unifi_module, "_PERSON_EVENT_MAX_AGE_SECONDS", 0.0)
+    monkeypatch.setattr(package_alerts_module, "_PERSON_EVENT_MAX_AGE_SECONDS", 0.0)
 
     async def scenario() -> None:
         bridge._on_event(_person_event(), EventChange.STARTED)

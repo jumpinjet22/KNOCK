@@ -534,6 +534,17 @@ class UnifiConfig(BaseModel):
     # turned off in Protect while someone lingers), send it anyway after
     # this long rather than never.
     package_departure_timeout_seconds: float = 120.0
+    # Re-send the package notification every this many hours (up to 3
+    # times) until someone taps "Got it". 0 turns reminders off.
+    package_reminder_hours: float = 0.0
+    # Look through the package camera after anyone comes and goes while a
+    # package is waiting, and notify if it's gone with no "Got it" -- with
+    # a photo of whoever came by. Needs a vision model (KNOCK_VISION_*).
+    package_removal_alerts: bool = True
+    # Length of the clip recorded off the doorbell's own stream when someone
+    # walks up to a waiting package (kept only if the package then turns out
+    # to be gone). 0 turns clips off; photos are still kept.
+    package_clip_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -577,6 +588,11 @@ class UnifiConfig(BaseModel):
             package_departure_timeout_seconds=float(
                 os.environ.get("KNOCK_UNIFI_PACKAGE_DEPARTURE_TIMEOUT_SECONDS", "120.0")
             ),
+            package_reminder_hours=float(os.environ.get("KNOCK_UNIFI_PACKAGE_REMINDER_HOURS", "0")),
+            package_removal_alerts=_bool(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_REMOVAL_ALERTS", "true")
+            ),
+            package_clip_seconds=float(os.environ.get("KNOCK_UNIFI_PACKAGE_CLIP_SECONDS", "30")),
         )
 
     @classmethod
@@ -622,5 +638,14 @@ class UnifiConfig(BaseModel):
                 "package_departure_timeout_seconds",
                 120.0,
                 float,
+            ),
+            package_reminder_hours=_resolve(
+                "KNOCK_UNIFI_PACKAGE_REMINDER_HOURS", s, "package_reminder_hours", 0.0, float
+            ),
+            package_removal_alerts=_resolve(
+                "KNOCK_UNIFI_PACKAGE_REMOVAL_ALERTS", s, "package_removal_alerts", True, _bool
+            ),
+            package_clip_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_CLIP_SECONDS", s, "package_clip_seconds", 30.0, float
             ),
         )
