@@ -39,7 +39,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -79,6 +79,10 @@ _REMOVAL_RECHECK_SECONDS = 10.0
 # Main-camera stills kept per pending package between "someone arrived" and
 # "they left" -- enough to show who came by without hoarding a wall of them.
 _MAX_EVIDENCE_STILLS = 3
+
+# How long a Protect video export may take before falling back to KNOCK's own
+# recording -- a short clip normally comes back in a few seconds.
+_EXPORT_TIMEOUT_SECONDS = 60.0
 
 DEFAULT_PACKAGE_MEDIA_DIR_ENV_VAR = "KNOCK_PACKAGE_MEDIA_DIR"
 
@@ -139,6 +143,8 @@ class _PendingPackage:
     reminders_sent: int = 0
     # Main-camera stills of whoever has come by since the last removal check.
     evidence: list[bytes] = field(default_factory=list)
+    # When the first of them walked up -- where a Protect export starts.
+    visitor_arrived_at: datetime | None = None
     clip_path: Path | None = None
     clip_task: asyncio.Task[None] | None = None
     reminder_task: asyncio.Task[None] | None = None
@@ -337,6 +343,8 @@ class PackageAlerts:
         pending = self._pending.get(device_id)
         if pending is None or not self._removal_watch_enabled():
             return
+        if pending.visitor_arrived_at is None:
+            pending.visitor_arrived_at = datetime.now(UTC)
         media_dir = self._bridge.package_media_dir
         if (
             media_dir is not None
@@ -412,6 +420,7 @@ class PackageAlerts:
         if pending.clip_task is not None:
             # Let a clip that's still recording finish -- it's the evidence.
             await asyncio.wait({pending.clip_task}, timeout=self._config.package_clip_seconds + 15)
+        await self._export_protect_clip(device_id, pending)
 
         try:
             after = await self._bridge.client.get_public_api_camera_snapshot(
@@ -431,6 +440,50 @@ class PackageAlerts:
             message += " The photo shows who came by."
         await self._notify(device_id, message, image_url)
         self._record(device_id, "removed", media=media)
+
+    async def _export_protect_clip(self, device_id: str, pending: _PendingPackage) -> None:
+        """With a full login, swap the self-recorded clip for Protect's own
+        recording, which reaches back before the person was even detected.
+        The self-recorded clip stays as the fallback if the export fails.
+        """
+        media_dir = self._bridge.package_media_dir
+        if (
+            not self._bridge.has_private_api
+            or media_dir is None
+            or pending.visitor_arrived_at is None
+            or self._config.package_clip_seconds <= 0
+        ):
+            return
+        start = pending.visitor_arrived_at - timedelta(
+            seconds=self._config.package_clip_preroll_seconds
+        )
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        path = media_dir / f"{stamp}-{device_id}-protect-clip.mp4"
+        try:
+            media_dir.mkdir(parents=True, exist_ok=True)
+            await asyncio.wait_for(
+                self._bridge.client.get_camera_video(
+                    device_id,
+                    start,
+                    datetime.now(UTC),
+                    # Main lens; the private bootstrap that channel
+                    # validation reads is never loaded in API-key mode.
+                    channel_index=0,
+                    validate_channel_id=False,
+                    output_file=path,
+                ),
+                timeout=_EXPORT_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to the own recording
+            logger.info("Protect clip export for %s failed: %s", device_id, exc)
+            path.unlink(missing_ok=True)
+            return
+        if not path.exists() or path.stat().st_size == 0:
+            path.unlink(missing_ok=True)
+            return
+        if pending.clip_path is not None:
+            pending.clip_path.unlink(missing_ok=True)
+        pending.clip_path = path
 
     def _save_media(
         self, device_id: str, pending: _PendingPackage, after: bytes | None
@@ -460,6 +513,7 @@ class PackageAlerts:
     def _discard(self, pending: _PendingPackage, *, keep_pending: bool = False) -> None:
         """Throw away evidence that turned out not to matter."""
         pending.evidence.clear()
+        pending.visitor_arrived_at = None
         clip_task, clip_path = pending.clip_task, pending.clip_path
         pending.clip_task = pending.clip_path = None
         if clip_path is None:

@@ -14,6 +14,7 @@ import pytest
 from uiprotect import EventChange
 
 import knock.integrations.package_alerts as package_alerts_module
+import knock.integrations.unifi as unifi_module
 from knock.config import UnifiConfig
 from knock.core.package_log import JSONLPackageLog
 from knock.core.scene import SceneObservation
@@ -380,6 +381,79 @@ def test_two_departure_signals_share_one_removal_check(tmp_path) -> None:
     assert vision.looks == 2  # one look + one recheck, not two of each
 
 
+# -- Protect video export (username/password configured) ------------------------
+
+
+def _with_export(h: _Harness, *, fails: bool = False) -> AsyncMock:
+    async def export(camera_id, start, end, *, channel_index, validate_channel_id, output_file):
+        if fails:
+            raise RuntimeError("export refused")
+        output_file.write_bytes(b"protect-mp4")
+
+    h.client.get_camera_video = AsyncMock(side_effect=export)
+    return h.client.get_camera_video
+
+
+def test_with_a_login_the_clip_comes_from_protect_with_preroll(tmp_path) -> None:
+    h = _Harness(tmp_path, vision=_Vision(_GONE), username="knock", password="pw")
+    export = _with_export(h)
+
+    async def scenario() -> None:
+        await h.deliver()
+        await h.someone_comes_and_goes()
+
+    asyncio.run(scenario())
+
+    export.assert_awaited_once()
+    camera_id, start, end = export.call_args.args
+    assert camera_id == "cam1"
+    assert (end - start).total_seconds() >= 10.0  # reaches back before detection
+    assert export.call_args.kwargs["channel_index"] == 0
+    assert export.call_args.kwargs["validate_channel_id"] is False
+    media = h.log.recent()[0].media
+    protect_clips = [name for name in media if name.endswith("protect-clip.mp4")]
+    assert len(protect_clips) == 1
+    assert h.media_dir is not None
+    assert (h.media_dir / protect_clips[0]).read_bytes() == b"protect-mp4"
+    # The self-recorded fallback was replaced, not kept alongside.
+    assert not h.clips[0].exists()
+    assert h.clips[0].name not in media
+
+
+def test_a_failed_export_keeps_the_self_recorded_clip(tmp_path) -> None:
+    h = _Harness(tmp_path, vision=_Vision(_GONE), username="knock", password="pw")
+    _with_export(h, fails=True)
+
+    async def scenario() -> None:
+        await h.deliver()
+        await h.someone_comes_and_goes()
+
+    asyncio.run(scenario())
+
+    media = h.log.recent()[0].media
+    assert h.clips[0].name in media
+    assert h.clips[0].exists()
+    assert not any(name.endswith("protect-clip.mp4") for name in media)
+
+
+def test_without_a_login_protect_export_is_never_attempted(tmp_path) -> None:
+    h = _Harness(tmp_path, vision=_Vision(_GONE))
+    export = _with_export(h)
+
+    async def scenario() -> None:
+        await h.deliver()
+        await h.someone_comes_and_goes()
+
+    asyncio.run(scenario())
+
+    export.assert_not_awaited()
+
+
+def test_half_a_login_counts_as_none(tmp_path) -> None:
+    h = _Harness(tmp_path, username="knock")
+    assert h.bridge.has_private_api is False
+
+
 # -- the clip recorder itself ----------------------------------------------------------
 
 
@@ -441,3 +515,37 @@ def test_package_followup_from_env(monkeypatch) -> None:
     assert config.package_reminder_hours == 4.0
     assert config.package_removal_alerts is False
     assert config.package_clip_seconds == 0.0
+
+
+def test_login_settings_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("KNOCK_UNIFI_USERNAME", "knock")
+    monkeypatch.setenv("KNOCK_UNIFI_PASSWORD", "hunter2")
+    monkeypatch.setenv("KNOCK_UNIFI_PACKAGE_CLIP_PREROLL_SECONDS", "5")
+
+    config = UnifiConfig.from_env()
+
+    assert config.username == "knock"
+    assert config.password.get_secret_value() == "hunter2"
+    assert "hunter2" not in repr(config)
+    assert config.package_clip_preroll_seconds == 5.0
+
+
+def test_bridge_logs_in_with_both_api_key_and_password(monkeypatch, tmp_path) -> None:
+    created: list[dict] = []
+
+    def fake_client(**kwargs) -> MagicMock:
+        created.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(unifi_module, "ProtectApiClient", fake_client)
+
+    UnifiBridge(
+        config=UnifiConfig(api_key="key", username="knock", password="pw"),
+        session_store=JSONFileSessionStore(tmp_path),
+    )
+    UnifiBridge(config=UnifiConfig(api_key="key"), session_store=JSONFileSessionStore(tmp_path))
+
+    assert created[0]["api_key"] == "key"
+    assert (created[0]["username"], created[0]["password"]) == ("knock", "pw")
+    # API key only: no login passed at all (uiprotect stays public-only).
+    assert (created[1]["username"], created[1]["password"]) == (None, None)

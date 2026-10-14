@@ -476,6 +476,12 @@ class UnifiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 443
     api_key: SecretStr = SecretStr("")
+    # Optional login for a *local* console user, used alongside the API key.
+    # Only needed for what Protect keeps behind its private API -- today,
+    # exporting recorded video (see `package_clip_preroll_seconds`). Both
+    # blank (the default) keeps KNOCK on the API key alone.
+    username: str = ""
+    password: SecretStr = SecretStr("")
     verify_ssl: bool = False
     trigger_on: list[str] = Field(default_factory=lambda: ["ring"])
     # Which camera(s) a matching trigger_on event actually reacts to.
@@ -545,6 +551,11 @@ class UnifiConfig(BaseModel):
     # walks up to a waiting package (kept only if the package then turns out
     # to be gone). 0 turns clips off; photos are still kept.
     package_clip_seconds: float = 30.0
+    # With `username`/`password` set, the clip is exported from Protect's own
+    # recording instead, starting this many seconds *before* the person was
+    # detected -- so it shows them walking up, not just from the moment
+    # Protect noticed them.
+    package_clip_preroll_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -566,6 +577,8 @@ class UnifiConfig(BaseModel):
             host=os.environ.get("KNOCK_UNIFI_HOST", "127.0.0.1"),
             port=int(os.environ.get("KNOCK_UNIFI_PORT", "443")),
             api_key=os.environ.get("KNOCK_UNIFI_API_KEY", ""),
+            username=os.environ.get("KNOCK_UNIFI_USERNAME", ""),
+            password=os.environ.get("KNOCK_UNIFI_PASSWORD", ""),
             verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
             trigger_on=trigger_on,
             trigger_camera_ids=trigger_camera_ids,
@@ -593,6 +606,9 @@ class UnifiConfig(BaseModel):
                 os.environ.get("KNOCK_UNIFI_PACKAGE_REMOVAL_ALERTS", "true")
             ),
             package_clip_seconds=float(os.environ.get("KNOCK_UNIFI_PACKAGE_CLIP_SECONDS", "30")),
+            package_clip_preroll_seconds=float(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_CLIP_PREROLL_SECONDS", "10")
+            ),
         )
 
     @classmethod
@@ -605,6 +621,8 @@ class UnifiConfig(BaseModel):
             host=_resolve("KNOCK_UNIFI_HOST", s, "host", "127.0.0.1"),
             port=_resolve("KNOCK_UNIFI_PORT", s, "port", 443, int),
             api_key=_resolve("KNOCK_UNIFI_API_KEY", s, "api_key", ""),
+            username=_resolve("KNOCK_UNIFI_USERNAME", s, "username", ""),
+            password=_resolve("KNOCK_UNIFI_PASSWORD", s, "password", ""),
             verify_ssl=_resolve("KNOCK_UNIFI_VERIFY_SSL", s, "verify_ssl", False, _bool),
             trigger_on=(
                 trigger_on_env if trigger_on_env is not None else s.get("trigger_on", ["ring"])
@@ -647,5 +665,12 @@ class UnifiConfig(BaseModel):
             ),
             package_clip_seconds=_resolve(
                 "KNOCK_UNIFI_PACKAGE_CLIP_SECONDS", s, "package_clip_seconds", 30.0, float
+            ),
+            package_clip_preroll_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_CLIP_PREROLL_SECONDS",
+                s,
+                "package_clip_preroll_seconds",
+                10.0,
+                float,
             ),
         )

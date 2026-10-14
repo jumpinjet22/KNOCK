@@ -380,6 +380,9 @@ class UnifiBridge:
             port=self.config.port,
             api_key=self.config.api_key.get_secret_value(),
             verify_ssl=self.config.verify_ssl,
+            # uiprotect rejects half a login, so only pass a complete one.
+            username=self.config.username if self.has_private_api else None,
+            password=self.config.password.get_secret_value() if self.has_private_api else None,
         )
         self._talkback_stream_factory = talkback_stream_factory
         self._rtsp_audio_capture = rtsp_audio_capture or functools.partial(
@@ -394,6 +397,13 @@ class UnifiBridge:
         self.package_media_dir = package_media_dir
         self._clip_recorder = clip_recorder or record_rtsp_clip
         self.packages = PackageAlerts(self)
+
+    @property
+    def has_private_api(self) -> bool:
+        """A full local login is configured, on top of the API key -- what
+        Protect's private API (e.g. video export) needs.
+        """
+        return bool(self.config.username and self.config.password.get_secret_value())
 
     # -- pure logic: directly testable without a real console -----------------
 
