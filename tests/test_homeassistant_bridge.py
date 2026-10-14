@@ -17,6 +17,7 @@ from knock.integrations.homeassistant import (
     HomeAssistantActionListener,
     HomeAssistantBridge,
     HomeAssistantNotifier,
+    package_notification_tag,
     parse_action_device_id,
     websocket_url,
 )
@@ -395,6 +396,7 @@ def test_notifier_calls_the_configured_service_with_a_bearer_token() -> None:
         ("approval", "knock_approval", "time-sensitive"),
         ("fyi", "knock_fyi", "passive"),
         ("review", "knock_review", "time-sensitive"),
+        ("package", "knock_package", "active"),
     ],
 )
 def test_notifier_picks_channel_and_interruption_level_by_category(
@@ -464,6 +466,37 @@ def test_notifier_omits_image_when_not_given() -> None:
 def test_notifier_is_a_no_op_without_a_configured_service() -> None:
     notifier = HomeAssistantNotifier(_notifier_config(notify_service=None))
     notifier.notify("should not be sent anywhere")  # should not raise
+
+
+@respx.mock
+def test_notifier_uses_an_explicit_tag_over_the_category_default() -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.notify("A package was left.", category="package", tag=package_notification_tag("cam1"))
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["data"]["tag"] == "knock-package-cam1"
+
+
+@respx.mock
+def test_notifier_clear_sends_clear_notification_for_the_tag() -> None:
+    route = respx.post("http://ha.local:8123/api/services/notify/mobile_app_test").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    notifier = HomeAssistantNotifier(_notifier_config())
+
+    notifier.clear("knock-package-cam1")
+
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"message": "clear_notification", "data": {"tag": "knock-package-cam1"}}
+
+
+def test_notifier_clear_is_a_no_op_without_a_configured_service() -> None:
+    notifier = HomeAssistantNotifier(_notifier_config(notify_service=None))
+    notifier.clear("knock-package-cam1")  # should not raise
 
 
 # -- parse_action_device_id -------------------------------------------------------

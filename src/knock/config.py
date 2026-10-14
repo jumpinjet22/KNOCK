@@ -476,6 +476,12 @@ class UnifiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 443
     api_key: SecretStr = SecretStr("")
+    # Optional login for a *local* console user, used alongside the API key.
+    # Only needed for what Protect keeps behind its private API -- today,
+    # exporting recorded video (see `package_clip_preroll_seconds`). Both
+    # blank (the default) keeps KNOCK on the API key alone.
+    username: str = ""
+    password: SecretStr = SecretStr("")
     verify_ssl: bool = False
     trigger_on: list[str] = Field(default_factory=lambda: ["ring"])
     # Which camera(s) a matching trigger_on event actually reacts to.
@@ -519,6 +525,37 @@ class UnifiConfig(BaseModel):
     # it's considered over -- a `ring` after the cooldown but still within
     # the idle timeout still restarts, since that's plausibly a new visitor.
     ring_cooldown_seconds: float = 15.0
+    # A Protect "package" smart-detect (the doorbell's package camera saw a
+    # box land) sends a household notification with a "Got it" button,
+    # instead of being treated as a visitor to start a conversation with --
+    # there's nobody to greet. Held back while a visitor is still at the door
+    # (an ongoing conversation or person detection) and sent the moment they
+    # leave, so it reads "package left," not "someone's here with a box."
+    package_alerts: bool = True
+    # Protect can report the same box more than once; one notification per
+    # camera within this window.
+    package_cooldown_seconds: float = 300.0
+    # Safety net for a held-back alert: if "the visitor left" is never
+    # observed (a lost person-detection ENDED event, or person detection
+    # turned off in Protect while someone lingers), send it anyway after
+    # this long rather than never.
+    package_departure_timeout_seconds: float = 120.0
+    # Re-send the package notification every this many hours (up to 3
+    # times) until someone taps "Got it". 0 turns reminders off.
+    package_reminder_hours: float = 0.0
+    # Look through the package camera after anyone comes and goes while a
+    # package is waiting, and notify if it's gone with no "Got it" -- with
+    # a photo of whoever came by. Needs a vision model (KNOCK_VISION_*).
+    package_removal_alerts: bool = True
+    # Length of the clip recorded off the doorbell's own stream when someone
+    # walks up to a waiting package (kept only if the package then turns out
+    # to be gone). 0 turns clips off; photos are still kept.
+    package_clip_seconds: float = 30.0
+    # With `username`/`password` set, the clip is exported from Protect's own
+    # recording instead, starting this many seconds *before* the person was
+    # detected -- so it shows them walking up, not just from the moment
+    # Protect noticed them.
+    package_clip_preroll_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -540,6 +577,8 @@ class UnifiConfig(BaseModel):
             host=os.environ.get("KNOCK_UNIFI_HOST", "127.0.0.1"),
             port=int(os.environ.get("KNOCK_UNIFI_PORT", "443")),
             api_key=os.environ.get("KNOCK_UNIFI_API_KEY", ""),
+            username=os.environ.get("KNOCK_UNIFI_USERNAME", ""),
+            password=os.environ.get("KNOCK_UNIFI_PASSWORD", ""),
             verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
             trigger_on=trigger_on,
             trigger_camera_ids=trigger_camera_ids,
@@ -555,6 +594,21 @@ class UnifiConfig(BaseModel):
             ring_cooldown_seconds=float(
                 os.environ.get("KNOCK_UNIFI_RING_COOLDOWN_SECONDS", "15.0")
             ),
+            package_alerts=_bool(os.environ.get("KNOCK_UNIFI_PACKAGE_ALERTS", "true")),
+            package_cooldown_seconds=float(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_COOLDOWN_SECONDS", "300.0")
+            ),
+            package_departure_timeout_seconds=float(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_DEPARTURE_TIMEOUT_SECONDS", "120.0")
+            ),
+            package_reminder_hours=float(os.environ.get("KNOCK_UNIFI_PACKAGE_REMINDER_HOURS", "0")),
+            package_removal_alerts=_bool(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_REMOVAL_ALERTS", "true")
+            ),
+            package_clip_seconds=float(os.environ.get("KNOCK_UNIFI_PACKAGE_CLIP_SECONDS", "30")),
+            package_clip_preroll_seconds=float(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_CLIP_PREROLL_SECONDS", "10")
+            ),
         )
 
     @classmethod
@@ -567,6 +621,8 @@ class UnifiConfig(BaseModel):
             host=_resolve("KNOCK_UNIFI_HOST", s, "host", "127.0.0.1"),
             port=_resolve("KNOCK_UNIFI_PORT", s, "port", 443, int),
             api_key=_resolve("KNOCK_UNIFI_API_KEY", s, "api_key", ""),
+            username=_resolve("KNOCK_UNIFI_USERNAME", s, "username", ""),
+            password=_resolve("KNOCK_UNIFI_PASSWORD", s, "password", ""),
             verify_ssl=_resolve("KNOCK_UNIFI_VERIFY_SSL", s, "verify_ssl", False, _bool),
             trigger_on=(
                 trigger_on_env if trigger_on_env is not None else s.get("trigger_on", ["ring"])
@@ -589,5 +645,32 @@ class UnifiConfig(BaseModel):
             ),
             ring_cooldown_seconds=_resolve(
                 "KNOCK_UNIFI_RING_COOLDOWN_SECONDS", s, "ring_cooldown_seconds", 15.0, float
+            ),
+            package_alerts=_resolve("KNOCK_UNIFI_PACKAGE_ALERTS", s, "package_alerts", True, _bool),
+            package_cooldown_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_COOLDOWN_SECONDS", s, "package_cooldown_seconds", 300.0, float
+            ),
+            package_departure_timeout_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_DEPARTURE_TIMEOUT_SECONDS",
+                s,
+                "package_departure_timeout_seconds",
+                120.0,
+                float,
+            ),
+            package_reminder_hours=_resolve(
+                "KNOCK_UNIFI_PACKAGE_REMINDER_HOURS", s, "package_reminder_hours", 0.0, float
+            ),
+            package_removal_alerts=_resolve(
+                "KNOCK_UNIFI_PACKAGE_REMOVAL_ALERTS", s, "package_removal_alerts", True, _bool
+            ),
+            package_clip_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_CLIP_SECONDS", s, "package_clip_seconds", 30.0, float
+            ),
+            package_clip_preroll_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_CLIP_PREROLL_SECONDS",
+                s,
+                "package_clip_preroll_seconds",
+                10.0,
+                float,
             ),
         )

@@ -28,6 +28,12 @@ and speak a response back. Like vision, talkback is optional and
 best-effort -- a camera with no speaker, or any streaming failure, is
 logged and does not affect the rest of the response.
 
+A Protect "package" smart-detect (the doorbell's package camera saw a box)
+never starts a conversation -- there's nobody to talk to. It sends a
+household notification with the package-camera photo and a "Got it" button
+instead, held back until the visitor walks away -- plus optional reminders
+and "gone without a Got it" alerts. See `integrations/package_alerts.py`.
+
 The `uiprotect` event callback is synchronous (it's called directly by the
 library's websocket handler), but snapshot/speech/vision/talkback all need
 async I/O, so the sync callback (`_on_event`) just schedules the real
@@ -70,6 +76,7 @@ from knock.conversation.prompts import GREETING
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
+from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
 from knock.core.responses import ResponseDecision
 from knock.core.scene import SceneContext, SceneObservation
 from knock.core.session_store import JSONFileSessionStore, SessionStore
@@ -85,10 +92,16 @@ from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
     KNOCK_COMING_TO_DOOR_ACTION,
     KNOCK_ON_MY_WAY_ACTION,
+    KNOCK_PACKAGE_ACK_ACTION,
     KNOCK_TURN_AWAY_ACTION,
     HomeAssistantActionListener,
     HomeAssistantNotifier,
     NotificationCategory,
+)
+from knock.integrations.package_alerts import (
+    PackageAlerts,
+    default_package_media_dir,
+    record_rtsp_clip,
 )
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
@@ -307,6 +320,9 @@ class _ProtectEventLike(Protocol):
     """
 
     @property
+    def id(self) -> str: ...
+
+    @property
     def type(self) -> Any: ...
 
     @property
@@ -334,6 +350,9 @@ class UnifiBridge:
         ha_notifier: HomeAssistantNotifier | None = None,
         snapshot_store: SnapshotStore | None = None,
         public_base_url: str | None = None,
+        package_log: PackageLog | None = None,
+        package_media_dir: Path | None = None,
+        clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -361,6 +380,9 @@ class UnifiBridge:
             port=self.config.port,
             api_key=self.config.api_key.get_secret_value(),
             verify_ssl=self.config.verify_ssl,
+            # uiprotect rejects half a login, so only pass a complete one.
+            username=self.config.username if self.has_private_api else None,
+            password=self.config.password.get_secret_value() if self.has_private_api else None,
         )
         self._talkback_stream_factory = talkback_stream_factory
         self._rtsp_audio_capture = rtsp_audio_capture or functools.partial(
@@ -368,6 +390,20 @@ class UnifiBridge:
             end_silence_seconds=self.config.end_silence_seconds,
             silence_rms_threshold=self.config.silence_rms_threshold,
         )
+        self.package_log = package_log or NullPackageLog()
+        # Where photos/clips of a package taken without a "Got it" are kept.
+        # None (the default) keeps nothing on disk -- the notification still
+        # carries the photo.
+        self.package_media_dir = package_media_dir
+        self._clip_recorder = clip_recorder or record_rtsp_clip
+        self.packages = PackageAlerts(self)
+
+    @property
+    def has_private_api(self) -> bool:
+        """A full local login is configured, on top of the API key -- what
+        Protect's private API (e.g. video export) needs.
+        """
+        return bool(self.config.username and self.config.password.get_secret_value())
 
     # -- pure logic: directly testable without a real console -----------------
 
@@ -380,6 +416,10 @@ class UnifiBridge:
             return True
         if event_type in _SMART_DETECT_EVENT_TYPES:
             smart_types = {str(t) for t in event.smart_detect_types}
+            if self.packages.is_package_detection(event) and smart_types == {"package"}:
+                # A box alone is handled by `PackageAlerts` -- never a
+                # conversation, even with "package" in trigger_on.
+                return False
             return bool(smart_types & set(self.config.trigger_on))
         return False
 
@@ -453,6 +493,7 @@ class UnifiBridge:
         actions: list[dict[str, str]] | None = None,
         category: NotificationCategory = "fyi",
         image_url: str | None = None,
+        tag: str | None = None,
     ) -> None:
         """Best-effort, off the event loop (the HTTP call itself is
         synchronous) -- a down or unconfigured Home Assistant never affects
@@ -460,6 +501,9 @@ class UnifiBridge:
         """
         if self.ha_notifier is None:
             return
+        # Only passed when set, so the default per-category tag stays the
+        # notifier's own decision.
+        extra: dict[str, Any] = {"tag": tag} if tag is not None else {}
         try:
             await asyncio.to_thread(
                 self.ha_notifier.notify,
@@ -467,6 +511,7 @@ class UnifiBridge:
                 actions=actions,
                 category=category,
                 image=image_url,
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 - notification is best-effort
             logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
@@ -487,6 +532,14 @@ class UnifiBridge:
             logger.warning("Snapshot fetch failed for device %s: %s", device_id, exc)
             return None
         if snapshot is None:
+            return None
+        return self._snapshot_url_for(snapshot)
+
+    def _snapshot_url_for(self, snapshot: bytes) -> str | None:
+        """A notification-attachable link for already-captured image bytes
+        (see `_build_snapshot_url`), or None without `public_base_url`.
+        """
+        if not self.public_base_url:
             return None
         token = self.snapshot_store.put(snapshot)
         return f"{self.public_base_url.rstrip('/')}/api/snapshot/{token}"
@@ -583,9 +636,26 @@ class UnifiBridge:
             return self._detector_scene(event), None
 
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
-        if not self.should_trigger(event):
+        is_package = self.packages.is_package_detection(event)
+        converses = self.should_trigger(event)
+        if not is_package and not converses:
             return None
 
+        # Counted before the package check so a box seen mid-conversation is
+        # held until the visitor leaves, not announced while they stand there.
+        if converses:
+            self.packages.conversation_started(event.device_id)
+        try:
+            if is_package:
+                await self.packages.on_package_detected(event.device_id)
+            if not converses:
+                return None
+            return await self._run_conversation(event)
+        finally:
+            if converses:
+                self.packages.conversation_ended(event.device_id)
+
+    async def _run_conversation(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
             # Let the physical doorbell chime finish before KNOCK starts
             # talking over it or opens its listen window early enough to
@@ -829,10 +899,19 @@ class UnifiBridge:
             await self.speak_to_visitor(device_id, _TURN_AWAY_PHRASE)
         elif action_id == KNOCK_COMING_TO_DOOR_ACTION:
             await self.speak_to_visitor(device_id, _COMING_TO_DOOR_PHRASE)
+        elif action_id == KNOCK_PACKAGE_ACK_ACTION:
+            # Nothing spoken -- the visitor who left it is long gone.
+            await self.packages.acknowledge(device_id)
         else:
             logger.warning(
                 "Unrecognized notification action %r for device %s", action_id, device_id
             )
+
+    def _rtsp_url(self, device_id: str) -> str | None:
+        camera = self.client.public_bootstrap.cameras.get(device_id)
+        streams = camera.rtsps_streams if camera is not None else None
+        url = streams.get_stream_url(self.config.rtsp_quality) if streams else None
+        return str(url) if url else None
 
     async def listen_to_visitor(self, device_id: str) -> str:
         """Capture a short audio window from `device_id`'s mic and transcribe it.
@@ -851,9 +930,7 @@ class UnifiBridge:
             # `PublicOnlyModeError` on it. `public_bootstrap.cameras` is kept
             # primed by `update_public()` (called once in `run()`, before any
             # event can fire), including each camera's `rtsps_streams`.
-            camera = self.client.public_bootstrap.cameras.get(device_id)
-            streams = camera.rtsps_streams if camera is not None else None
-            url = streams.get_stream_url(self.config.rtsp_quality) if streams else None
+            url = self._rtsp_url(device_id)
             if not url:
                 logger.info("No RTSPS stream available for %s; skipping speech capture", device_id)
                 return ""
@@ -960,6 +1037,11 @@ class UnifiBridge:
     # -- uiprotect callback ----------------------------------------------------
 
     def _on_event(self, event: _ProtectEventLike, change: EventChange) -> None:
+        # uiprotect swallows (and so silently loses) anything this raises.
+        try:
+            self.packages.track_presence(event, change)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Presence tracking failed for %s: %s", event.device_id, exc)
         if change != EventChange.STARTED:
             return
         asyncio.get_running_loop().create_task(self.handle_event(event))
@@ -1031,6 +1113,8 @@ def main() -> None:
         # audit.jsonl / the web UI's History page -- the CLI and web API
         # already construct a real JSONLAuditLog() the same way.
         audit_log=JSONLAuditLog(),
+        package_log=JSONLPackageLog(),
+        package_media_dir=default_package_media_dir(),
         public_base_url=knock_config.public_base_url,
     )
     logger.info(

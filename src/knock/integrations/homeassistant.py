@@ -66,6 +66,10 @@ KNOCK_TURN_AWAY_ACTION = "knock_turn_away"
 # just a way to tell a waiting visitor someone's coming without needing
 # the app's live-talk feature for something this simple.
 KNOCK_COMING_TO_DOOR_ACTION = "knock_coming_to_door"
+# "Got it" on a package notification -- nobody's at the door to speak to,
+# so this only clears the notification (from every household phone, via
+# its tag -- see `package_notification_tag`) and logs the acknowledgement.
+KNOCK_PACKAGE_ACK_ACTION = "knock_package_ack"
 ACTION_DEVICE_ID_SEP = "::"
 
 
@@ -86,13 +90,14 @@ def _default_session_id(entity_id: str) -> str:
 # Home Assistant app's one-time "Critical Notifications" permission, or
 # iOS silently treats it as a normal alert instead) all the way down to
 # "passive" (no sound/vibration, appears in the notification list only).
-NotificationCategory = Literal["emergency", "approval", "fyi", "review"]
+NotificationCategory = Literal["emergency", "approval", "fyi", "review", "package"]
 
 _CATEGORY_CHANNELS: dict[NotificationCategory, str] = {
     "emergency": "knock_emergency",
     "approval": "knock_approval",
     "fyi": "knock_fyi",
     "review": "knock_review",
+    "package": "knock_package",
 }
 
 _CATEGORY_PUSH: dict[NotificationCategory, dict[str, Any]] = {
@@ -109,7 +114,18 @@ _CATEGORY_PUSH: dict[NotificationCategory, dict[str, Any]] = {
     # necessarily have, and "fyi" is deliberately passive/silent, which
     # would defeat the point of surfacing an otherwise-silent "unknown".
     "review": {"interruption-level": "time-sensitive"},
+    # A normal alert: worth a sound (unlike "fyi"), but a box on the porch
+    # isn't worth breaking through Focus the way a waiting visitor is.
+    "package": {"interruption-level": "active"},
 }
+
+
+def package_notification_tag(device_id: str) -> str:
+    """One package notification per camera: a newer one replaces an older
+    one still on screen, and "Got it" can clear it by tag alone -- no
+    record of which notification went out needs to survive a restart.
+    """
+    return f"knock-package-{device_id}"
 
 
 class HomeAssistantNotifier:
@@ -137,6 +153,7 @@ class HomeAssistantNotifier:
         actions: list[dict[str, str]] | None = None,
         category: NotificationCategory = "fyi",
         image: str | None = None,
+        tag: str | None = None,
     ) -> None:
         """No-op if `notify_service` isn't configured -- callers don't need
         to check that themselves before calling this.
@@ -158,20 +175,36 @@ class HomeAssistantNotifier:
         the phone (see core/snapshot_store.py/api/snapshot_routes.py for how
         callers get one) -- not authenticated, since the phone can't present
         KNOCK's session cookie.
+
+        `tag` overrides the default one-per-category tag, for a notification
+        that needs to be individually replaceable/clearable (see `clear`).
         """
         if not self.config.notify_service:
             return
-        domain, _, name = self.config.notify_service.partition(".")
         data: dict[str, Any] = {
             "channel": _CATEGORY_CHANNELS[category],
-            "tag": f"knock-{category}",
+            "tag": tag or f"knock-{category}",
             "push": _CATEGORY_PUSH[category],
         }
         if actions:
             data["actions"] = actions
         if image:
             data["image"] = image
-        payload: dict[str, Any] = {"message": message, "data": data}
+        self._call_notify(self.config.notify_service, {"message": message, "data": data})
+
+    def clear(self, tag: str) -> None:
+        """Remove the notification with `tag` from every device it was sent
+        to -- the companion app's special `clear_notification` message. Same
+        no-op rule as `notify`.
+        """
+        if not self.config.notify_service:
+            return
+        self._call_notify(
+            self.config.notify_service, {"message": "clear_notification", "data": {"tag": tag}}
+        )
+
+    def _call_notify(self, service: str, payload: dict[str, Any]) -> None:
+        domain, _, name = service.partition(".")
         response = self._http_client.post(
             f"{self.config.base_url}/api/services/{domain}/{name}",
             json=payload,
