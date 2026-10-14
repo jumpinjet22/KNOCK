@@ -15,6 +15,7 @@ from knock.config import UnifiConfig
 from knock.conversation.prompts import GREETING
 from knock.core.audit import JSONLAuditLog
 from knock.core.orchestrator import Orchestrator
+from knock.core.package_log import JSONLPackageLog
 from knock.core.scene import SceneObservation
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
@@ -36,9 +37,10 @@ def _event(
     event_type: str = "ring",
     device_id: str = "cam1",
     smart_detect_types: tuple[str, ...] = (),
+    event_id: str = "evt1",
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        type=event_type, device_id=device_id, smart_detect_types=smart_detect_types
+        id=event_id, type=event_type, device_id=device_id, smart_detect_types=smart_detect_types
     )
 
 
@@ -2133,3 +2135,280 @@ def test_capture_rtsp_audio_stops_once_the_visitor_goes_quiet(tmp_path) -> None:
     # The 0.5s of speech plus ~1s of trailing quiet -- never the later tone.
     assert 1.4 < seconds < 1.8
     assert len(full) / 2 / rate > 4.0
+
+
+# -- package alerts ---------------------------------------------------------------
+
+
+def _package_event(device_id: str = "cam1", event_id: str = "pkg1") -> SimpleNamespace:
+    return _event(
+        event_type="smartDetectZone",
+        device_id=device_id,
+        smart_detect_types=("package",),
+        event_id=event_id,
+    )
+
+
+def _person_event(device_id: str = "cam1", event_id: str = "person1") -> SimpleNamespace:
+    return _event(
+        event_type="smartDetectZone",
+        device_id=device_id,
+        smart_detect_types=("person",),
+        event_id=event_id,
+    )
+
+
+def _package_bridge(
+    tmp_path, **config_overrides
+) -> tuple[UnifiBridge, MagicMock, JSONLPackageLog, MagicMock]:
+    """The bridge plus the mocks a test asserts on: HA notifier, package
+    log, and the Protect client (for which lens a snapshot came from).
+    """
+    mock_client = MagicMock()
+    mock_client.get_public_api_camera_snapshot = AsyncMock(
+        side_effect=lambda device_id, package=False: b"package-lens" if package else b"main-lens"
+    )
+    notifier = MagicMock()
+    log = JSONLPackageLog(tmp_path / "package_events.jsonl")
+    bridge = _bridge(tmp_path, mock_client=mock_client, **config_overrides)
+    bridge.ha_notifier = notifier
+    bridge.package_log = log
+    bridge.public_base_url = "https://knock.example.com"
+    return bridge, notifier, log, mock_client
+
+
+def _package_log_kinds(log: JSONLPackageLog) -> list[str]:
+    return [event.kind for event in reversed(log.recent())]
+
+
+def test_package_with_nobody_at_the_door_notifies_immediately(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+
+    result = asyncio.run(bridge.handle_event(_package_event()))
+
+    assert result is None
+    notify = notifier.notify
+    notify.assert_called_once()
+    assert "package was detected" in notify.call_args.args[0]
+    kwargs = notify.call_args.kwargs
+    assert kwargs["category"] == "package"
+    assert kwargs["tag"] == "knock-package-cam1"
+    assert kwargs["actions"] == [
+        {"action": f"knock_package_ack{ACTION_DEVICE_ID_SEP}cam1", "title": "Got it"}
+    ]
+    # The photo comes from the package lens, not the main view.
+    mock_client.get_public_api_camera_snapshot.assert_awaited_once_with("cam1", package=True)
+    assert kwargs["image"].startswith("https://knock.example.com/api/snapshot/")
+    assert _package_log_kinds(log) == ["detected", "notified"]
+    assert log.recent()[-1].visitor_present is False
+
+
+def test_package_never_starts_a_conversation_even_if_in_trigger_on(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path, trigger_on=["ring", "package"])
+
+    asyncio.run(bridge.handle_event(_package_event()))
+
+    assert bridge.session_store.load("unifi-cam1") is None
+    notifier.notify.assert_called_once()
+
+
+def test_package_alert_waits_for_the_visitor_to_walk_away(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+
+    async def scenario() -> None:
+        bridge._on_event(_person_event(), EventChange.STARTED)
+        bridge._on_event(_package_event(), EventChange.STARTED)
+        await asyncio.sleep(0.01)
+        # Still standing there -- nothing sent yet.
+        notifier.notify.assert_not_called()
+
+        bridge._on_event(_person_event(), EventChange.ENDED)
+        await _settle()
+
+    asyncio.run(scenario())
+
+    notifier.notify.assert_called_once()
+    assert "left at the door" in notifier.notify.call_args.args[0]
+    assert _package_log_kinds(log) == ["detected", "notified"]
+    assert log.recent()[-1].visitor_present is True
+
+
+def test_package_alert_waits_for_every_open_person_detection(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+
+    async def scenario() -> None:
+        bridge._on_event(_person_event(event_id="a"), EventChange.STARTED)
+        bridge._on_event(_person_event(event_id="b"), EventChange.STARTED)
+        bridge._on_event(_package_event(), EventChange.STARTED)
+        bridge._on_event(_person_event(event_id="a"), EventChange.ENDED)
+        await asyncio.sleep(0.01)
+        notifier.notify.assert_not_called()
+
+        bridge._on_event(_person_event(event_id="b"), EventChange.ENDED)
+        await _settle()
+
+    asyncio.run(scenario())
+
+    notifier.notify.assert_called_once()
+
+
+def test_held_package_alert_goes_out_after_the_departure_timeout(tmp_path) -> None:
+    # A lost ENDED event must not swallow the alert forever.
+    bridge, notifier, log, mock_client = _package_bridge(
+        tmp_path, package_departure_timeout_seconds=0.01
+    )
+
+    async def scenario() -> None:
+        bridge._on_event(_person_event(), EventChange.STARTED)
+        bridge._on_event(_package_event(), EventChange.STARTED)
+        await _settle()
+
+    asyncio.run(scenario())
+
+    notifier.notify.assert_called_once()
+    assert "left at the door" in notifier.notify.call_args.args[0]
+
+
+def test_package_seen_mid_conversation_is_announced_after_it_ends(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path, trigger_on=["ring", "person"])
+    order: list[str] = []
+    real_respond = bridge.orchestrator.respond
+
+    def respond(*args, **kwargs):
+        order.append("respond")
+        return real_respond(*args, **kwargs)
+
+    bridge.orchestrator.respond = respond  # type: ignore[method-assign]
+    notifier.notify.side_effect = lambda *a, **k: order.append("notify")
+
+    async def scenario() -> None:
+        await bridge.handle_event(
+            _event(event_type="smartDetectZone", smart_detect_types=("person", "package"))
+        )
+        await _settle()
+
+    asyncio.run(scenario())
+
+    assert order == ["respond", "notify"]
+    assert "left at the door" in notifier.notify.call_args.args[0]
+
+
+def test_repeat_package_detection_within_the_cooldown_is_ignored(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+
+    async def scenario() -> None:
+        await bridge.handle_event(_package_event(event_id="pkg1"))
+        await bridge.handle_event(_package_event(event_id="pkg2"))
+
+    asyncio.run(scenario())
+
+    notifier.notify.assert_called_once()
+
+
+def test_package_detection_after_the_cooldown_notifies_again(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path, package_cooldown_seconds=0.0)
+
+    async def scenario() -> None:
+        await bridge.handle_event(_package_event(event_id="pkg1"))
+        await bridge.handle_event(_package_event(event_id="pkg2"))
+
+    asyncio.run(scenario())
+
+    assert notifier.notify.call_count == 2
+
+
+def test_package_alerts_respect_the_camera_allow_list(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(
+        tmp_path, trigger_camera_ids=["doorbell-cam"]
+    )
+
+    asyncio.run(bridge.handle_event(_package_event(device_id="driveway-cam")))
+
+    notifier.notify.assert_not_called()
+
+
+def test_package_alerts_disabled_restores_the_old_behavior(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(
+        tmp_path, package_alerts=False, trigger_on=["ring", "package"]
+    )
+
+    asyncio.run(bridge.handle_event(_package_event()))
+
+    # No package notification -- just the conversation trigger_on asked for.
+    assert bridge.session_store.load("unifi-cam1") is not None
+    assert _package_log_kinds(log) == []
+
+
+def test_package_ack_clears_the_notification_and_logs_without_speaking(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+    spoken: list[str] = []
+
+    async def fake_speak(device_id: str, text: str) -> None:
+        spoken.append(text)
+
+    bridge.speak_to_visitor = fake_speak  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_notification_action("knock_package_ack", "cam1"))
+
+    notifier.clear.assert_called_once_with("knock-package-cam1")
+    assert spoken == []
+    assert _package_log_kinds(log) == ["acknowledged"]
+
+
+def test_package_ack_is_still_logged_if_clearing_fails(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+    notifier.clear.side_effect = RuntimeError("HA is down")
+
+    asyncio.run(bridge.handle_notification_action("knock_package_ack", "cam1"))
+
+    assert _package_log_kinds(log) == ["acknowledged"]
+
+
+def test_person_events_on_other_cameras_do_not_hold_the_alert(tmp_path) -> None:
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+
+    async def scenario() -> None:
+        bridge._on_event(_person_event(device_id="driveway-cam"), EventChange.STARTED)
+        bridge._on_event(_package_event(device_id="cam1"), EventChange.STARTED)
+        await _settle()
+
+    asyncio.run(scenario())
+
+    notifier.notify.assert_called_once()
+    assert "package was detected" in notifier.notify.call_args.args[0]
+
+
+def test_a_stale_person_detection_does_not_hold_the_alert(tmp_path, monkeypatch) -> None:
+    # A person event whose ENDED was lost must stop counting eventually.
+    bridge, notifier, log, mock_client = _package_bridge(tmp_path)
+    monkeypatch.setattr(unifi_module, "_PERSON_EVENT_MAX_AGE_SECONDS", 0.0)
+
+    async def scenario() -> None:
+        bridge._on_event(_person_event(), EventChange.STARTED)
+        await asyncio.sleep(0.001)
+        bridge._on_event(_package_event(), EventChange.STARTED)
+        await _settle()
+
+    asyncio.run(scenario())
+
+    notifier.notify.assert_called_once()
+    assert "package was detected" in notifier.notify.call_args.args[0]
+
+
+def test_unifi_config_package_defaults() -> None:
+    config = UnifiConfig()
+    assert config.package_alerts is True
+    assert config.package_cooldown_seconds == 300.0
+    assert config.package_departure_timeout_seconds == 120.0
+
+
+def test_unifi_config_package_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("KNOCK_UNIFI_PACKAGE_ALERTS", "false")
+    monkeypatch.setenv("KNOCK_UNIFI_PACKAGE_COOLDOWN_SECONDS", "60")
+    monkeypatch.setenv("KNOCK_UNIFI_PACKAGE_DEPARTURE_TIMEOUT_SECONDS", "30")
+
+    config = UnifiConfig.from_env()
+
+    assert config.package_alerts is False
+    assert config.package_cooldown_seconds == 60.0
+    assert config.package_departure_timeout_seconds == 30.0

@@ -519,6 +519,21 @@ class UnifiConfig(BaseModel):
     # it's considered over -- a `ring` after the cooldown but still within
     # the idle timeout still restarts, since that's plausibly a new visitor.
     ring_cooldown_seconds: float = 15.0
+    # A Protect "package" smart-detect (the doorbell's package camera saw a
+    # box land) sends a household notification with a "Got it" button,
+    # instead of being treated as a visitor to start a conversation with --
+    # there's nobody to greet. Held back while a visitor is still at the door
+    # (an ongoing conversation or person detection) and sent the moment they
+    # leave, so it reads "package left," not "someone's here with a box."
+    package_alerts: bool = True
+    # Protect can report the same box more than once; one notification per
+    # camera within this window.
+    package_cooldown_seconds: float = 300.0
+    # Safety net for a held-back alert: if "the visitor left" is never
+    # observed (a lost person-detection ENDED event, or person detection
+    # turned off in Protect while someone lingers), send it anyway after
+    # this long rather than never.
+    package_departure_timeout_seconds: float = 120.0
 
     @classmethod
     def from_env(cls) -> UnifiConfig:
@@ -555,6 +570,13 @@ class UnifiConfig(BaseModel):
             ring_cooldown_seconds=float(
                 os.environ.get("KNOCK_UNIFI_RING_COOLDOWN_SECONDS", "15.0")
             ),
+            package_alerts=_bool(os.environ.get("KNOCK_UNIFI_PACKAGE_ALERTS", "true")),
+            package_cooldown_seconds=float(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_COOLDOWN_SECONDS", "300.0")
+            ),
+            package_departure_timeout_seconds=float(
+                os.environ.get("KNOCK_UNIFI_PACKAGE_DEPARTURE_TIMEOUT_SECONDS", "120.0")
+            ),
         )
 
     @classmethod
@@ -589,5 +611,16 @@ class UnifiConfig(BaseModel):
             ),
             ring_cooldown_seconds=_resolve(
                 "KNOCK_UNIFI_RING_COOLDOWN_SECONDS", s, "ring_cooldown_seconds", 15.0, float
+            ),
+            package_alerts=_resolve("KNOCK_UNIFI_PACKAGE_ALERTS", s, "package_alerts", True, _bool),
+            package_cooldown_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_COOLDOWN_SECONDS", s, "package_cooldown_seconds", 300.0, float
+            ),
+            package_departure_timeout_seconds=_resolve(
+                "KNOCK_UNIFI_PACKAGE_DEPARTURE_TIMEOUT_SECONDS",
+                s,
+                "package_departure_timeout_seconds",
+                120.0,
+                float,
             ),
         )
