@@ -388,6 +388,35 @@ def test_unknown_message_gets_refined_by_the_llm_into_a_specific_intent() -> Non
     assert decision.text == "Thanks, I'll pass that along."
 
 
+def test_not_addressed_intent_produces_no_spoken_response() -> None:
+    # Confirmed live: a political canvasser's own phone call got
+    # classified as "visitation" and answered out loud, because every
+    # prior category -- including "unknown" -- still spoke a reply. Only
+    # one LLM call should happen here: the classification call. There's
+    # nothing to phrase a response to, so _text_for_intent is never reached.
+    llm = _SequencedLLMProvider(["not_addressed"])
+    decision = Orchestrator(llm_provider=llm).respond(
+        _event("hang on, what are you smoking for? hello?")
+    )
+
+    assert decision.intent == "not_addressed"
+    assert decision.text == ""
+    assert decision.reason == "not_addressed"
+    assert decision.escalate is False
+    assert len(llm.prompts) == 1
+
+
+def test_not_addressed_intent_skips_the_greeting_too() -> None:
+    # Staying silent means staying silent -- not greeting a bystander who
+    # never addressed the door, even on a session's first turn.
+    llm = _SequencedLLMProvider(["not_addressed"])
+    state = _new_state()
+    decision = Orchestrator(llm_provider=llm).respond(
+        _event("talking to someone else"), state=state
+    )
+    assert decision.text == ""
+
+
 def test_llm_refinement_is_never_consulted_when_keywords_already_matched() -> None:
     # Only the phrasing call happens (one prompt) -- the classification
     # call is skipped entirely since classify_intent() already found a

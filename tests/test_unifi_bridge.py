@@ -1167,6 +1167,38 @@ def test_handle_event_stops_the_conversation_on_escalation(tmp_path) -> None:
     assert final_state.turn_count == 1
 
 
+def test_handle_event_stays_silent_and_stops_when_not_addressed(tmp_path) -> None:
+    # Confirmed live: a political canvasser's own phone call got
+    # classified as "visitation" and answered out loud. If the loop
+    # didn't stop on not_addressed, the second (unused) transcript would
+    # prove it kept listening in on the rest of the call.
+    tts_text_log: list[str] = []
+    ha_notifier = MagicMock()
+    orchestrator = Orchestrator(
+        llm_provider=_SequencedLLMProvider(["not_addressed"])  # classification only
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["what are you smoking for? hello?", "should never be heard"],
+        tts_text_log=tts_text_log,
+        ha_notifier=ha_notifier,
+        orchestrator=orchestrator,
+    )
+
+    decision = asyncio.run(bridge.handle_event(_event()))
+
+    assert decision is not None
+    assert decision.intent == "not_addressed"
+    assert decision.text == ""
+    # Greeting still plays (it's spoken before listening even starts, see
+    # handle_event), but no reply is synthesized for the not_addressed turn.
+    assert tts_text_log == [GREETING]
+    ha_notifier.notify.assert_not_called()
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 1
+
+
 def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
     tmp_path,
 ) -> None:

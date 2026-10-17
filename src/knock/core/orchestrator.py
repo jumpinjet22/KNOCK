@@ -128,6 +128,12 @@ _INTENT_DESCRIPTIONS = {
         "home, away, inside, or available later, and never mention a "
         "resident returning or anyone's schedule"
     ),
+    # Never actually reaches _response_prompt in practice -- respond()
+    # short-circuits on this intent before generating any reply (see
+    # below). Kept here only so a `.get(intent, intent)` lookup never
+    # shows a raw category name to the model if that invariant is ever
+    # broken by a future change.
+    "not_addressed": "not applicable -- KNOCK stays silent for this category, see respond()",
 }
 
 # When `classify_intent()`'s keyword rules find nothing (`"unknown"`), the
@@ -156,7 +162,19 @@ _LLM_CLASSIFIABLE_INTENTS = [
     "person_lookup",
     "official_visit",
     "suspicious_activity",
+    "not_addressed",
 ]
+
+# Returned by classify_intent/_refine_unknown_intent when the captured audio
+# isn't actually speech directed at the door at all -- a visitor on their
+# own phone call, talking to a companion, or muttering to themselves, which
+# a mic with no wake-word/push-to-talk gate will still dutifully transcribe.
+# Confirmed live: a political canvasser's own phone call ("what are you
+# smoking for? ... hello?") got classified as "visitation" and answered out
+# loud, because every prior category -- including "unknown" -- still speaks
+# a reply. This is the one outcome that doesn't: see respond()'s special
+# case below. Distinct from "unknown" (the visitor DID address the door,
+# just unclearly) -- that one still deserves a spoken "didn't catch that."
 
 # Short glosses shown alongside each label in `_classification_prompt` --
 # a bare category name (e.g. "visitation") alone isn't always enough for
@@ -177,6 +195,11 @@ _INTENT_CLASSIFICATION_HINTS = {
     "person_lookup": "someone asking for a specific person by name",
     "official_visit": "police, a government official, or a utility worker",
     "suspicious_activity": "concerning but non-emergency behavior",
+    "not_addressed": (
+        "speech that was picked up near the door but isn't actually "
+        "directed at it -- e.g. one side of a phone call, talking to a "
+        "companion, muttering to themselves"
+    ),
 }
 
 
@@ -190,13 +213,22 @@ def _classification_prompt(visitor_text: str, scene: SceneContext | None = None)
     return (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
         f"{_scene_block(scene)}"
-        "The system's keyword rules found no match. Decide whether this "
-        f"clearly and specifically fits one of these categories: {labels}.\n"
+        "The system's keyword rules found no match. First decide: is this "
+        "actually addressed to the door/household at all, or does it read "
+        "like a fragment of a phone call, a side conversation with someone "
+        "else physically there, or muttering to themselves -- no greeting "
+        "or request aimed at the door, a reply to something unheard, a "
+        "third person referenced as present (\"hang on, he's asking me "
+        'something")? If so, reply exactly "not_addressed", regardless of '
+        "whether the words themselves resemble one of the categories "
+        "below -- directedness comes first, topic second.\n"
+        "Otherwise, decide whether it clearly and specifically fits one of "
+        f"these categories: {labels}.\n"
         "Only choose a specific category if it obviously and unambiguously "
         'applies. "unknown" is the correct answer most of the time -- for '
-        "small talk, vague chatter, irrelevant questions, or anything that "
-        'does not clearly match, reply exactly "unknown". When in doubt, '
-        'reply "unknown".\n'
+        "small talk, vague chatter, or an unclear request that IS "
+        'addressed to the door, reply exactly "unknown". When in doubt '
+        'between a category and "unknown", reply "unknown".\n'
         "Reply with only the matching category's name (one word, lowercase), nothing else."
     )
 
@@ -390,11 +422,18 @@ def _tool_classification_messages(
     user_content = (
         f'A visitor at the door said or triggered: "{visitor_text}"\n'
         f"{_scene_block(scene)}"
-        "The system's keyword rules found no match. Call classify_intent with your "
-        "top 1-3 best-matching categories (confidence 0-1 each), choosing only from: "
-        f"{labels}, unknown. If you are not confident any single category clearly "
-        "applies, also call flag_for_review with a short summary of what the visitor "
-        "said, so a person can decide."
+        "The system's keyword rules found no match. First judge directedness: "
+        "does this actually address the door/household, or does it read like a "
+        "phone call fragment, a side conversation with someone else present, or "
+        "muttering to themselves (no greeting/request aimed at the door, a reply "
+        "to something unheard, a third person referenced as present)? If so, "
+        "classify_intent's top category should be not_addressed regardless of "
+        "the words' topic -- directedness comes first. Otherwise call "
+        "classify_intent with your top 1-3 best-matching categories (confidence "
+        f"0-1 each), choosing only from: {labels}, unknown. If you are not "
+        "confident any single category clearly applies, also call "
+        "flag_for_review with a short summary of what the visitor said, so a "
+        "person can decide."
     )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -605,22 +644,39 @@ class Orchestrator:
                 review_candidates = refinement.review_candidates
                 review_summary = refinement.review_summary
             last_intent = intent
-            response_text = self.policy.apply_style(
-                self._text_for_intent(intent, event.text, event.scene, image=image)
-            )
-            if self.safety_check_provider is not None and self._llm_flags_as_unsafe(response_text):
-                response_text = SAFE_RESPONSE_FALLBACK
-            response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
-            response = ResponseDecision(
-                text=response_text,
-                safe=True,
-                escalate=False,
-                reason="normal",
-                intent=last_intent,
-                needs_review=needs_review,
-                review_candidates=review_candidates,
-                review_summary=review_summary,
-            )
+            if intent == "not_addressed":
+                # Not a visitor statement at all -- a phone call, a side
+                # conversation, muttering -- so there's nothing to phrase a
+                # reply to. No greeting prepended either: that would mean
+                # KNOCK speaking up to someone who never addressed it.
+                # Deliberately skips apply_style/the safety-check call too,
+                # same reason: there's no generated text to check.
+                response = ResponseDecision(
+                    text="",
+                    safe=True,
+                    escalate=False,
+                    reason="not_addressed",
+                    intent=last_intent,
+                )
+            else:
+                response_text = self.policy.apply_style(
+                    self._text_for_intent(intent, event.text, event.scene, image=image)
+                )
+                if self.safety_check_provider is not None and self._llm_flags_as_unsafe(
+                    response_text
+                ):
+                    response_text = SAFE_RESPONSE_FALLBACK
+                response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
+                response = ResponseDecision(
+                    text=response_text,
+                    safe=True,
+                    escalate=False,
+                    reason="normal",
+                    intent=last_intent,
+                    needs_review=needs_review,
+                    review_candidates=review_candidates,
+                    review_summary=review_summary,
+                )
 
         # Every turn advances session state the same way, regardless of
         # whether it was answered, blocked, or escalated -- previously only

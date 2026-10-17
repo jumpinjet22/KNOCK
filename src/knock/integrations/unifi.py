@@ -844,12 +844,15 @@ class UnifiBridge:
                 )
 
             is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
-            if decision.escalate or not can_converse or is_last_possible_turn:
+            not_addressed = intent == "not_addressed"
+            if decision.escalate or not can_converse or is_last_possible_turn or not_addressed:
                 reason = (
                     "escalated"
                     if decision.escalate
                     else "cannot converse (no STT/TTS)"
                     if not can_converse
+                    else "visitor not addressing the door"
+                    if not_addressed
                     else "hit the max turn cap"
                 )
                 logger.info(
@@ -972,8 +975,13 @@ class UnifiBridge:
         Any failure here (no speaker on this camera, synthesis error,
         streaming error) is logged and swallowed -- talkback is an
         enhancement on top of the text response, never a requirement for it.
+
+        Empty `text` is a deliberate silence (see Orchestrator.respond()'s
+        "not_addressed" case -- captured audio that wasn't actually directed
+        at the door), not a synthesis request; skip rather than ask the TTS
+        provider to voice nothing.
         """
-        if self.tts_provider is None:
+        if self.tts_provider is None or not text:
             return
 
         try:
