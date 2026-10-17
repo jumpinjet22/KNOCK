@@ -16,6 +16,7 @@ from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
     HomeAssistantActionListener,
     HomeAssistantBridge,
+    HomeAssistantKnockListener,
     HomeAssistantNotifier,
     package_notification_tag,
     parse_action_device_id,
@@ -632,6 +633,171 @@ def test_listener_handle_message_is_a_no_op_without_an_on_action_callback() -> N
     )
 
     asyncio.run(listener.handle_message(raw))  # should not raise
+
+
+# -- HomeAssistantKnockListener ----------------------------------------------------
+
+
+def _knock_listener_config(**overrides) -> HomeAssistantConfig:
+    defaults = {
+        "base_url": "http://ha.local:8123",
+        "token": "secret-token",
+        "knock_sensors": {"binary_sensor.front_door_knock": "cam1"},
+    }
+    return HomeAssistantConfig(**{**defaults, **overrides})
+
+
+def test_knock_listener_subscribes_to_state_changed_events() -> None:
+    listener = HomeAssistantKnockListener(config=_knock_listener_config())
+    ws = _FakeWebSocket([json.dumps({"id": 1, "type": "result", "success": True})])
+
+    asyncio.run(listener._subscribe(ws))
+
+    sent = json.loads(ws.sent[0])
+    assert sent["type"] == "subscribe_events"
+    assert sent["event_type"] == "state_changed"
+
+
+def test_knock_listener_subscribe_raises_if_not_successful() -> None:
+    listener = HomeAssistantKnockListener(config=_knock_listener_config())
+    ws = _FakeWebSocket([json.dumps({"id": 1, "type": "result", "success": False})])
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(listener._subscribe(ws))
+
+
+def test_knock_listener_authenticate_sends_token() -> None:
+    listener = HomeAssistantKnockListener(config=_knock_listener_config(token="secret-token"))
+    ws = _FakeWebSocket([json.dumps({"type": "auth_required"}), json.dumps({"type": "auth_ok"})])
+
+    asyncio.run(listener._authenticate(ws))
+
+    assert json.loads(ws.sent[0]) == {"type": "auth", "access_token": "secret-token"}
+
+
+def _state_changed_message(entity_id: str, new_state: str | None, old_state: str | None = "off"):
+    return json.dumps(
+        {
+            "type": "event",
+            "event": {
+                "event_type": "state_changed",
+                "data": {
+                    "entity_id": entity_id,
+                    "new_state": {"state": new_state} if new_state is not None else None,
+                    "old_state": {"state": old_state} if old_state is not None else None,
+                },
+            },
+        }
+    )
+
+
+def test_knock_listener_calls_on_knock_for_the_configured_entitys_state_change() -> None:
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(config=_knock_listener_config(), on_knock=on_knock)
+    raw = _state_changed_message("binary_sensor.front_door_knock", "on")
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == ["cam1"]
+
+
+def test_knock_listener_ignores_a_different_entity() -> None:
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(config=_knock_listener_config(), on_knock=on_knock)
+    raw = _state_changed_message("binary_sensor.some_other_sensor", "on")
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == []
+
+
+def test_knock_listener_ignores_unknown_and_unavailable_states() -> None:
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(config=_knock_listener_config(), on_knock=on_knock)
+    for state in ("unknown", "unavailable"):
+        asyncio.run(
+            listener.handle_message(_state_changed_message("binary_sensor.front_door_knock", state))
+        )
+
+    assert calls == []
+
+
+def test_knock_listener_ignores_other_event_types() -> None:
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(config=_knock_listener_config(), on_knock=on_knock)
+    raw = json.dumps({"type": "event", "event": {"event_type": "something_else", "data": {}}})
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == []
+
+
+def test_knock_listener_is_a_no_op_without_an_on_knock_callback() -> None:
+    listener = HomeAssistantKnockListener(config=_knock_listener_config())
+    raw = _state_changed_message("binary_sensor.front_door_knock", "on")
+
+    asyncio.run(listener.handle_message(raw))  # should not raise
+
+
+def test_knock_listener_is_a_no_op_with_no_sensors_configured() -> None:
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(
+        config=_knock_listener_config(knock_sensors={}), on_knock=on_knock
+    )
+    raw = _state_changed_message("binary_sensor.front_door_knock", "on")
+
+    asyncio.run(listener.handle_message(raw))
+
+    assert calls == []
+
+
+def test_knock_listener_routes_each_sensor_to_its_own_camera() -> None:
+    # A household with more than one door (front + side), each with its
+    # own sensor, must have each knock answered on its own camera -- not
+    # every sensor funneled to a single configured door.
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(
+        config=_knock_listener_config(
+            knock_sensors={
+                "binary_sensor.front_door_knock": "cam1",
+                "binary_sensor.side_door_knock": "cam2",
+            }
+        ),
+        on_knock=on_knock,
+    )
+
+    asyncio.run(
+        listener.handle_message(_state_changed_message("binary_sensor.side_door_knock", "on"))
+    )
+    asyncio.run(
+        listener.handle_message(_state_changed_message("binary_sensor.front_door_knock", "on"))
+    )
+
+    assert calls == ["cam2", "cam1"]
 
 
 @respx.mock

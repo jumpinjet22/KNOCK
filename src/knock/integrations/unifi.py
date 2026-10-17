@@ -39,6 +39,13 @@ library's websocket handler), but snapshot/speech/vision/talkback all need
 async I/O, so the sync callback (`_on_event`) just schedules the real
 async handling (`handle_event`) onto the running event loop rather than
 blocking it.
+
+A knock detected by an external, non-Protect sensor (e.g. a vibration
+sensor bridged through Home Assistant -- see
+`homeassistant.HomeAssistantKnockListener`) gets the exact same
+conversation flow through `handle_knock`, not a separate, thinner path:
+a knock deserves the same greeting/listening/camera-context/spoken-reply
+experience a doorbell ring gets, just from a different trigger source.
 """
 
 from __future__ import annotations
@@ -51,8 +58,10 @@ import logging
 import re
 import tempfile
 import time
+import uuid
 import wave
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from importlib import resources
@@ -95,6 +104,7 @@ from knock.integrations.homeassistant import (
     KNOCK_PACKAGE_ACK_ACTION,
     KNOCK_TURN_AWAY_ACTION,
     HomeAssistantActionListener,
+    HomeAssistantKnockListener,
     HomeAssistantNotifier,
     NotificationCategory,
 )
@@ -330,6 +340,28 @@ class _ProtectEventLike(Protocol):
 
     @property
     def smart_detect_types(self) -> Sequence[Any]: ...
+
+
+@dataclass(frozen=True)
+class _KnockEvent:
+    """Synthetic `_ProtectEventLike` for a knock detected by an external
+    (non-Protect) sensor -- e.g. a vibration sensor bridged through Home
+    Assistant (see `HomeAssistantKnockListener`). Satisfies the same
+    Protocol `UnifiBridge._run_conversation` already accepts from a real
+    Protect websocket event, so a knock gets the exact same greeting/
+    listen/speak flow a ring does, not a separate, thinner code path.
+
+    `type` is deliberately not "ring": `_run_conversation` only waits out
+    `ring_chime_delay_seconds` for an actual "ring" (there's no physical
+    chime to wait out here), and `build_event` renders it as "Doorbell
+    knock on <device_id>" in logs/audit -- distinguishable from a real
+    button press rather than indistinguishable from one.
+    """
+
+    device_id: str
+    type: str = "knock"
+    smart_detect_types: Sequence[Any] = ()
+    id: str = field(default_factory=lambda: f"knock-{uuid.uuid4().hex[:12]}")
 
 
 class UnifiBridge:
@@ -654,6 +686,23 @@ class UnifiBridge:
         finally:
             if converses:
                 self.packages.conversation_ended(event.device_id)
+
+    async def handle_knock(self, device_id: str) -> ResponseDecision | None:
+        """Entry point for an external (non-Protect) knock-sensor trigger
+        -- see `HomeAssistantKnockListener`. Skips `should_trigger`'s
+        camera-id/trigger_on filtering and the package-detection branch
+        entirely: a knock listener is already configured for exactly one
+        specific camera, so there's no ambiguity to filter, and a knock is
+        never a package event. Still coordinates with `PackageAlerts` the
+        same way a real conversation does, so a package notification
+        doesn't fire mid-visit.
+        """
+        event = _KnockEvent(device_id=device_id)
+        self.packages.conversation_started(device_id)
+        try:
+            return await self._run_conversation(event)
+        finally:
+            self.packages.conversation_ended(device_id)
 
     async def _run_conversation(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
@@ -1076,6 +1125,14 @@ async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistant
             config=ha_config, on_action=bridge.handle_notification_action
         )
         tasks.append(listener.run())
+        # Only worth its own connection when at least one sensor->camera
+        # mapping is actually configured -- see
+        # HomeAssistantConfig.knock_sensors's docstring.
+        if ha_config.knock_sensors:
+            knock_listener = HomeAssistantKnockListener(
+                config=ha_config, on_knock=bridge.handle_knock
+            )
+            tasks.append(knock_listener.run())
     await asyncio.gather(*tasks)
 
 

@@ -430,6 +430,96 @@ class HomeAssistantActionListener:
             raise ConnectionError(f"Failed to subscribe to notification action events: {ack}")
 
 
+class HomeAssistantKnockListener:
+    """Reacts to a knock/vibration sensor's HA entity by feeding a
+    synthetic event into the same conversation flow a UniFi doorbell's own
+    ring/person-detect events trigger (greeting, listening, camera
+    context, spoken reply) -- NOT HomeAssistantBridge's own, much thinner
+    reply path (one respond() call, no camera, no speaker, notify-only). A
+    visitor who knocks instead of pressing the physical button deserves
+    the full experience a ring gets; that's a difference in trigger
+    source, not in what KNOCK should do about it.
+
+    `on_knock` is typically `UnifiBridge.handle_knock` -- see
+    `unifi._run_bridge_and_listener`. Runs its own persistent websocket
+    connection, same reasoning as `HomeAssistantActionListener` (independent
+    subscription, different event reason).
+    """
+
+    def __init__(
+        self,
+        config: HomeAssistantConfig | None = None,
+        # Awaitable[Any], not [None]: the real callback (UnifiBridge.handle_knock)
+        # returns a ResponseDecision, which this listener never needs to inspect.
+        on_knock: Callable[[str], Awaitable[Any]] | None = None,
+    ) -> None:
+        self.config = config or HomeAssistantConfig()
+        self._on_knock = on_knock
+        self._request_ids = itertools.count(1)
+
+    def should_trigger(self, event_data: dict[str, Any]) -> bool:
+        if event_data.get("entity_id") not in self.config.knock_sensors:
+            return False
+
+        new_state = (event_data.get("new_state") or {}).get("state")
+        if new_state in _IGNORED_STATES:
+            return False
+
+        old_state = (event_data.get("old_state") or {}).get("state")
+        return new_state != old_state
+
+    async def handle_message(self, raw_message: str | bytes) -> None:
+        message = json.loads(raw_message)
+        if message.get("type") != "event":
+            return
+        event = message.get("event") or {}
+        if event.get("event_type") != "state_changed":
+            return
+        data = event.get("data") or {}
+        if not self.should_trigger(data):
+            return
+
+        camera_id = self.config.knock_sensors.get(data["entity_id"])
+        if self._on_knock is not None and camera_id:
+            await self._on_knock(camera_id)
+
+    async def run(self) -> None:
+        async with websockets.connect(websocket_url(self.config.base_url)) as ws:
+            await self._authenticate(ws)
+            await self._subscribe(ws)
+            async for raw_message in ws:
+                try:
+                    await self.handle_message(raw_message)
+                except Exception as exc:  # noqa: BLE001 - keep listening either way
+                    logger.warning("Failed to handle a knock-sensor event: %s", exc)
+
+    async def _authenticate(self, ws: _WebSocketLike) -> None:
+        hello = json.loads(await ws.recv())
+        if hello.get("type") != "auth_required":
+            raise ConnectionError(f"Unexpected Home Assistant handshake message: {hello}")
+
+        await ws.send(
+            json.dumps({"type": "auth", "access_token": self.config.token.get_secret_value()})
+        )
+        response = json.loads(await ws.recv())
+        if response.get("type") != "auth_ok":
+            raise PermissionError(f"Home Assistant authentication failed: {response}")
+
+    async def _subscribe(self, ws: _WebSocketLike) -> None:
+        await ws.send(
+            json.dumps(
+                {
+                    "id": next(self._request_ids),
+                    "type": "subscribe_events",
+                    "event_type": "state_changed",
+                }
+            )
+        )
+        ack = json.loads(await ws.recv())
+        if not ack.get("success", False):
+            raise ConnectionError(f"Failed to subscribe to state_changed events: {ack}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ollama_config = OllamaConfig.from_env()

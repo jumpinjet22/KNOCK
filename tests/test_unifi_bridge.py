@@ -1199,6 +1199,43 @@ def test_handle_event_stays_silent_and_stops_when_not_addressed(tmp_path) -> Non
     assert final_state.turn_count == 1
 
 
+def test_handle_knock_runs_the_full_conversation_flow(tmp_path) -> None:
+    # A knock from an external sensor (see HomeAssistantKnockListener)
+    # should get the exact same experience a doorbell ring does -- greeted,
+    # listened to, answered -- not a separate, thinner code path.
+    tts_text_log: list[str] = []
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["I have a package for you", ""],
+        tts_text_log=tts_text_log,
+    )
+
+    decision = asyncio.run(bridge.handle_knock("cam1"))
+
+    assert decision is not None
+    assert decision.intent == "delivery"
+    assert tts_text_log[0] == GREETING
+    responses = [text for text in tts_text_log if text != GREETING]
+    assert len(responses) == 1
+    assert "leave the package" in responses[0].lower()
+    final_state = bridge.session_store.load("unifi-cam1")
+    assert final_state is not None
+    assert final_state.turn_count == 1
+
+
+def test_handle_knock_coordinates_with_package_alerts(tmp_path) -> None:
+    # A knock-triggered conversation is a real visit -- a package alert
+    # shouldn't fire mid-visit any more than it would during a real ring.
+    calls: list[str] = []
+    bridge = _conversational_bridge(tmp_path, transcripts=[""], tts_text_log=[])
+    bridge.packages.conversation_started = lambda device_id: calls.append(f"started:{device_id}")  # type: ignore[method-assign]
+    bridge.packages.conversation_ended = lambda device_id: calls.append(f"ended:{device_id}")  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_knock("cam1"))
+
+    assert calls == ["started:cam1", "ended:cam1"]
+
+
 def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
     tmp_path,
 ) -> None:

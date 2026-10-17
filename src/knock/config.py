@@ -39,6 +39,25 @@ def _bool(value: str) -> bool:
     return value.strip().lower() not in ("false", "0", "no")
 
 
+def _entity_camera_pairs(value: str | None) -> dict[str, str] | None:
+    """Parses `KNOCK_HA_KNOCK_SENSORS`: comma-separated `entity_id:camera_id`
+    pairs, one per external (non-Protect) knock sensor mapped to the UniFi
+    camera/door it should answer on -- e.g. "binary_sensor.front_door_knock:
+    cam1,binary_sensor.side_door_knock:cam2". A dict (not a single pair) so
+    a household with more than one door, each with its own sensor, gets
+    each knock answered on its own camera rather than all of them routed
+    to a single configured door.
+    """
+    if value is None:
+        return None
+    pairs: dict[str, str] = {}
+    for item in value.split(","):
+        entity_id, sep, camera_id = item.strip().partition(":")
+        if sep and entity_id.strip() and camera_id.strip():
+            pairs[entity_id.strip()] = camera_id.strip()
+    return pairs
+
+
 def keep_alive_payload(value: str | None) -> int | float | str | None:
     """Ollama's `keep_alive` request field from a config string.
 
@@ -437,6 +456,18 @@ class HomeAssistantConfig(BaseModel):
     trigger_entity_id: str = "binary_sensor.front_doorbell"
     notify_service: str | None = None
     verify_ssl: bool = True
+    # Empty (the default) leaves the knock-sensor listener off entirely --
+    # an external (non-Protect) sensor, e.g. a vibration sensor bridged
+    # through Home Assistant, that should trigger the *same* conversation
+    # flow a UniFi doorbell ring does (greeting, listening, camera context,
+    # spoken reply), not HomeAssistantBridge's thinner notify-only path.
+    # Keyed by the HA entity to watch (e.g. "binary_sensor.front_door_knock"),
+    # valued by which UniFi camera's conversation it starts -- a dict, not a
+    # single pair, so a household with more than one door (front + side,
+    # say), each with its own sensor, gets each knock answered on its own
+    # camera rather than every sensor routed to one configured door. See
+    # HomeAssistantKnockListener / UnifiBridge.handle_knock.
+    knock_sensors: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> HomeAssistantConfig:
@@ -449,6 +480,7 @@ class HomeAssistantConfig(BaseModel):
             ),
             notify_service=os.environ.get("KNOCK_HA_NOTIFY_SERVICE"),
             verify_ssl=verify_ssl_raw not in ("false", "0", "no"),
+            knock_sensors=_entity_camera_pairs(os.environ.get("KNOCK_HA_KNOCK_SENSORS")) or {},
         )
 
     @classmethod
@@ -467,6 +499,13 @@ class HomeAssistantConfig(BaseModel):
             ),
             notify_service=_resolve("KNOCK_HA_NOTIFY_SERVICE", s, "notify_service", None),
             verify_ssl=_resolve("KNOCK_HA_VERIFY_SSL", s, "verify_ssl", True, _bool),
+            knock_sensors=_resolve(
+                "KNOCK_HA_KNOCK_SENSORS",
+                s,
+                "knock_sensors",
+                {},
+                lambda v: _entity_camera_pairs(v) or {},
+            ),
         )
 
 
