@@ -81,8 +81,8 @@ from knock.config import (
     VisionConfig,
     WhisperConfig,
 )
-from knock.conversation.prompts import GREETING
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
+from knock.core.conversation_runner import ConversationHooks, run_conversation_loop
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
@@ -656,17 +656,6 @@ class UnifiBridge:
             logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
             return scene, None
 
-    async def _await_scene(
-        self, task: asyncio.Task[tuple[SceneContext, bytes | None]], event: _ProtectEventLike
-    ) -> tuple[SceneContext, bytes | None]:
-        try:
-            return await asyncio.wait_for(task, timeout=_SCENE_WAIT_SECONDS)
-        except Exception as exc:  # noqa: BLE001 - includes TimeoutError
-            logger.warning(
-                "Scene capture for %s not ready, replying without it: %s", event.device_id, exc
-            )
-            return self._detector_scene(event), None
-
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
         is_package = self.packages.is_package_detection(event)
         converses = self.should_trigger(event)
@@ -704,6 +693,129 @@ class UnifiBridge:
         finally:
             self.packages.conversation_ended(device_id)
 
+    async def _on_escalate_notify(
+        self, decision: ResponseDecision, visitor_event: VisitorEvent, device_id: str
+    ) -> None:
+        """An emergency alert goes out immediately -- ahead of speaking,
+        since TTS synthesis/streaming takes real seconds an urgent
+        notification shouldn't wait on.
+        """
+        if decision.escalate:
+            await self._notify_household(
+                device_id,
+                f'Possible emergency at the door: "{visitor_event.text}"',
+                category="emergency",
+            )
+
+    async def _handle_turn_notifications(
+        self, decision: ResponseDecision, visitor_event: VisitorEvent, device_id: str
+    ) -> None:
+        """Per-intent household notification, called after speaking so it
+        reflects what was just said out loud (a signature-required delivery
+        gets the "give me a sec" acknowledgement spoken first, *then* the
+        actual notification goes out).
+        """
+        intent = decision.intent or "unknown"
+
+        if decision.needs_review:
+            # Closes the gap where a visitor's phrasing matched neither
+            # the keyword rules nor a confident LLM category: previously
+            # this silently fell through as "unknown" with zero
+            # notification (see Orchestrator._refine_unknown_intent_via_tools
+            # for how "uncertain" is decided). Mutually exclusive with
+            # the intent-specific branches below -- this is already the
+            # richer notification (summary, top-3 guesses, photo), so
+            # sending both would double-notify the household for one visit.
+            candidate_text = (
+                ", ".join(decision.review_candidates) if decision.review_candidates else "unclear"
+            )
+            fallback = f"Unsure what a visitor at the door wants (camera: {device_id})."
+            details = self.orchestrator.extract_notification_details(
+                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
+            )
+            summary = decision.review_summary or details.summary
+            # Main camera, not the package camera -- the uncertain case
+            # is "who/what is this," not a known delivery.
+            image_url = await self._build_snapshot_url(device_id, package=False)
+            await self._notify_household(
+                device_id,
+                f"{summary} (best guesses: {candidate_text})",
+                category="review",
+                image_url=image_url,
+            )
+
+        elif intent in ("delivery_signature_required", "food_delivery"):
+            # Both are time-sensitive in a way a plain delivery isn't
+            # (can't just be left indefinitely), so the household gets
+            # "I'm on my way" / "Turn them away" buttons, not just an
+            # FYI -- see `_approval_actions` for why the device id rides
+            # along embedded in the action identifier itself.
+            fallback = (
+                f"A delivery at the door needs a signature (camera: {device_id})."
+                if intent == "delivery_signature_required"
+                else f"A food delivery is at the door (camera: {device_id})."
+            )
+            details = self.orchestrator.extract_notification_details(
+                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
+            )
+            # The doorbell's package camera (a separate, downward-angled
+            # lens from the main view) shows the actual package instead
+            # of just the front of the house.
+            image_url = await self._build_snapshot_url(device_id, package=True)
+            await self._notify_household(
+                device_id,
+                details.summary,
+                actions=self._approval_actions(device_id),
+                category="approval",
+                image_url=image_url,
+            )
+
+        elif intent in ("official_visit", "suspicious_activity", "ride_arrived"):
+            # No button-press decision to make here, just an FYI.
+            # ride_arrived is here because a waiting driver is
+            # time-sensitive the same way food is; visitation
+            # deliberately isn't -- a routine friendly visit doesn't
+            # need to interrupt anyone with a push notification.
+            fallback = {
+                "official_visit": "Someone claiming official business is at the door",
+                "suspicious_activity": "Possibly concerning activity at the door",
+                "ride_arrived": "A rideshare/taxi driver is here for pickup",
+            }[intent] + f" (camera: {device_id})."
+            details = self.orchestrator.extract_notification_details(
+                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
+            )
+            image_url = await self._build_snapshot_url(device_id, package=False)
+            await self._notify_household(device_id, details.summary, image_url=image_url)
+
+        elif intent == "service_appointment":
+            # A technician who's arrived and getting no response will
+            # leave, so this carries a single acknowledgement button
+            # (see `_coming_to_door_action`) rather than a plain FYI --
+            # there's no "turn them away" decision since the
+            # appointment is already expected, just a way to tell a
+            # waiting visitor someone's coming.
+            fallback = f"A technician has arrived for a service appointment (camera: {device_id})."
+            details = self.orchestrator.extract_notification_details(
+                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
+            )
+            image_url = await self._build_snapshot_url(device_id, package=False)
+            await self._notify_household(
+                device_id,
+                details.summary,
+                actions=self._coming_to_door_action(device_id),
+                category="approval",
+                image_url=image_url,
+            )
+
+    def _systems_check_interceptor(self, device_id: str) -> Callable[[str], Awaitable[bool]]:
+        async def intercept(transcript: str) -> bool:
+            if not is_systems_check_trigger(transcript):
+                return False
+            await self._run_systems_check_and_reply(device_id)
+            return True
+
+        return intercept
+
     async def _run_conversation(self, event: _ProtectEventLike) -> ResponseDecision | None:
         if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
             # Let the physical doorbell chime finish before KNOCK starts
@@ -715,224 +827,33 @@ class UnifiBridge:
         visitor_event = self.build_event(event)
         session_id = _default_session_id(event.device_id)
         state = self._start_or_resume_session(session_id, event, visitor_event.timestamp)
-        is_first_turn = state.turn_count == 0
-        # Only true once the greeting was actually spoken aloud below -- a
-        # text-only deployment (no tts_provider) still needs the orchestrator
-        # to put it in the returned text, since nothing else ever said it.
-        greeted_aloud = is_first_turn and self.tts_provider is not None
 
-        # Started now, not after listening: the snapshot + vision call run
-        # while the greeting plays and the visitor talks, so by the time
-        # there's a transcript to answer the scene is (usually) already
-        # there -- vision adds ~nothing to the reply delay instead of its
-        # full duration.
-        scene_task = asyncio.create_task(self._capture_scene(event))
+        device_id = event.device_id
+        hooks = ConversationHooks(
+            listen=(lambda: self.listen_to_visitor(device_id)) if self.stt_provider else None,
+            speak=(
+                (lambda text: self.speak_to_visitor(device_id, text)) if self.tts_provider else None
+            ),
+            play_thinking_tone=(
+                (lambda: self._play_thinking_tone(device_id)) if self.tts_provider else None
+            ),
+            capture_scene=lambda: self._capture_scene(event),
+            scene_fallback=lambda: self._detector_scene(event),
+            intercept_transcript=self._systems_check_interceptor(device_id),
+            before_speak=lambda d, ve: self._on_escalate_notify(d, ve, device_id),
+            after_speak=lambda d, ve: self._handle_turn_notifications(d, ve, device_id),
+        )
 
-        # A real doorbell intercom answers before waiting for the visitor to
-        # speak into silence -- greet first (once per session), *then*
-        # listen, rather than blindly capturing audio with nothing said to
-        # prompt a reply. `suppress_greeting` below tells the orchestrator
-        # not to also prepend it to the spoken response, since it was
-        # already said out loud here.
-        if greeted_aloud:
-            await self.speak_to_visitor(event.device_id, GREETING)
-
-        if self.stt_provider is not None:
-            transcript = await self.listen_to_visitor(event.device_id)
-            if transcript:
-                visitor_event = visitor_event.model_copy(update={"text": transcript})
-                # Checked before anything else touches this transcript --
-                # before vision enrichment, before PolicyEngine, before
-                # orchestrator.respond() is ever called. This is an operator
-                # diagnostic command, not a visitor-behavior classification,
-                # so it's handled entirely here rather than through
-                # rules.json/PolicyEngine.
-                if is_systems_check_trigger(transcript):
-                    scene_task.cancel()
-                    await self._run_systems_check_and_reply(event.device_id)
-                    return None
-            if self.tts_provider is not None:
-                await self._play_thinking_tone(event.device_id)
-
-        # Camera context rides alongside the visitor's words, never inside
-        # them (see knock.core.scene) -- the policy/intent layers only ever
-        # see speech, and the LLM gets the scene as a separately framed block.
-        scene, snapshot = await self._await_scene(scene_task, event)
-        visitor_event = visitor_event.model_copy(update={"scene": scene})
-
-        # The conversation itself: respond, speak it, then listen for a
-        # reply and keep going as long as the visitor keeps talking. Ends
-        # when they go quiet (an empty transcript -- they've said what they
-        # came to say, or left), an emergency escalates (nothing more to
-        # resolve automatically), there's no STT to listen with or no TTS
-        # to have said anything worth replying to in the first place
-        # (always one-shot), or the turn cap is hit.
-        can_converse = self.stt_provider is not None and self.tts_provider is not None
-        decision: ResponseDecision | None = None
-        for turn_index in range(_MAX_CONVERSATION_TURNS):
-            decision = self.orchestrator.respond(
-                visitor_event,
-                state=state,
-                audit_log=self.audit_log,
-                suppress_greeting=greeted_aloud,
-                image=snapshot,
-            )
-            self.session_store.save(state)
-
-            # An emergency alert goes out immediately -- ahead of speaking,
-            # since TTS synthesis/streaming takes real seconds an urgent
-            # notification shouldn't wait on. A signature-required delivery
-            # isn't urgent the same way: speak the "give me a sec"
-            # acknowledgement first, *then* actually go notify, matching
-            # what was just said out loud.
-            if decision.escalate:
-                await self._notify_household(
-                    event.device_id,
-                    f'Possible emergency at the door: "{visitor_event.text}"',
-                    category="emergency",
-                )
-
-            if self.tts_provider is not None:
-                await self.speak_to_visitor(event.device_id, decision.text)
-
-            intent = decision.intent or "unknown"
-
-            if decision.needs_review:
-                # Closes the gap where a visitor's phrasing matched neither
-                # the keyword rules nor a confident LLM category: previously
-                # this silently fell through as "unknown" with zero
-                # notification (see Orchestrator._refine_unknown_intent_via_tools
-                # for how "uncertain" is decided). Mutually exclusive with
-                # the intent-specific branches below -- this is already the
-                # richer notification (summary, top-3 guesses, photo), so
-                # sending both would double-notify the household for one visit.
-                candidate_text = (
-                    ", ".join(decision.review_candidates)
-                    if decision.review_candidates
-                    else "unclear"
-                )
-                fallback = f"Unsure what a visitor at the door wants (camera: {event.device_id})."
-                details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-                )
-                summary = decision.review_summary or details.summary
-                # Main camera, not the package camera -- the uncertain case
-                # is "who/what is this," not a known delivery.
-                image_url = await self._build_snapshot_url(event.device_id, package=False)
-                await self._notify_household(
-                    event.device_id,
-                    f"{summary} (best guesses: {candidate_text})",
-                    category="review",
-                    image_url=image_url,
-                )
-
-            elif intent in ("delivery_signature_required", "food_delivery"):
-                # Both are time-sensitive in a way a plain delivery isn't
-                # (can't just be left indefinitely), so the household gets
-                # "I'm on my way" / "Turn them away" buttons, not just an
-                # FYI -- see `_approval_actions` for why the device id rides
-                # along embedded in the action identifier itself.
-                fallback = (
-                    f"A delivery at the door needs a signature (camera: {event.device_id})."
-                    if intent == "delivery_signature_required"
-                    else f"A food delivery is at the door (camera: {event.device_id})."
-                )
-                details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-                )
-                # The doorbell's package camera (a separate, downward-angled
-                # lens from the main view) shows the actual package instead
-                # of just the front of the house.
-                image_url = await self._build_snapshot_url(event.device_id, package=True)
-                await self._notify_household(
-                    event.device_id,
-                    details.summary,
-                    actions=self._approval_actions(event.device_id),
-                    category="approval",
-                    image_url=image_url,
-                )
-
-            elif intent in ("official_visit", "suspicious_activity", "ride_arrived"):
-                # No button-press decision to make here, just an FYI.
-                # ride_arrived is here because a waiting driver is
-                # time-sensitive the same way food is; visitation
-                # deliberately isn't -- a routine friendly visit doesn't
-                # need to interrupt anyone with a push notification.
-                fallback = {
-                    "official_visit": "Someone claiming official business is at the door",
-                    "suspicious_activity": "Possibly concerning activity at the door",
-                    "ride_arrived": "A rideshare/taxi driver is here for pickup",
-                }[intent] + f" (camera: {event.device_id})."
-                details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-                )
-                image_url = await self._build_snapshot_url(event.device_id, package=False)
-                await self._notify_household(event.device_id, details.summary, image_url=image_url)
-
-            elif intent == "service_appointment":
-                # A technician who's arrived and getting no response will
-                # leave, so this carries a single acknowledgement button
-                # (see `_coming_to_door_action`) rather than a plain FYI --
-                # there's no "turn them away" decision since the
-                # appointment is already expected, just a way to tell a
-                # waiting visitor someone's coming.
-                fallback = (
-                    "A technician has arrived for a service appointment "
-                    f"(camera: {event.device_id})."
-                )
-                details = self.orchestrator.extract_notification_details(
-                    visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-                )
-                image_url = await self._build_snapshot_url(event.device_id, package=False)
-                await self._notify_household(
-                    event.device_id,
-                    details.summary,
-                    actions=self._coming_to_door_action(event.device_id),
-                    category="approval",
-                    image_url=image_url,
-                )
-
-            is_last_possible_turn = turn_index == _MAX_CONVERSATION_TURNS - 1
-            not_addressed = intent == "not_addressed"
-            if decision.escalate or not can_converse or is_last_possible_turn or not_addressed:
-                reason = (
-                    "escalated"
-                    if decision.escalate
-                    else "cannot converse (no STT/TTS)"
-                    if not can_converse
-                    else "visitor not addressing the door"
-                    if not_addressed
-                    else "hit the max turn cap"
-                )
-                logger.info(
-                    "Conversation with %s ending after turn %d: %s",
-                    event.device_id,
-                    turn_index + 1,
-                    reason,
-                )
-                break
-
-            # A fresh look each turn, again in parallel with listening --
-            # a visitor often holds up a package or badge only after being
-            # asked something.
-            scene_task = asyncio.create_task(self._capture_scene(event))
-            reply = await self.listen_to_visitor(event.device_id)
-            if not reply:
-                scene_task.cancel()
-                logger.info(
-                    "Conversation with %s ending after turn %d: visitor went quiet",
-                    event.device_id,
-                    turn_index + 1,
-                )
-                break
-            if self.tts_provider is not None:
-                await self._play_thinking_tone(event.device_id)
-            scene, snapshot = await self._await_scene(scene_task, event)
-            visitor_event = visitor_event.model_copy(
-                update={"text": reply, "timestamp": datetime.now(UTC), "scene": scene}
-            )
-
-        return decision
+        return await run_conversation_loop(
+            visitor_event,
+            state=state,
+            orchestrator=self.orchestrator,
+            session_store=self.session_store,
+            hooks=hooks,
+            audit_log=self.audit_log,
+            max_turns=_MAX_CONVERSATION_TURNS,
+            scene_wait_seconds=_SCENE_WAIT_SECONDS,
+        )
 
     async def handle_notification_action(self, action_id: str, device_id: str) -> None:
         """React to a Home Assistant mobile app notification-action tap --
