@@ -1228,8 +1228,8 @@ def test_handle_knock_coordinates_with_package_alerts(tmp_path) -> None:
     # shouldn't fire mid-visit any more than it would during a real ring.
     calls: list[str] = []
     bridge = _conversational_bridge(tmp_path, transcripts=[""], tts_text_log=[])
-    bridge.packages.conversation_started = lambda device_id: calls.append(f"started:{device_id}")  # type: ignore[method-assign]
-    bridge.packages.conversation_ended = lambda device_id: calls.append(f"ended:{device_id}")  # type: ignore[method-assign]
+    bridge.packages.conversation_started = lambda device_id: calls.append(f"started:{device_id}")
+    bridge.packages.conversation_ended = lambda device_id: calls.append(f"ended:{device_id}")
 
     asyncio.run(bridge.handle_knock("cam1"))
 
