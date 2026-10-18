@@ -430,10 +430,30 @@ Administrator).
 
 #### PTZ aiming: letting KNOCK point a camera
 
-The first target is a Hikvision mini dome PTZ with no built-in
-auto-tracking, used as a second set of eyes next to the UniFi G6 doorbell.
-The doorbell does the talking; the PTZ looks at things the doorbell can't
-see well. For example:
+The first target is a Hikvision **DS-2DE3304W-DE** (3MP, 4x mini dome
+PTZ, no built-in auto-tracking), used as a second set of eyes next to the
+UniFi G6 doorbell. It's already **adopted into UniFi Protect as a
+third-party ONVIF camera**, which splits the work:
+- **Video, snapshots and recording come through Protect**, the same way
+  as the G6. KNOCK's existing UniFi code can likely grab its snapshots and
+  stream with no new ONVIF code at all. To verify: that the public API
+  serves snapshots for an adopted third-party camera.
+- **PTZ control goes straight to the camera over ONVIF.** Protect doesn't
+  pass pan/tilt control through for third-party cameras (to verify), and
+  an ONVIF camera accepts more than one client, so Protect keeps
+  recording while KNOCK steers. Camera address and ONVIF login live in
+  Settings, never in code.
+- **Detection comes from KNOCK's vision model.** Protect's smart
+  detections normally only run on UniFi's own cameras. If Protect does
+  report smart detections for it, those become a free extra trigger.
+
+So for this setup PTZ aiming needs a PTZ provider and nothing else -- none
+of the ONVIF bridge stages above are prerequisites.
+
+Its view covers the walkway, the front yard and the street, so the
+natural presets are **walkway** (who's approaching), **street** (vehicles)
+and **porch** (packages, close up). The doorbell does the talking; the PTZ
+looks at things the doorbell can't see well. For example:
 - A visitor says "DoorDash": swing to the driveway, and the car becomes
   part of the visit's camera context and the notification.
 - A package was left: zoom on the porch steps for a closer photo than the
@@ -503,10 +523,15 @@ may never be needed. Two routes, cheapest first:
 - Every move is logged (which preset, why, which visit) alongside the
   visit's audit entry.
 
-**Open questions:** the exact camera model (for ONVIF PTZ/FOV support),
-whether Frigate is in the stack (decides B1), and whether ONVIF events
-turn out reliable enough on Hikvision or its native ISAPI alert stream is
-worth a dedicated path.
+**Open questions:**
+- Does the DS-2DE3304W-DE support ONVIF relative moves in field-of-view
+  space? That decides whether B1 works.
+- Is Frigate in the stack? Also decides B1.
+- Does Protect's public API serve snapshots for the adopted third-party
+  camera? Decides whether Stage A needs its own snapshot path.
+- Are ONVIF events reliable enough on Hikvision, or is its native ISAPI
+  alert stream worth a dedicated path? Only matters for the bridge, not
+  for PTZ aiming.
 
 ### SIP / VoIP
 
