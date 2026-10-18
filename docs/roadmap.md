@@ -347,7 +347,7 @@ Connect KNOCK to external systems.
 - Home Assistant
 - Frigate
 - UniFi Protect
-- ONVIF cameras
+- ONVIF cameras (doorbells, plus PTZ aiming -- see below)
 - ESPHome ✅ Done (via MQTT)
 - SIP / VoIP
 
@@ -381,6 +381,132 @@ Home Assistant is a local smart home automation platform.
 ONVIF is a common camera communication standard. A single ONVIF-generic
 bridge can cover a wide range of budget/no-name doorbells at once, the same
 way Reolink and Amcrest also expose ONVIF alongside their own local APIs.
+Two separate jobs live here: an ONVIF **bridge** (a camera or doorbell that
+starts visits, like UniFi does), and **PTZ aiming** (KNOCK pointing a
+pan/tilt/zoom camera at something during a visit).
+
+**What it gets to reuse.** Most of the hard parts already exist and aren't
+UniFi-specific:
+- `core/conversation_runner.py` -- the whole greet/listen/respond/notify
+  loop, driven by hooks (`listen`, `speak`, `capture_scene`, ...) a bridge
+  fills in.
+- The RTSP(S) audio capture and the remux clip recorder
+  (`record_rtsp_clip`) work on any RTSP URL, and ONVIF's `GetStreamUri`
+  hands one out.
+- The structured camera context (`core/scene.py`) and the package alert
+  flow (`integrations/package_alerts.py`).
+- Python library: `onvif-zeep-async`, the same one Home Assistant's ONVIF
+  integration uses. It covers device/media/events/PTZ services and
+  PullPoint event subscriptions.
+
+**Worth flagging before building either part:** every bridge so far talks to
+a hub (Protect, Frigate, Home Assistant). ONVIF is the first that logs into
+cameras directly, so it stores a credential per camera. Same written-with-
+care posture as the other secrets in the config store, and ONVIF users
+should be the camera's lowest role that still works (Operator, never
+Administrator).
+
+#### ONVIF bridge (doorbells and cameras)
+
+- **Stage 1: notify-only bridge.** Discover the device, subscribe to its
+  events (PullPoint), and on a trigger send a snapshot (`GetSnapshotUri`,
+  digest auth) plus a vision description as a notification -- the same
+  one-shot shape as the Frigate bridge today. Useful on its own.
+- **Stage 2: a doorbell-press mapping.** "Button pressed" isn't
+  standardized; Reolink, Amcrest, Hikvision and Dahua each name it
+  differently. Ship a per-vendor table of event topics, plus a setting to
+  name the topic directly for anything not in the table. Without it, stage
+  1 only knows about motion, not rings.
+- **Stage 3: listening.** RTSP audio into STT through the runner's
+  `listen` hook -- existing code, new stream URL.
+- **Stage 4: talking back through go2rtc.** ONVIF Profile T's audio
+  backchannel is messy to implement directly. go2rtc already speaks it
+  (plus several vendors' own two-way audio) and is already the planned
+  talkback path for Frigate, so one solution covers both. Its own optional
+  container, the same way Ollama is.
+- **Stage 5: package camera.** A dual-lens doorbell shows up as a second
+  media profile. Package detection itself isn't an ONVIF standard, so it
+  comes from the vision model, feeding the existing package alert flow.
+
+#### PTZ aiming: letting KNOCK point a camera
+
+The first target is a Hikvision mini dome PTZ with no built-in
+auto-tracking, used as a second set of eyes next to the UniFi G6 doorbell.
+The doorbell does the talking; the PTZ looks at things the doorbell can't
+see well. For example:
+- A visitor says "DoorDash": swing to the driveway, and the car becomes
+  part of the visit's camera context and the notification.
+- A package was left: zoom on the porch steps for a closer photo than the
+  doorbell's package camera gets.
+- Someone is at the edge of the frame: turn to them for a clear photo for
+  the notification. Photo only -- no recognition (see Phase 8).
+
+**Camera-side setup first (Hikvision).** The most important safety rails
+live on the camera, not in KNOCK's code, so they hold even if KNOCK
+misbehaves or crashes mid-move:
+- ONVIF is off by default and has its **own user list** (Network ->
+  Advanced -> Integration Protocol). Create an Operator-level ONVIF user
+  there; the web admin login doesn't apply.
+- **Named presets** ("front door", "driveway", "porch steps"). These names
+  become the LLM's entire vocabulary for aiming.
+- **Park action:** the camera returns to a home preset by itself after N
+  idle seconds. A hardware-level "go home".
+- **PTZ limits and privacy masks:** physical pan/tilt stops plus masked
+  areas, so the camera can't look into a neighbor's window regardless of
+  what any software asks for.
+
+**Stage A: presets and a `look_at` tool.**
+- A PTZ provider, same shape as the vision/STT/TTS providers: an interface
+  (`goto_preset`, `list_presets`, `stop`) with an ONVIF implementation.
+  Works on any ONVIF PTZ, not just Hikvision.
+- Settings: host, ONVIF user/password, and the **allowed presets**, each
+  with a short description the LLM reads ("driveway: parked cars and the
+  street"). Presets not on the list don't exist as far as KNOCK is
+  concerned.
+- A `look_at(preset)` tool for the orchestrator's existing tool calling:
+  move, wait for the camera to settle (~2s), snapshot, run vision, and add
+  the result to the visit's camera context (`SceneContext`), marked with
+  which camera and preset it came from.
+- Deterministic rules ahead of the LLM where they're more reliable:
+  delivery-shaped intent -> driveway, package detected -> porch steps. The
+  LLM tool covers what the rules don't.
+- Return to the home preset at the end of every visit (the park action is
+  the backstop if this never runs).
+
+**Stage B: following someone (tracking).** Only matters for following a
+person who's moving around -- visitors mostly stand at the door, so this
+may never be needed. Two routes, cheapest first:
+- **B1: Frigate's auto-tracking.** Frigate already steers ONVIF PTZs from
+  its own person detector. It needs the camera to support ONVIF relative
+  moves in field-of-view space, which many budget PTZs don't, and Frigate
+  says at startup whether the camera qualifies. A five-minute config test
+  before any code: if it passes, tracking is free and KNOCK only tells
+  Frigate when a visit is happening.
+- **B2: KNOCK's own tracking** -- only if B1 fails *and* real use shows
+  that presets aren't enough. A small person detector gives a bounding
+  box; a simple control loop turns "box is right of center" into a
+  `ContinuousMove` pan at a speed proportional to the error, with a dead
+  zone so it doesn't jitter, optional zoom to keep the person a sensible
+  size, and a hard time limit. `ContinuousMove` is supported by almost
+  every ONVIF PTZ, so this works where B1 can't. The detector only runs
+  while tracking during a visit, never continuously.
+
+**Rules for every stage:**
+- **A visitor never steers the camera.** "Turn the camera left" from a
+  visitor is the same class of manipulation PolicyEngine exists to
+  refuse. Camera moves come only from KNOCK's own reading of the scene (or
+  from the household); visitor speech never reaches the PTZ tools.
+- **The camera's own limits and masks are the real boundary**; KNOCK's
+  preset allowlist sits on top of them, not instead of them.
+- **No moving outside a visit**, and a cap on moves per visit so a
+  confused model can't keep the camera sweeping.
+- Every move is logged (which preset, why, which visit) alongside the
+  visit's audit entry.
+
+**Open questions:** the exact camera model (for ONVIF PTZ/FOV support),
+whether Frigate is in the stack (decides B1), and whether ONVIF events
+turn out reliable enough on Hikvision or its native ISAPI alert stream is
+worth a dedicated path.
 
 ### SIP / VoIP
 
