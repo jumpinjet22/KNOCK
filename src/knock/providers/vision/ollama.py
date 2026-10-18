@@ -10,7 +10,7 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 from knock.config import VisionConfig, keep_alive_payload
-from knock.core.scene import SceneObservation
+from knock.core.scene import PackageLabel, SceneObservation
 from knock.providers.vision.safety import contains_alarming_language, sanitize_description
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,89 @@ _OBSERVATION_SCHEMA: dict[str, Any] = {
 }
 
 _MAX_CARRYING_ITEMS = 5
+
+# Two-stage package-label read (see OllamaVisionProvider.read_package_label):
+# resize_for_model's 1024px cap is necessary to avoid a local Ollama
+# server's context-size error on a full-resolution photo, but it destroys
+# a shipping label's small print, which is often a small fraction of a
+# whole package-camera frame. Stage 1 asks the (automatically downscaled)
+# full frame roughly where the label is; the selected region is cropped
+# from the ORIGINAL full-resolution bytes and re-read focused.
+#
+# Grid cells, not pixel boxes -- LLMs place exact box edges poorly, grid
+# cells are far more reliable. "whole_image" (visible but not narrowed
+# down) and "none" (no visible label) are explicit outs rather than
+# forcing a guess.
+_GRID_CELLS = (
+    "top_left",
+    "top_center",
+    "top_right",
+    "middle_left",
+    "center",
+    "middle_right",
+    "bottom_left",
+    "bottom_center",
+    "bottom_right",
+    "whole_image",
+    "none",
+)
+
+# (row, col) in the 3x3 grid for each real cell name -- an explicit
+# mapping rather than parsing the name (e.g. splitting on "_") since
+# "center" alone doesn't follow the "row_col" shape the other eight do.
+_CELL_POSITIONS: dict[str, tuple[int, int]] = {
+    "top_left": (0, 0),
+    "top_center": (0, 1),
+    "top_right": (0, 2),
+    "middle_left": (1, 0),
+    "center": (1, 1),
+    "middle_right": (1, 2),
+    "bottom_left": (2, 0),
+    "bottom_center": (2, 1),
+    "bottom_right": (2, 2),
+}
+
+_LOCATE_LABEL_PROMPT = (
+    "Look at this photo from a doorbell's package camera. Is there a visible "
+    "shipping label (carrier logo, barcode, or printed address) on a package? "
+    "If so, which 3x3 grid cell contains most of the label? Reply with one "
+    "of: top_left, top_center, top_right, middle_left, center, middle_right, "
+    "bottom_left, bottom_center, bottom_right, whole_image (visible but not "
+    "narrowed down), or none (no visible label)."
+)
+_LOCATE_LABEL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"region": {"type": "string", "enum": list(_GRID_CELLS)}},
+    "required": ["region"],
+}
+
+# Padding beyond the selected grid cell's own bounds, as a fraction of the
+# cell's width/height -- a label rarely falls exactly on a grid line.
+_CROP_PADDING_FRACTION = 0.3
+# Smaller than this and small print still won't survive resize_for_model's
+# eventual downscale -- grow the crop (symmetrically, still clamped to the
+# image) rather than hand over a crop too small to help.
+_MIN_CROP_DIMENSION = 512
+
+_READ_LABEL_PROMPT = (
+    "Read the shipping label in this photo closely. Extract, if legible: "
+    "the carrier/shipping company name (e.g. FedEx, UPS, USPS, Amazon, DHL), "
+    "any tracking or order number, and the recipient's name if printed. "
+    "Leave a field empty if it isn't clearly legible -- never guess or "
+    "invent a value."
+)
+# Required plain (non-nullable) fields, same reasoning as
+# _OBSERVATION_SCHEMA above -- empty string means not legible, mapped back
+# to None by _safe_text.
+_LABEL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "carrier": {"type": "string"},
+        "tracking_number": {"type": "string"},
+        "recipient_name": {"type": "string"},
+    },
+    "required": ["carrier", "tracking_number", "recipient_name"],
+}
 
 
 def _safe_text(value: object) -> str | None:
@@ -241,6 +324,89 @@ class OllamaVisionProvider:
         except ValueError as exc:  # json.JSONDecodeError is a ValueError
             logger.warning("Structured vision output unparseable (%s); falling back", exc)
         return SceneObservation(summary=self.describe(image))
+
+    def read_package_label(self, image: bytes) -> PackageLabel | None:
+        """Two-stage crop-and-reread of a package-camera photo's shipping
+        label -- see the module-level comment above `_GRID_CELLS` for why.
+
+        None on any failure (unparseable image, unparseable model output,
+        request error) or when nothing was legible -- label reading is
+        enrichment, never a reason to block the rest of the response.
+        """
+        region = self._locate_label_region(image)
+        if region == "none":
+            return None
+        target = image if region in (None, "whole_image") else self._crop_region(image, region)
+        try:
+            data = json.loads(self._generate(target, _READ_LABEL_PROMPT, _LABEL_SCHEMA))
+        except Exception as exc:  # noqa: BLE001 - label reading is best-effort
+            logger.warning("Package label read failed: %s", exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+        label = PackageLabel(
+            carrier=_safe_text(data.get("carrier")),
+            tracking_number=_safe_text(data.get("tracking_number")),
+            recipient_name=_safe_text(data.get("recipient_name")),
+        )
+        if label.carrier is None and label.tracking_number is None and label.recipient_name is None:
+            return None
+        return label
+
+    def _locate_label_region(self, image: bytes) -> str | None:
+        try:
+            data = json.loads(self._generate(image, _LOCATE_LABEL_PROMPT, _LOCATE_LABEL_SCHEMA))
+        except Exception as exc:  # noqa: BLE001 - localization is best-effort
+            logger.info("Package label localization failed, using whole image: %s", exc)
+            return None
+        region = data.get("region") if isinstance(data, dict) else None
+        return region if region in _GRID_CELLS else None
+
+    def _crop_region(self, image: bytes, region: str) -> bytes:
+        """Crop `region`'s 3x3 grid cell out of `image`, padded by
+        `_CROP_PADDING_FRACTION` and grown to at least `_MIN_CROP_DIMENSION`
+        on each side (clamped to the image bounds either way).
+
+        Returns `image` unchanged on any failure -- a failed crop falls
+        back to reading the whole frame, never blocks the response.
+        """
+        try:
+            with Image.open(io.BytesIO(image)) as img:
+                width, height = img.size
+                row, col = _CELL_POSITIONS[region]
+
+                cell_w, cell_h = width / 3, height / 3
+                x0, y0 = col * cell_w, row * cell_h
+                x1, y1 = x0 + cell_w, y0 + cell_h
+
+                pad_x, pad_y = cell_w * _CROP_PADDING_FRACTION, cell_h * _CROP_PADDING_FRACTION
+                x0, y0 = x0 - pad_x, y0 - pad_y
+                x1, y1 = x1 + pad_x, y1 + pad_y
+
+                # Grow symmetrically around the cell's own center if still
+                # below the minimum, rather than leaving a crop too small
+                # for small print to survive the eventual model-size cap.
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                if x1 - x0 < _MIN_CROP_DIMENSION:
+                    x0, x1 = cx - _MIN_CROP_DIMENSION / 2, cx + _MIN_CROP_DIMENSION / 2
+                if y1 - y0 < _MIN_CROP_DIMENSION:
+                    y0, y1 = cy - _MIN_CROP_DIMENSION / 2, cy + _MIN_CROP_DIMENSION / 2
+
+                box = (
+                    max(0, int(x0)),
+                    max(0, int(y0)),
+                    min(width, int(x1)),
+                    min(height, int(y1)),
+                )
+                cropped = img.convert("RGB").crop(box)
+                buffer = io.BytesIO()
+                cropped.save(buffer, format="JPEG", quality=_RESIZE_JPEG_QUALITY)
+                return buffer.getvalue()
+        except (UnidentifiedImageError, OSError, ValueError, KeyError) as exc:
+            logger.warning(
+                "Could not crop image for region %r (%s); using whole image", region, exc
+            )
+            return image
 
     def warm_up(self) -> bool:
         """Same as `OllamaProvider.warm_up` -- load the vision model ahead

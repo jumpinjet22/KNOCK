@@ -8,8 +8,8 @@ import respx
 from PIL import Image
 
 from knock.config import VisionConfig
-from knock.core.scene import SceneObservation
-from knock.providers.vision.base import observe_scene
+from knock.core.scene import PackageLabel, SceneObservation
+from knock.providers.vision.base import observe_scene, read_package_label
 from knock.providers.vision.ollama import OllamaVisionProvider
 from knock.providers.vision.safety import SAFE_FALLBACK_DESCRIPTION
 
@@ -293,3 +293,188 @@ def test_observe_scene_uses_describe_for_a_describe_only_provider() -> None:
     observation = observe_scene(_DescribeOnly(), b"img")
 
     assert observation == SceneObservation(summary="A person at the door.")
+
+
+def _label_json(
+    carrier: str = "FedEx", tracking_number: str = "1234", recipient_name: str = "Jon"
+) -> str:
+    return json.dumps(
+        {"carrier": carrier, "tracking_number": tracking_number, "recipient_name": recipient_name}
+    )
+
+
+@respx.mock
+def test_read_package_label_returns_structured_fields() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "center"})}),
+            httpx.Response(200, json={"response": _label_json()}),
+        ]
+    )
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert label == PackageLabel(carrier="FedEx", tracking_number="1234", recipient_name="Jon")
+
+
+@respx.mock
+def test_read_package_label_skips_stage_two_when_stage_one_reports_none() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        return_value=httpx.Response(200, json={"response": json.dumps({"region": "none"})})
+    )
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert label is None
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_read_package_label_uses_whole_image_when_stage_one_cant_narrow_down() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "whole_image"})}),
+            httpx.Response(200, json={"response": _label_json()}),
+        ]
+    )
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert route.call_count == 2
+    sent_image = base64.b64decode(json.loads(route.calls.last.request.content)["images"][0])
+    with Image.open(io.BytesIO(sent_image)) as img:
+        # Not cropped to a smaller region -- just the ordinary
+        # resize_for_model downscale every call already gets, same
+        # proportions as the 1200x900 original.
+        assert img.size == (1024, 768)
+    assert label is not None
+
+
+@respx.mock
+def test_read_package_label_falls_back_to_whole_image_on_unparseable_stage_one() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": "not json"}),
+            httpx.Response(200, json={"response": _label_json()}),
+        ]
+    )
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert label is not None
+
+
+@respx.mock
+def test_read_package_label_crops_a_smaller_region_than_the_whole_image() -> None:
+    config = VisionConfig()
+    route = respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "top_left"})}),
+            httpx.Response(200, json={"response": _label_json()}),
+        ]
+    )
+
+    OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(3000, 3000))
+
+    sent_image = base64.b64decode(json.loads(route.calls.last.request.content)["images"][0])
+    with Image.open(io.BytesIO(sent_image)) as img:
+        # Smaller than the original frame (actually cropped), but still at
+        # least the enforced minimum crop dimension.
+        assert img.size[0] < 3000
+        assert img.size[0] >= 512
+
+
+@respx.mock
+def test_read_package_label_crop_respects_minimum_size_on_a_small_image() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "top_left"})}),
+            httpx.Response(200, json={"response": _label_json()}),
+        ]
+    )
+
+    # A small source image -- a single 3x3 cell plus padding would be
+    # under 512px, so the crop must grow (clamped to the image itself).
+    OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(600, 600))
+    # No assertion failure (e.g. a negative-size crop) is the main thing
+    # being proven here; smoke-tested via the lack of an exception above.
+
+
+@respx.mock
+def test_read_package_label_returns_none_when_nothing_legible() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "center"})}),
+            httpx.Response(
+                200,
+                json={
+                    "response": json.dumps(
+                        {"carrier": "", "tracking_number": "", "recipient_name": ""}
+                    )
+                },
+            ),
+        ]
+    )
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert label is None
+
+
+@respx.mock
+def test_read_package_label_survives_a_request_error() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(side_effect=httpx.ConnectError("refused"))
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert label is None
+
+
+@respx.mock
+def test_read_package_label_returns_none_for_non_object_stage_two_output() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "center"})}),
+            httpx.Response(200, json={"response": json.dumps(["not", "an", "object"])}),
+        ]
+    )
+
+    label = OllamaVisionProvider(config=config).read_package_label(_jpeg_bytes(1200, 900))
+
+    assert label is None
+
+
+@respx.mock
+def test_read_package_label_crop_failure_falls_back_to_whole_image() -> None:
+    config = VisionConfig()
+    respx.post(f"{config.base_url}/api/generate").mock(
+        side_effect=[
+            httpx.Response(200, json={"response": json.dumps({"region": "top_left"})}),
+            httpx.Response(200, json={"response": _label_json()}),
+        ]
+    )
+
+    # Not valid image bytes at all -- the stage-1 call succeeds (it never
+    # touches PIL), but cropping it fails and falls back to sending it
+    # unchanged, same best-effort pattern as resize_for_model.
+    label = OllamaVisionProvider(config=config).read_package_label(b"not an image")
+
+    assert label is not None
+
+
+def test_read_package_label_dispatch_returns_none_without_the_capability() -> None:
+    class _DescribeOnly:
+        name = "describe-only"
+
+        def describe(self, image: bytes, prompt: str | None = None) -> str:
+            return "A box on the porch."
+
+    assert read_package_label(_DescribeOnly(), b"img") is None

@@ -17,7 +17,7 @@ from knock.conversation.prompts import GREETING
 from knock.core.audit import JSONLAuditLog
 from knock.core.orchestrator import Orchestrator
 from knock.core.package_log import JSONLPackageLog
-from knock.core.scene import SceneObservation
+from knock.core.scene import PackageLabel, SceneObservation
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.state import SessionState
 from knock.integrations.homeassistant import ACTION_DEVICE_ID_SEP
@@ -247,10 +247,16 @@ class _FakeObservingVision:
 
     name = "fake-observing-vision"
 
-    def __init__(self, *observations: SceneObservation, started=None) -> None:
+    def __init__(
+        self,
+        *observations: SceneObservation,
+        started=None,
+        package_label: PackageLabel | None = None,
+    ) -> None:
         self._observations = list(observations)
         self.images: list[bytes] = []
         self._started = started
+        self._package_label = package_label
 
     def describe(self, image: bytes, prompt: str | None = None) -> str:
         raise AssertionError("observe() should be used, not describe()")
@@ -260,6 +266,9 @@ class _FakeObservingVision:
         if self._started is not None:
             self._started.set()
         return self._observations.pop(0) if len(self._observations) > 1 else self._observations[0]
+
+    def read_package_label(self, image: bytes) -> PackageLabel | None:
+        return self._package_label
 
 
 def test_vision_runs_in_parallel_with_listening(tmp_path) -> None:
@@ -1262,6 +1271,49 @@ def test_handle_event_notifies_home_assistant_on_a_signature_required_delivery(
         f"knock_turn_away{ACTION_DEVICE_ID_SEP}cam1",
     }
     assert ha_notifier.notify.call_args.kwargs["category"] == "approval"
+
+
+def test_signature_required_notification_prefers_the_package_label_when_legible(tmp_path) -> None:
+    ha_notifier = MagicMock()
+    mock_client = MagicMock()
+    mock_client.get_public_api_camera_snapshot = AsyncMock(
+        side_effect=lambda device_id, package=False: b"package-lens" if package else b"main-lens"
+    )
+    vision = _FakeObservingVision(
+        SceneObservation(summary="A person."),
+        SceneObservation(summary="A box."),
+        package_label=PackageLabel(carrier="FedEx", tracking_number="5678", recipient_name="Jon"),
+    )
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["this package needs a signature", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+        mock_client=mock_client,
+        vision_provider=vision,
+    )
+
+    asyncio.run(bridge.handle_event(_event(event_type="ring", smart_detect_types=("package",))))
+
+    ha_notifier.notify.assert_called_once()
+    assert ha_notifier.notify.call_args.args[0] == "FedEx package for Jon (tracking ...5678)"
+
+
+def test_signature_required_notification_falls_back_without_a_legible_label(tmp_path) -> None:
+    # No vision_provider at all -- the generic, speech-derived summary is
+    # exactly today's unchanged behavior.
+    ha_notifier = MagicMock()
+    bridge = _conversational_bridge(
+        tmp_path,
+        transcripts=["this package needs a signature", ""],
+        tts_text_log=[],
+        ha_notifier=ha_notifier,
+    )
+
+    asyncio.run(bridge.handle_event(_event()))
+
+    ha_notifier.notify.assert_called_once()
+    assert "signature" in ha_notifier.notify.call_args.args[0].lower()
 
 
 def test_handle_event_notifies_home_assistant_on_a_food_delivery_with_action_buttons(

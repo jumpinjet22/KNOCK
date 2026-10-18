@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from knock.core.scene import SceneObservation
+from knock.core.scene import PackageLabel, SceneObservation
 
 
 class VisionProvider(Protocol):
@@ -22,3 +22,16 @@ def observe_scene(provider: VisionProvider, image: bytes) -> SceneObservation:
         if isinstance(observation, SceneObservation):
             return observation
     return SceneObservation(summary=provider.describe(image))
+
+
+def read_package_label(provider: VisionProvider, image: bytes) -> PackageLabel | None:
+    """A structured shipping-label read from any vision provider, or None
+    if the provider has no such capability (e.g. a provider that only
+    implements the original `describe()` contract) or nothing was legible.
+    """
+    read = getattr(provider, "read_package_label", None)
+    if callable(read):
+        result = read(image)
+        if isinstance(result, PackageLabel):
+            return result
+    return None

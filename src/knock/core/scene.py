@@ -31,6 +31,18 @@ _MAX_SUMMARY_CHARS = 160
 _MAX_LIST_ITEMS = 5
 
 
+class PackageLabel(BaseModel):
+    """Structured read of a shipping label from the package camera's
+    two-stage crop-and-reread vision flow (see
+    OllamaVisionProvider.read_package_label). A None field means that part
+    of the label wasn't clearly legible -- never a guessed value.
+    """
+
+    carrier: str | None = None
+    tracking_number: str | None = None
+    recipient_name: str | None = None
+
+
 class SceneObservation(BaseModel):
     """What a vision model reported seeing in one snapshot.
 
@@ -46,6 +58,10 @@ class SceneObservation(BaseModel):
     vehicle: str | None = None
     visible_text: str | None = None
     summary: str = ""
+    # Only ever set from the package camera's own observation (see
+    # UnifiBridge._capture_scene/_merge_observations) -- the main camera
+    # view never populates this.
+    package_label: PackageLabel | None = None
 
 
 class SceneContext(BaseModel):

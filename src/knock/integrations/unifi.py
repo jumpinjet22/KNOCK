@@ -118,7 +118,7 @@ from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.base import SynthesizedAudio, TTSProvider
 from knock.providers.tts.kokoro import KokoroTTSProvider
-from knock.providers.vision.base import VisionProvider, observe_scene
+from knock.providers.vision.base import VisionProvider, observe_scene, read_package_label
 from knock.providers.vision.ollama import OllamaVisionProvider
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,13 @@ def _merge_observations(main: SceneObservation, extra: SceneObservation) -> Scen
         if main.package_visible or extra.package_visible
         else (main.package_visible if main.package_visible is not None else extra.package_visible)
     )
-    return main.model_copy(update={"carrying": carrying, "package_visible": package_visible})
+    return main.model_copy(
+        update={
+            "carrying": carrying,
+            "package_visible": package_visible,
+            "package_label": extra.package_label,
+        }
+    )
 
 
 def _default_session_id(device_id: str) -> str:
@@ -646,6 +652,13 @@ class UnifiBridge:
                         package_observation = await asyncio.to_thread(
                             observe_scene, vision_provider, package_snapshot
                         )
+                        label = await asyncio.to_thread(
+                            read_package_label, vision_provider, package_snapshot
+                        )
+                        if label is not None:
+                            package_observation = package_observation.model_copy(
+                                update={"package_label": label}
+                            )
                         observation = _merge_observations(observation, package_observation)
                 except Exception as exc:  # noqa: BLE001 - package view is a bonus
                     logger.info(
@@ -762,9 +775,28 @@ class UnifiBridge:
             # lens from the main view) shows the actual package instead
             # of just the front of the house.
             image_url = await self._build_snapshot_url(device_id, package=True)
+            # Prefer a label-led summary (carrier/recipient/tracking, read
+            # off the package camera's own photo -- see
+            # OllamaVisionProvider.read_package_label) over the generic,
+            # speech-derived one whenever the label was legible enough to
+            # at least name a carrier. No label (no vision provider, or
+            # nothing legible) falls back to today's unchanged summary.
+            label = (
+                visitor_event.scene.observation.package_label
+                if visitor_event.scene is not None and visitor_event.scene.observation is not None
+                else None
+            )
+            summary = details.summary
+            if label is not None and label.carrier:
+                parts = [label.carrier, "package"]
+                if label.recipient_name:
+                    parts.append(f"for {label.recipient_name}")
+                if label.tracking_number:
+                    parts.append(f"(tracking ...{label.tracking_number[-4:]})")
+                summary = " ".join(parts)
             await self._notify_household(
                 device_id,
-                details.summary,
+                summary,
                 actions=self._approval_actions(device_id),
                 category="approval",
                 image_url=image_url,
