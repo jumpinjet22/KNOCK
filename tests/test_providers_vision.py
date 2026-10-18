@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 import respx
+import zxingcpp
 from PIL import Image
 
 from knock.config import VisionConfig
@@ -12,6 +13,14 @@ from knock.core.scene import PackageLabel, SceneObservation
 from knock.providers.vision.base import observe_scene, read_package_label
 from knock.providers.vision.ollama import OllamaVisionProvider
 from knock.providers.vision.safety import SAFE_FALLBACK_DESCRIPTION
+
+
+def _barcode_jpeg(text: str) -> bytes:
+    barcode = zxingcpp.create_barcode(text, zxingcpp.BarcodeFormat.Code128)
+    img = Image.fromarray(barcode.to_image(scale=5))  # type: ignore[arg-type]
+    buffer = io.BytesIO()
+    img.convert("RGB").save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
 
 
 def _jpeg_bytes(width: int, height: int) -> bytes:
@@ -478,3 +487,71 @@ def test_read_package_label_dispatch_returns_none_without_the_capability() -> No
             return "A box on the porch."
 
     assert read_package_label(_DescribeOnly(), b"img") is None
+
+
+class _FixedLabelProvider:
+    """A fake vision provider whose own read_package_label() always
+    returns the same (possibly wrong) label, regardless of the image --
+    lets a test isolate the dispatch function's barcode-override behavior
+    from the LLM read itself.
+    """
+
+    name = "fixed-label"
+
+    def __init__(self, label: PackageLabel | None) -> None:
+        self._label = label
+
+    def describe(self, image: bytes, prompt: str | None = None) -> str:
+        return ""
+
+    def read_package_label(self, image: bytes) -> PackageLabel | None:
+        return self._label
+
+
+def test_read_package_label_dispatch_prefers_a_confident_barcode_over_the_providers_own_guess() -> (
+    None
+):
+    # Confirmed live: a vision model guessed the sender's name as the
+    # carrier and misread the tracking number -- a confidently decoded
+    # barcode must win over both.
+    wrong_guess = PackageLabel(carrier="Amazon", tracking_number="TX7756-01", recipient_name="Jon")
+    provider = _FixedLabelProvider(wrong_guess)
+    tracking_number = "1Z16E2K90300002616"
+
+    label = read_package_label(provider, _barcode_jpeg(tracking_number))
+
+    assert label is not None
+    assert label.carrier == "UPS"
+    assert label.tracking_number == tracking_number
+    # Never barcode-encoded -- the provider's own read is untouched.
+    assert label.recipient_name == "Jon"
+
+
+def test_read_package_label_dispatch_barcode_alone_is_enough_without_any_llm_read() -> None:
+    provider = _FixedLabelProvider(None)
+    tracking_number = "TBA123456789012"
+
+    label = read_package_label(provider, _barcode_jpeg(tracking_number))
+
+    assert label == PackageLabel(carrier="Amazon Logistics", tracking_number=tracking_number)
+
+
+def test_read_package_label_dispatch_returns_none_for_an_entirely_empty_label() -> None:
+    provider = _FixedLabelProvider(PackageLabel())
+
+    label = read_package_label(provider, _barcode_jpeg("TX7756-01"))
+
+    assert label is None
+
+
+def test_read_package_label_dispatch_keeps_the_providers_guess_without_a_confident_barcode() -> (
+    None
+):
+    guess = PackageLabel(carrier="FedEx", tracking_number=None, recipient_name="Jon")
+    provider = _FixedLabelProvider(guess)
+
+    # A non-matching barcode (shaped like a real package's sort code) --
+    # never confidently identified, so the provider's own guess stands.
+    label = read_package_label(provider, _barcode_jpeg("TX7756-01"))
+
+    assert label == guess
