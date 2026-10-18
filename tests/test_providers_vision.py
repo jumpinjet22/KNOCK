@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -17,7 +18,9 @@ from knock.providers.vision.safety import SAFE_FALLBACK_DESCRIPTION
 
 def _barcode_jpeg(text: str) -> bytes:
     barcode = zxingcpp.create_barcode(text, zxingcpp.BarcodeFormat.Code128)
-    img = Image.fromarray(barcode.to_image(scale=5))  # type: ignore[arg-type]
+    # See test_barcode.py's _barcode_jpeg for why this is a cast, not a
+    # `type: ignore`.
+    img = Image.fromarray(cast(Any, barcode.to_image(scale=5)))
     buffer = io.BytesIO()
     img.convert("RGB").save(buffer, format="JPEG", quality=95)
     return buffer.getvalue()

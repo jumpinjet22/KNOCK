@@ -1,4 +1,5 @@
 import io
+from typing import Any, cast
 
 import zxingcpp
 from PIL import Image
@@ -9,8 +10,10 @@ from knock.providers.vision.barcode import decode_tracking_barcode
 def _barcode_jpeg(text: str, fmt: zxingcpp.BarcodeFormat | None = None) -> bytes:
     barcode = zxingcpp.create_barcode(text, fmt or zxingcpp.BarcodeFormat.Code128)
     # zxingcpp.Image satisfies PIL's array-interface duck type at runtime
-    # (confirmed live) but doesn't structurally match its type stub.
-    img = Image.fromarray(barcode.to_image(scale=5))  # type: ignore[arg-type]
+    # (confirmed live); cast rather than `type: ignore` since whether mypy
+    # considers the raw call an error at all is version-dependent (seen
+    # live: needed locally, flagged as unused on CI's resolved versions).
+    img = Image.fromarray(cast(Any, barcode.to_image(scale=5)))
     buffer = io.BytesIO()
     img.convert("RGB").save(buffer, format="JPEG", quality=95)
     return buffer.getvalue()
