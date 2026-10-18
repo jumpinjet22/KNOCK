@@ -430,25 +430,33 @@ Administrator).
 
 #### PTZ aiming: letting KNOCK point a camera
 
-The first target is a Hikvision **DS-2DE3304W-DE** (3MP, 4x mini dome
-PTZ, no built-in auto-tracking), used as a second set of eyes next to the
-UniFi G6 doorbell. It's already **adopted into UniFi Protect as a
-third-party ONVIF camera**, which splits the work:
-- **Video, snapshots and recording come through Protect**, the same way
-  as the G6. KNOCK's existing UniFi code can likely grab its snapshots and
-  stream with no new ONVIF code at all. To verify: that the public API
-  serves snapshots for an adopted third-party camera.
-- **PTZ control goes straight to the camera over ONVIF.** Protect doesn't
-  pass pan/tilt control through for third-party cameras (to verify), and
-  an ONVIF camera accepts more than one client, so Protect keeps
-  recording while KNOCK steers. Camera address and ONVIF login live in
-  Settings, never in code.
-- **Detection comes from KNOCK's vision model.** Protect's smart
-  detections normally only run on UniFi's own cameras. If Protect does
-  report smart detections for it, those become a free extra trigger.
+**ONVIF-only by design.** PTZ aiming has to work for anyone with an ONVIF
+PTZ camera -- no UniFi Protect, Frigate, Home Assistant or any other system
+required. Everything Stage A needs is plain ONVIF, straight to the camera:
+- **Moving:** the PTZ service (`GotoPreset`, `GetPresets`, `Stop`).
+- **Looking:** the media service's `GetSnapshotUri` for a still (digest
+  auth), or `GetStreamUri` for an RTSP stream when a frame from video is
+  needed.
+- **Detection:** KNOCK's own vision model, not the camera's analytics.
 
-So for this setup PTZ aiming needs a PTZ provider and nothing else -- none
-of the ONVIF bridge stages above are prerequisites.
+Any bridge that starts a visit (UniFi, Frigate, Home Assistant, MQTT, the
+future ONVIF bridge above) can use the PTZ camera during that visit -- it's
+a camera KNOCK *looks through*, not a trigger source. So none of the ONVIF
+bridge stages above are prerequisites either.
+
+**Optional shortcuts when another system already has the camera.** If the
+same camera is also adopted into UniFi Protect (or another NVR), KNOCK can
+take snapshots through that system instead of logging in for them. That's
+a convenience, never a requirement: PTZ control always goes direct over
+ONVIF, since NVRs generally don't pass pan/tilt through for third-party
+cameras, and an ONVIF camera accepts more than one client, so the NVR
+keeps recording while KNOCK steers.
+
+**First real camera:** a Hikvision **DS-2DE3304W-DE** (3MP, 4x mini dome
+PTZ, no built-in auto-tracking), used as a second set of eyes next to the
+UniFi G6 doorbell. It happens to also be adopted into Protect, which makes
+it a good test of both paths: ONVIF-only, and the Protect snapshot
+shortcut. Camera address and ONVIF login live in Settings, never in code.
 
 Its view covers the walkway, the front yard and the street, so the
 natural presets are **walkway** (who's approaching), **street** (vehicles)
@@ -527,8 +535,9 @@ may never be needed. Two routes, cheapest first:
 - Does the DS-2DE3304W-DE support ONVIF relative moves in field-of-view
   space? That decides whether B1 works.
 - Is Frigate in the stack? Also decides B1.
-- Does Protect's public API serve snapshots for the adopted third-party
-  camera? Decides whether Stage A needs its own snapshot path.
+- Does Protect's public API serve snapshots for an adopted third-party
+  camera? Only decides whether the optional Protect snapshot shortcut
+  works; ONVIF snapshots are the default either way.
 - Are ONVIF events reliable enough on Hikvision, or is its native ISAPI
   alert stream worth a dedicated path? Only matters for the bridge, not
   for PTZ aiming.
