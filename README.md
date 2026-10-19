@@ -229,8 +229,10 @@ For the notification categories you pick (default: emergencies only), KNOCK can 
 
 - **KNOCK as an extension:** create a SIP extension or third-party device for KNOCK on your phone system, then set `KNOCK_SIP_ENABLED=true`, `KNOCK_SIP_SERVER`, `KNOCK_SIP_USERNAME`, `KNOCK_SIP_PASSWORD` and `KNOCK_SIP_CALL_TARGETS` (extensions or numbers tried in order until one answers; a ring group is usually the best single target). These are also in Settings under "Phone calls (SIP)".
 - **Which notifications call:** `KNOCK_SIP_CALL_ON` (default `emergency`; any of `emergency`, `approval`, `review`, `fyi`, `package`). At most one call per category per `KNOCK_SIP_CALL_COOLDOWN_SECONDS` (default 300), so a visitor who trips an emergency escalation can't make the house phones ring on a loop. Calls only ever go to the numbers you configured, and need a TTS provider to have anything to say.
-- **Ringing:** `KNOCK_SIP_RING_TIMEOUT_SECONDS` (default 30) is how long KNOCK waits on one target before trying the next. pyVoIP can't cancel a call that's still ringing, so an unanswered phone rings until your SIP server's own timeout ends it.
-- **Networking:** SIP sends call audio (RTP) to the address KNOCK advertises, `KNOCK_SIP_LOCAL_IP` (blank auto-detects the LAN address used to reach the server), on UDP ports `KNOCK_SIP_RTP_PORT_LOW`-`KNOCK_SIP_RTP_PORT_HIGH` (default 10000-10100), plus `KNOCK_SIP_LOCAL_SIP_PORT` (default 5060). **Behind Docker's default NAT this doesn't work.** pyVoIP binds to the address it advertises, so the container needs `network_mode: host` (and then the web UI is on port 8000 directly, not the `8080:8000` mapping).
+- **Ringing:** `KNOCK_SIP_RING_TIMEOUT_SECONDS` (default 30) is how long KNOCK waits on one target before cancelling the call (the phone stops ringing) and trying the next. Busy or declined moves on right away.
+- **The phone underneath:** calls go through [baresip](https://github.com/baresip/baresip), a mature SIP client (BSD-3-Clause) that KNOCK runs as a helper process the first time a call is needed, then keeps registered. KNOCK drives it over baresip's control port, which only listens on `127.0.0.1` (`KNOCK_SIP_BARESIP_CTRL_PORT`, default 4444). The Docker image includes it (`baresip-core`); elsewhere, install it (`apt install baresip-core`). Its config and log live in `~/.local/share/knock/baresip/` (`KNOCK_BARESIP_DIR`). The config file there holds the SIP password and is readable only by KNOCK's user.
+- **No login?** `KNOCK_SIP_REGISTRATION=false` for SIP servers that trust KNOCK by IP address instead of a username and password.
+- **Networking:** SIP sends call audio (RTP) to the address KNOCK advertises, `KNOCK_SIP_LOCAL_IP` (blank lets baresip pick the LAN address), on UDP ports `KNOCK_SIP_RTP_PORT_LOW`-`KNOCK_SIP_RTP_PORT_HIGH` (default 10000-10100), plus `KNOCK_SIP_LOCAL_SIP_PORT` (default 5060). **Behind Docker's default NAT, phones can't reach those ports or that address.** Run the container with `network_mode: host` (and then the web UI is on port 8000 directly, not the `8080:8000` mapping).
 
 ## Quickstart
 
@@ -380,6 +382,6 @@ GitHub Pages favicon (`docs/favicon.ico`) is generated from
 
 ## License
 
-KNOCK's own code is MIT.
+MIT
 
-Phone calls use [pyVoIP](https://github.com/tayler6000/pyVoIP), which is **GPL-3.0**. Anything that distributes KNOCK bundled with it, including the published Docker image and a normal `pip install`, is therefore subject to GPL-3.0 terms as a whole. In practice: KNOCK stays open source, and a closed-source product can't be built on the bundle. KNOCK's own files keep their MIT terms on their own.
+The Docker image also includes [baresip](https://github.com/baresip/baresip) (BSD-3-Clause) for phone calls. It runs as a separate program; KNOCK only talks to it over a local socket.

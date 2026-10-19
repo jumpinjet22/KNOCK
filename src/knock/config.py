@@ -717,7 +717,8 @@ class UnifiConfig(BaseModel):
 
 class SipConfig(BaseModel):
     """Phone calls through a SIP server (UniFi Talk, Asterisk, FreeSWITCH,
-    3CX, a SIP provider) -- see `integrations/sip_caller.py`.
+    3CX, a SIP provider) -- see `integrations/sip_caller.py` and
+    `integrations/baresip.py`.
 
     Today: announcement calls. For the notification categories in
     `call_on`, KNOCK also rings `call_targets` and speaks the summary,
@@ -730,6 +731,9 @@ class SipConfig(BaseModel):
     port: int = 5060
     username: str = ""
     password: SecretStr = SecretStr("")
+    # Log in (SIP REGISTER) to the server. Off for servers that trust KNOCK
+    # by IP address instead of a login.
+    registration: bool = True
     # The address KNOCK tells the SIP server to send call audio to -- must
     # be reachable from the phones. Blank auto-detects the LAN address used
     # to reach `server`. Behind Docker's default NAT this has to be the
@@ -752,6 +756,13 @@ class SipConfig(BaseModel):
     # emergency escalation, so they must not be able to make the house
     # phones ring over and over.
     call_cooldown_seconds: float = 300.0
+    # baresip, the SIP phone KNOCK runs as a helper process (see
+    # integrations/baresip.py). Its remote-control port only ever listens on
+    # 127.0.0.1.
+    baresip_path: str = "baresip"
+    baresip_ctrl_port: int = 4444
+    # Where baresip's modules live; blank auto-detects the usual locations.
+    baresip_module_path: str = ""
 
     @classmethod
     def from_env(cls) -> SipConfig:
@@ -763,6 +774,7 @@ class SipConfig(BaseModel):
             port=int(os.environ.get("KNOCK_SIP_PORT", "5060")),
             username=os.environ.get("KNOCK_SIP_USERNAME", ""),
             password=os.environ.get("KNOCK_SIP_PASSWORD", ""),
+            registration=_bool(os.environ.get("KNOCK_SIP_REGISTRATION", "true")),
             local_ip=os.environ.get("KNOCK_SIP_LOCAL_IP", ""),
             local_sip_port=int(os.environ.get("KNOCK_SIP_LOCAL_SIP_PORT", "5060")),
             rtp_port_low=int(os.environ.get("KNOCK_SIP_RTP_PORT_LOW", "10000")),
@@ -771,6 +783,9 @@ class SipConfig(BaseModel):
             call_on=call_on if call_on is not None else ["emergency"],
             ring_timeout_seconds=float(os.environ.get("KNOCK_SIP_RING_TIMEOUT_SECONDS", "30")),
             call_cooldown_seconds=float(os.environ.get("KNOCK_SIP_CALL_COOLDOWN_SECONDS", "300")),
+            baresip_path=os.environ.get("KNOCK_SIP_BARESIP_PATH", "baresip"),
+            baresip_ctrl_port=int(os.environ.get("KNOCK_SIP_BARESIP_CTRL_PORT", "4444")),
+            baresip_module_path=os.environ.get("KNOCK_SIP_BARESIP_MODULE_PATH", ""),
         )
 
     @classmethod
@@ -784,6 +799,7 @@ class SipConfig(BaseModel):
             port=_resolve("KNOCK_SIP_PORT", s, "port", 5060, int),
             username=_resolve("KNOCK_SIP_USERNAME", s, "username", ""),
             password=_resolve("KNOCK_SIP_PASSWORD", s, "password", ""),
+            registration=_resolve("KNOCK_SIP_REGISTRATION", s, "registration", True, _bool),
             local_ip=_resolve("KNOCK_SIP_LOCAL_IP", s, "local_ip", ""),
             local_sip_port=_resolve("KNOCK_SIP_LOCAL_SIP_PORT", s, "local_sip_port", 5060, int),
             rtp_port_low=_resolve("KNOCK_SIP_RTP_PORT_LOW", s, "rtp_port_low", 10000, int),
@@ -797,5 +813,12 @@ class SipConfig(BaseModel):
             ),
             call_cooldown_seconds=_resolve(
                 "KNOCK_SIP_CALL_COOLDOWN_SECONDS", s, "call_cooldown_seconds", 300.0, float
+            ),
+            baresip_path=_resolve("KNOCK_SIP_BARESIP_PATH", s, "baresip_path", "baresip"),
+            baresip_ctrl_port=_resolve(
+                "KNOCK_SIP_BARESIP_CTRL_PORT", s, "baresip_ctrl_port", 4444, int
+            ),
+            baresip_module_path=_resolve(
+                "KNOCK_SIP_BARESIP_MODULE_PATH", s, "baresip_module_path", ""
             ),
         )

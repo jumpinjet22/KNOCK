@@ -16,7 +16,11 @@ FROM python:3.12-slim
 # The API process spawns bridge subprocesses of its own (see
 # knock.core.supervisor) -- without a real init process as PID 1, `docker
 # stop` would only ever signal uvicorn itself and leave those orphaned.
-RUN apt-get update && apt-get install -y --no-install-recommends tini \
+#
+# baresip-core is the SIP phone behind KNOCK's phone calls (see
+# knock.integrations.baresip): a separate BSD-licensed program KNOCK runs as
+# a helper process only when SIP calling is enabled.
+RUN apt-get update && apt-get install -y --no-install-recommends tini baresip-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

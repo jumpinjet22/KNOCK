@@ -7,50 +7,60 @@ on the SIP server) becomes an alternative to the push notification. Not a
 replacement -- the push still goes out first, and a call that fails or
 goes unanswered changes nothing else.
 
-Uses pyVoIP (GPL-3.0; see the README's license note). Its API is blocking
-and thread-based, so `SipCaller.announce` runs in a worker thread
-(`asyncio.to_thread`). pyVoIP 1.6 has no way to cancel a call that's still
-ringing, so an unanswered target rings until the SIP server's own ring
-timeout ends it; KNOCK just stops waiting after `ring_timeout_seconds` and
-moves on to the next target.
+The SIP side is baresip, run as a helper process and driven over its
+control port (see `integrations/baresip.py`). It's started on the first
+call, not at bridge startup, so a deployment that never enables SIP never
+runs it -- and once started it stays registered. A call works like this:
+write the announcement WAV, `dial`, wait for `CALL_ESTABLISHED`, and let
+baresip hang up by itself when the WAV runs out. A target that doesn't
+answer within `ring_timeout_seconds` gets a real `hangup` (a SIP CANCEL, so
+the phone stops ringing) and the next target is tried.
 
-Each announcement registers, calls and unregisters again rather than
-keeping a registration open -- simplest correct shape for occasional
-outbound calls. Answering *inbound* calls (Stage 4) will need a long-lived
-registration instead.
+`SipCaller.announce` blocks, so callers run it in a worker thread
+(`asyncio.to_thread`).
 """
 
 from __future__ import annotations
 
 import array
+import atexit
 import logging
-import socket
 import threading
 import time
+import wave
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 import av
 
 from knock.config import SipConfig
+from knock.integrations.baresip import BaresipProcess
 from knock.providers.tts.base import SynthesizedAudio
 
 logger = logging.getLogger(__name__)
 
-# What pyVoIP's RTP layer expects from `write_audio`: 8 kHz mono, 8-bit
-# unsigned linear PCM (it re-biases and mu-law/A-law encodes it itself).
+# Phone audio (G.711): 8 kHz mono. The announcement WAV is written as 16-bit
+# PCM at this rate so baresip never has to resample it.
 SIP_SAMPLE_RATE = 8000
 
 # A beat of silence after the callee picks up, so the first word isn't
 # clipped while their handset's audio path opens.
 _ANSWER_LEAD_IN_SECONDS = 0.6
-# How often call state is polled while ringing.
-_POLL_SECONDS = 0.1
+# How long a freshly started baresip gets to register with the SIP server.
+_REGISTER_TIMEOUT_SECONDS = 10.0
+# After the announcement should have finished, how long to wait for baresip's
+# own end-of-file hangup before hanging up explicitly.
+_PLAYBACK_GRACE_SECONDS = 5.0
+# How long to wait for CALL_CLOSED after asking baresip to hang up.
+_HANGUP_WAIT_SECONDS = 3.0
+
+_CALL_EVENTS = {"CALL_RINGING", "CALL_PROGRESS", "CALL_ESTABLISHED", "CALL_CLOSED"}
 
 
 def to_sip_audio(audio: SynthesizedAudio) -> bytes:
-    """Convert TTS output to what pyVoIP plays: 8 kHz mono unsigned 8-bit."""
+    """Convert TTS output to 8 kHz mono signed 16-bit PCM."""
     fmt = {1: "u8", 2: "s16", 4: "s32"}[audio.width]
     layout = "mono" if audio.channels == 1 else "stereo"
     samples = len(audio.audio) // (audio.width * audio.channels)
@@ -61,60 +71,55 @@ def to_sip_audio(audio: SynthesizedAudio) -> bytes:
     pcm16 = array.array("h")
     for out in [*resampler.resample(frame), *resampler.resample(None)]:
         pcm16.frombytes(bytes(out.planes[0])[: out.samples * 2])
-    # Signed 16-bit -> unsigned 8-bit: keep the top byte, shift to center on 128.
-    return bytes((sample >> 8) + 128 for sample in pcm16)
+    return pcm16.tobytes()
 
 
-def detect_local_ip(server: str, port: int) -> str:
-    """The local address the OS would use to reach `server` -- what the
-    SIP server should send call audio back to. A UDP `connect` sends
-    nothing; it only asks the routing table.
+def write_announcement(path: Path, pcm16: bytes) -> float:
+    """Write `pcm16` (see `to_sip_audio`) as the WAV baresip plays, with a
+    short silent lead-in. Returns its length in seconds.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.connect((server, port))
-        return str(probe.getsockname()[0])
+    lead_in = bytes(2 * int(SIP_SAMPLE_RATE * _ANSWER_LEAD_IN_SECONDS))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SIP_SAMPLE_RATE)
+        wav.writeframes(lead_in + pcm16)
+    return (len(lead_in) + len(pcm16)) / 2 / SIP_SAMPLE_RATE
 
 
-class _CallLike(Protocol):
+def target_uri(target: str, server: str, port: int = 5060) -> str:
+    """An extension ("101") becomes `sip:101@<server>` (plus `:<port>` when
+    it isn't the default 5060); a full address is kept as given.
+    """
+    if target.startswith("sip:"):
+        return target
+    if "@" in target:
+        return f"sip:{target}"
+    host = server if port == 5060 else f"{server}:{port}"
+    return f"sip:{target}@{host}"
+
+
+class _ControlLike(Protocol):
+    def command(self, name: str, params: str = "", timeout: float = 5.0) -> dict[str, Any]: ...
+
+    def next_event(self, timeout: float) -> dict[str, Any] | None: ...
+
+    def close(self) -> None: ...
+
+
+class _BackendLike(Protocol):
     @property
-    def state(self) -> Any: ...
+    def running(self) -> bool: ...
 
-    def write_audio(self, data: bytes) -> None: ...
+    @property
+    def announcement_path(self) -> Path: ...
 
-    def hangup(self) -> None: ...
-
-
-class _PhoneLike(Protocol):
     def start(self) -> None: ...
 
+    def connect(self) -> _ControlLike: ...
+
     def stop(self) -> None: ...
-
-    def call(self, number: str) -> _CallLike: ...
-
-
-PhoneFactory = Callable[[SipConfig, str], _PhoneLike]
-
-
-def _pyvoip_phone(config: SipConfig, local_ip: str) -> _PhoneLike:
-    # Imported here so a deployment that never enables SIP never loads it.
-    from pyVoIP.VoIP import VoIPPhone
-
-    phone: _PhoneLike = VoIPPhone(
-        config.server,
-        config.port,
-        config.username,
-        config.password.get_secret_value(),
-        myIP=local_ip,
-        sipPort=config.local_sip_port,
-        rtpPortLow=config.rtp_port_low,
-        rtpPortHigh=config.rtp_port_high,
-    )
-    return phone
-
-
-def _state_name(call: _CallLike) -> str:
-    state = call.state
-    return str(getattr(state, "value", state))
 
 
 @dataclass
@@ -128,15 +133,16 @@ class SipCaller:
     def __init__(
         self,
         config: SipConfig,
-        phone_factory: PhoneFactory | None = None,
-        sleep: Callable[[float], None] = time.sleep,
+        backend: _BackendLike | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
-        self._phone_factory = phone_factory or _pyvoip_phone
-        self._sleep = sleep
-        # One call at a time: a second announcement while one is ringing
-        # would just fight it for the same phones.
+        self._backend: _BackendLike = backend or BaresipProcess(config)
+        self._clock = clock
+        # One call at a time: they share baresip and the announcement file.
         self._busy = threading.Lock()
+        self._registered = False
+        self._atexit_registered = False
 
     @property
     def configured(self) -> bool:
@@ -147,9 +153,13 @@ class SipCaller:
             and self.config.call_targets
         )
 
+    def close(self) -> None:
+        self._backend.stop()
+        self._registered = False
+
     def announce(self, audio: bytes) -> CallOutcome:
         """Blocking: ring each target in order until one answers, play
-        `audio` (see `to_sip_audio`) to it, and hang up.
+        `audio` (see `to_sip_audio`) to it, and let the call end.
         """
         outcome = CallOutcome()
         if not self.configured:
@@ -159,47 +169,90 @@ class SipCaller:
             outcome.error = "another call is already in progress"
             return outcome
         try:
-            local_ip = self.config.local_ip or detect_local_ip(self.config.server, self.config.port)
-            phone = self._phone_factory(self.config, local_ip)
-            phone.start()
+            control = self._ready()
         except Exception as exc:  # noqa: BLE001 - a call is best-effort
             self._busy.release()
-            outcome.error = f"couldn't register with the SIP server: {exc}"
+            outcome.error = str(exc)
             return outcome
         try:
+            seconds = write_announcement(self._backend.announcement_path, audio)
             for target in self.config.call_targets:
                 outcome.attempted.append(target)
-                if self._ring_and_play(phone, target, audio):
+                if self._ring_and_play(control, target, seconds):
                     outcome.answered_by = target
                     break
         except Exception as exc:  # noqa: BLE001
             outcome.error = str(exc)
         finally:
-            try:
-                phone.stop()
-            except Exception as exc:  # noqa: BLE001
-                logger.info("SIP unregister failed: %s", exc)
+            control.close()
             self._busy.release()
         return outcome
 
-    def _ring_and_play(self, phone: _PhoneLike, target: str, audio: bytes) -> bool:
-        call = phone.call(target)
-        waited = 0.0
-        while _state_name(call) == "DIALING" and waited < self.config.ring_timeout_seconds:
-            self._sleep(_POLL_SECONDS)
-            waited += _POLL_SECONDS
-        state = _state_name(call)
-        if state != "ANSWERED":
-            logger.info("SIP call to %s not answered (%s)", target, state)
+    def _ready(self) -> _ControlLike:
+        """Start baresip if needed and make sure it's registered."""
+        if not self._backend.running:
+            self._registered = False
+            self._backend.start()
+            if not self._atexit_registered:
+                atexit.register(self.close)
+                self._atexit_registered = True
+        control = self._backend.connect()
+        if self._registered or not self.config.registration:
+            return control
+        deadline = self._clock() + _REGISTER_TIMEOUT_SECONDS
+        while self._clock() < deadline:
+            event = control.next_event(timeout=max(deadline - self._clock(), 0.0))
+            if event is None:
+                break
+            if event.get("type") == "REGISTER_OK":
+                self._registered = True
+                return control
+            if event.get("type") == "REGISTER_FAIL":
+                control.close()
+                self.close()  # restart (and re-read the login) next time
+                raise RuntimeError(f"the SIP server rejected KNOCK's login: {event.get('param')}")
+        control.close()
+        self.close()
+        raise TimeoutError("couldn't register with the SIP server in time")
+
+    def _ring_and_play(self, control: _ControlLike, target: str, seconds: float) -> bool:
+        uri = target_uri(target, self.config.server, self.config.port)
+        user_part = uri.split("@", 1)[0]
+        response = control.command("dial", uri)
+        if not response.get("ok"):
+            logger.info("SIP dial to %s refused: %s", target, response.get("data"))
             return False
 
-        lead_in = bytes([128]) * int(SIP_SAMPLE_RATE * _ANSWER_LEAD_IN_SECONDS)
-        call.write_audio(lead_in + audio)
-        # write_audio only queues; RTP sends it in real time, so wait it out.
-        self._sleep((len(lead_in) + len(audio)) / SIP_SAMPLE_RATE + 0.5)
-        if _state_name(call) == "ANSWERED":
-            try:
-                call.hangup()
-            except Exception as exc:  # noqa: BLE001 - they may hang up first
-                logger.info("SIP hangup to %s failed: %s", target, exc)
-        return True
+        answered = False
+        deadline = self._clock() + self.config.ring_timeout_seconds
+        while True:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                break
+            event = control.next_event(timeout=remaining)
+            if event is None:
+                break
+            peer = str(event.get("peeruri") or "")
+            if event.get("type") not in _CALL_EVENTS or (peer and not peer.startswith(user_part)):
+                continue
+            if event["type"] == "CALL_ESTABLISHED" and not answered:
+                answered = True
+                deadline = self._clock() + seconds + _PLAYBACK_GRACE_SECONDS
+            elif event["type"] == "CALL_CLOSED":
+                if not answered:
+                    logger.info("SIP call to %s not answered: %s", target, event.get("param"))
+                return answered
+
+        # Still ringing past the timeout, or still connected well past the
+        # end of the announcement: hang up (a CANCEL while ringing).
+        if not answered:
+            logger.info(
+                "SIP call to %s not answered within %ss", target, self.config.ring_timeout_seconds
+            )
+        control.command("hangup")
+        hangup_deadline = self._clock() + _HANGUP_WAIT_SECONDS
+        while self._clock() < hangup_deadline:
+            event = control.next_event(timeout=max(hangup_deadline - self._clock(), 0.0))
+            if event is None or event.get("type") == "CALL_CLOSED":
+                break
+        return answered

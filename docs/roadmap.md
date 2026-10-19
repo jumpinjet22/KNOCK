@@ -587,15 +587,20 @@ SIP matters for two different reasons here, worth keeping separate:
   cloud/app isn't part of this at all -- it's just the phone line
   underneath, same as any other phone plugged into that jack.
 
-**SIP library: pyVoIP (GPL-3.0).** The mainstream Python SIP stacks are
-GPL (pyVoIP, pjsua2/PJSIP) or unmaintained (aiosip). KNOCK is meant to
-stay open source anyway, so it uses pyVoIP and accepts that anything
-distributing KNOCK bundled with it (the Docker image included) falls
-under GPL-3.0 terms -- see the README's license note. KNOCK only needs
-the basics: register, call, G.711 audio, DTMF, hang up. A SIP server
-(UniFi Talk, Asterisk, FreeSWITCH, 3CX) or provider does the routing.
-Fallbacks if pyVoIP stalls (its 2.0 has been in alpha since January 2024):
-a small in-house client, or baresip (BSD) in its own container.
+**SIP engine: baresip.** The mainstream Python SIP libraries are GPL
+(pyVoIP, pjsua2/PJSIP) or unmaintained (aiosip), and pyVoIP -- tried first
+-- also can't cancel a ringing call or carry video. baresip is a mature,
+BSD-licensed SIP client; KNOCK runs it as a helper process and drives it
+over its local control socket (`integrations/baresip.py`), so all the SIP
+details (auth, retransmits, CANCEL, busy, NAT) live in a battle-tested
+implementation and nothing GPL is linked in. A SIP server (UniFi Talk,
+Asterisk, FreeSWITCH, 3CX) or provider does the routing. It also does
+video (H.264, and an RTSP stream as the video source), which keeps a
+**doorbell-video call** on the table: UniFi doesn't pop up Protect
+doorbell video on Talk phones (only Access intercoms), so KNOCK placing a
+SIP video call carrying the G6's stream to a Talk Touch would fill a real
+gap -- unverified whether Talk accepts third-party SIP video until tested
+on real hardware.
 
 **Staged plan:**
 - **Stage 1: announcement calls.** ✅ Built
