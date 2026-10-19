@@ -577,12 +577,79 @@ SIP matters for two different reasons here, worth keeping separate:
   No separate SIP trunk/provider account is strictly needed if there's
   already a home VoIP box in the house (e.g. Ooma): its base station
   outputs a standard analog phone line on an RJ11 jack, same as an old
-  landline. An ATA (Analog Telephone Adapter -- e.g. a Grandstream
-  HT801/HT802) wired into that output turns the existing line into a SIP
-  endpoint KNOCK's own code can place/answer calls on and read DTMF from,
-  the same way a cordless phone or answering machine already can. The
-  provider's own cloud/app isn't part of this at all -- it's just the
-  phone line underneath, same as any other phone plugged into that jack.
+  landline. An ATA (Analog Telephone Adapter) with an **FXO** port -- e.g.
+  a Grandstream HT813 -- plugged into that jack turns the existing line
+  into a SIP endpoint KNOCK's own code can place/answer calls on and read
+  DTMF from, the same way a cordless phone or answering machine already
+  can. (Not an FXS-only adapter like the HT801/HT802: those *supply* a
+  line for a phone to plug into, so wiring one to the Ooma jack connects
+  two line sources together and does nothing.) The provider's own
+  cloud/app isn't part of this at all -- it's just the phone line
+  underneath, same as any other phone plugged into that jack.
+
+**Built-in SIP client.** Mainstream Python SIP stacks are GPL (pyVoIP,
+pjsua2/PJSIP) or unmaintained (aiosip), which doesn't fit an MIT project
+that ships a Docker image. KNOCK carries its own small SIP user agent
+instead, scoped to what it actually needs: digest-authenticated
+REGISTER/INVITE over UDP, G.711 (PCMU/PCMA) RTP audio, DTMF, and BYE. No
+video, no transcoding beyond G.711, no full PBX features -- a SIP server
+(UniFi Talk, Asterisk, FreeSWITCH, 3CX) or provider does the routing.
+
+**Staged plan:**
+- **Stage 1: announcement calls.** For the notification categories that
+  matter most (emergency, and optionally approval), KNOCK also rings a
+  configured extension or number and speaks the summary through TTS, then
+  hangs up. Picking up a phone becomes an alternative to the push
+  notification -- not a replacement, the push still goes out.
+- **Stage 2: answer with DTMF.** The same call offers keypad choices
+  ("press 1 if you're coming, 2 to turn them away"), mapped to the same
+  actions as the notification buttons, spoken back to the visitor.
+- **Stage 3: live handoff.** Bridge the call's audio to the doorbell's
+  talkback/mic so the person who picked up talks to the visitor directly.
+- **Stage 4: SIP door stations as a bridge.** Accept inbound calls from
+  SIP intercoms (2N, Akuvox, Doorbird, UniFi Access) and run the normal
+  conversation over the call audio.
+
+**Rules for every stage:** a visitor can never make KNOCK dial out --
+calls only go out from KNOCK's own notification logic, to numbers set in
+Settings. And KNOCK never sends a door-release DTMF code: many door
+stations and apartment buzzer systems unlock on a keypress, and KNOCK's
+policy already refuses "unlock" requests; a SIP bridge answers and hands
+off, it never buzzes anyone in.
+
+#### Example implementation: UniFi Talk + ATAs
+
+A concrete home setup using UniFi's phone system as the SIP server:
+
+- **KNOCK as a Talk extension.** Talk accepts third-party SIP devices
+  (with caveats: support has shifted between versions, reading SIP
+  credentials has at times needed the Pro plan or the CLI, and Ubiquiti
+  doesn't troubleshoot third-party devices). KNOCK registers as one with
+  its own extension, so Stage 1's announcement call can ring any Talk
+  phone -- or a ring group of all of them.
+- **The G6 can't do this alone.** Protect doorbells don't speak SIP, so
+  there's no native "doorbell rings the desk phones" in UniFi. KNOCK is
+  the glue: G6 ring -> KNOCK conversation -> Talk extension call.
+- **Analog phones via FXS ATAs.** A Grandstream HT801/HT802 registered in
+  Talk turns old desk phones and cordless bases into Talk extensions, so
+  KNOCK's call reaches them too, not just UniFi handsets. Watch ring load:
+  many handsets on one port may not all ring.
+- **Existing lines via FXO ATAs.** An HT813's FXO port brings an analog
+  line into Talk: an Ooma base's jack, a landline, or an apartment buzzer
+  that rings a phone line (a Stage 4 bridge target -- and exactly where
+  the never-send-unlock-DTMF rule matters).
+- **Settings to match on both ends:** DTMF method (RFC 2833 vs SIP INFO)
+  and codec (G.711) on the ATA, Talk and KNOCK, or keypad choices won't
+  register.
+- **Switching providers away from Ooma.** Ooma doesn't hand out SIP
+  credentials, so with Talk as the phone system the outside line comes
+  from a SIP trunk instead -- Talk's own subscription, or a third-party
+  provider (Talk ships templates for a handful; others use custom fields,
+  unsupported by Ubiquiti). The number can usually be ported from Ooma. On
+  a custom trunk, 911 is the provider's responsibility, and an ATA line's
+  emergency calling depends on that trunk -- check it before relying on
+  any of these phones for emergencies. That swap also makes the FXO/Ooma
+  path above unnecessary.
 
 ### Battery-powered doorbells
 
