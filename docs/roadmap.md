@@ -462,9 +462,10 @@ Its view covers the walkway, the front yard and the street, so the
 natural presets are **walkway** (who's approaching), **street** (vehicles)
 and **porch** (packages, close up). The doorbell does the talking; the PTZ
 looks at things the doorbell can't see well. For example:
-- A visitor says "DoorDash": swing to the driveway, and the car becomes
-  part of the visit's camera context and the notification.
-- A package was left: zoom on the porch steps for a closer photo than the
+- A vehicle is detected pulling up during a visit: swing to the street,
+  and the car becomes part of the visit's camera context and the
+  notification.
+- A package was detected: zoom on the porch for a closer photo than the
   doorbell's package camera gets.
 - Someone is at the edge of the frame: turn to them for a clear photo for
   the notification. Photo only -- no recognition (see Phase 8).
@@ -475,55 +476,72 @@ misbehaves or crashes mid-move:
 - ONVIF is off by default and has its **own user list** (Network ->
   Advanced -> Integration Protocol). Create an Operator-level ONVIF user
   there; the web admin login doesn't apply.
-- **Named presets** ("front door", "driveway", "porch steps"). These names
-  become the LLM's entire vocabulary for aiming.
+- **Named presets** ("walkway", "street", "porch"). These names are the
+  entire vocabulary for aiming.
 - **Park action:** the camera returns to a home preset by itself after N
   idle seconds. A hardware-level "go home".
 - **PTZ limits and privacy masks:** physical pan/tilt stops plus masked
   areas, so the camera can't look into a neighbor's window regardless of
   what any software asks for.
 
-**Stage A: presets and a `look_at` tool.**
+**Stage A: presets and a guarded `look_at` step.**
 - A PTZ provider, same shape as the vision/STT/TTS providers: an interface
   (`goto_preset`, `list_presets`, `stop`) with an ONVIF implementation.
   Works on any ONVIF PTZ, not just Hikvision.
 - Settings: host, ONVIF user/password, and the **allowed presets**, each
-  with a short description the LLM reads ("driveway: parked cars and the
-  street"). Presets not on the list don't exist as far as KNOCK is
-  concerned.
-- A `look_at(preset)` tool for the orchestrator's existing tool calling:
-  move, wait for the camera to settle (~2s), snapshot, run vision, and add
-  the result to the visit's camera context (`SceneContext`), marked with
-  which camera and preset it came from.
-- Deterministic rules ahead of the LLM where they're more reliable:
-  delivery-shaped intent -> driveway, package detected -> porch steps. The
-  LLM tool covers what the rules don't.
+  with a short description ("street: parked cars and the road"). Presets
+  not on the list don't exist as far as KNOCK is concerned.
+- **Deciding where to look uses scene signals only, never visitor
+  speech.** The inputs are detector/vision output (vehicle detected, a
+  package detected, a person at the edge of the doorbell's frame) and
+  household actions. A visitor claiming to be a delivery driver must not
+  be able to pick the camera's view. Deterministic rules come first
+  (vehicle -> street, package -> porch). An optional LLM picker for cases
+  the rules don't cover gets a **scene-only prompt** -- the camera
+  observations and the preset list, no transcript -- and answers with a
+  structured choice from the allowlist.
+- **Its own guarded executor, not the existing tool calling.** Today's
+  `chat_with_tools` use is structured extraction only: the orchestrator
+  parses `classify_intent` / `flag_for_review` /
+  `extract_notification_details` out of a single response and never runs
+  a tool or sends a result back. So `look_at` is a separate step in the
+  visit, not a tool added to those prompts: validate the preset against
+  the allowlist and the per-visit move cap, move, wait a fixed settle time
+  (~2s -- not ONVIF `MoveStatus`, which some cameras never update, see
+  B1), snapshot, run vision, and add the result to the visit's camera
+  context (`SceneContext`), tagged with camera and preset. The
+  conversation sees it on the next turn and in the notification, not in
+  the response already being generated.
 - Return to the home preset at the end of every visit (the park action is
   the backstop if this never runs).
 
 **Stage B: following someone (tracking).** Only matters for following a
 person who's moving around -- visitors mostly stand at the door, so this
 may never be needed. Two routes, cheapest first:
-- **B1: Frigate's auto-tracking.** Frigate already steers ONVIF PTZs from
-  its own person detector. It needs the camera to support ONVIF relative
-  moves in field-of-view space, which many budget PTZs don't, and Frigate
-  says at startup whether the camera qualifies. A five-minute config test
-  before any code: if it passes, tracking is free and KNOCK only tells
-  Frigate when a visit is happening.
-- **B2: KNOCK's own tracking** -- only if B1 fails *and* real use shows
-  that presets aren't enough. A small person detector gives a bounding
+- **B1: Frigate's auto-tracking**, for cameras Frigate supports. Frigate
+  already steers ONVIF PTZs from its own person detector, but needs
+  relative moves in field-of-view space and a working ONVIF `MoveStatus`.
+  **It doesn't apply to the DS-2DE3304W-DE:** Frigate's camera
+  compatibility table lists that model by name as not autotracking-capable
+  ("MoveStatus won't update even on latest firmware"). It stays here for
+  other cameras: check Frigate's table first, then its startup check.
+- **B2: KNOCK's own tracking** -- the route for the DS-2DE3304W-DE (and
+  any camera B1 rejects), and only if real use shows that presets aren't
+  enough. A small person detector gives a bounding
   box; a simple control loop turns "box is right of center" into a
   `ContinuousMove` pan at a speed proportional to the error, with a dead
   zone so it doesn't jitter, optional zoom to keep the person a sensible
   size, and a hard time limit. `ContinuousMove` is supported by almost
-  every ONVIF PTZ, so this works where B1 can't. The detector only runs
+  every ONVIF PTZ and the loop steers off the video, not `MoveStatus`, so
+  this works where B1 can't. The detector only runs
   while tracking during a visit, never continuously.
 
 **Rules for every stage:**
-- **A visitor never steers the camera.** "Turn the camera left" from a
-  visitor is the same class of manipulation PolicyEngine exists to
-  refuse. Camera moves come only from KNOCK's own reading of the scene (or
-  from the household); visitor speech never reaches the PTZ tools.
+- **A visitor never steers the camera** -- neither directly ("turn the
+  camera left") nor indirectly (claiming to be a delivery driver to get
+  the street view). That's the same class of manipulation PolicyEngine
+  exists to refuse. Camera moves come only from scene/detector signals or
+  the household; the transcript is never an input to a move decision.
 - **The camera's own limits and masks are the real boundary**; KNOCK's
   preset allowlist sits on top of them, not instead of them.
 - **No moving outside a visit**, and a cap on moves per visit so a
@@ -532,9 +550,8 @@ may never be needed. Two routes, cheapest first:
   visit's audit entry.
 
 **Open questions:**
-- Does the DS-2DE3304W-DE support ONVIF relative moves in field-of-view
-  space? That decides whether B1 works.
-- Is Frigate in the stack? Also decides B1.
+- Is Frigate in the stack? Only matters for other cameras' B1; the
+  DS-2DE3304W-DE goes straight to B2 if tracking is ever needed.
 - Does Protect's public API serve snapshots for an adopted third-party
   camera? Only decides whether the optional Protect snapshot shortcut
   works; ONVIF snapshots are the default either way.
