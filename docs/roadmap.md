@@ -347,7 +347,7 @@ Connect KNOCK to external systems.
 - Home Assistant
 - Frigate
 - UniFi Protect
-- ONVIF cameras
+- ONVIF cameras (doorbells, plus PTZ aiming -- see below)
 - ESPHome ✅ Done (via MQTT)
 - SIP / VoIP
 
@@ -381,6 +381,183 @@ Home Assistant is a local smart home automation platform.
 ONVIF is a common camera communication standard. A single ONVIF-generic
 bridge can cover a wide range of budget/no-name doorbells at once, the same
 way Reolink and Amcrest also expose ONVIF alongside their own local APIs.
+Two separate jobs live here: an ONVIF **bridge** (a camera or doorbell that
+starts visits, like UniFi does), and **PTZ aiming** (KNOCK pointing a
+pan/tilt/zoom camera at something during a visit).
+
+**What it gets to reuse.** Most of the hard parts already exist and aren't
+UniFi-specific:
+- `core/conversation_runner.py` -- the whole greet/listen/respond/notify
+  loop, driven by hooks (`listen`, `speak`, `capture_scene`, ...) a bridge
+  fills in.
+- The RTSP(S) audio capture and the remux clip recorder
+  (`record_rtsp_clip`) work on any RTSP URL, and ONVIF's `GetStreamUri`
+  hands one out.
+- The structured camera context (`core/scene.py`) and the package alert
+  flow (`integrations/package_alerts.py`).
+- Python library: `onvif-zeep-async`, the same one Home Assistant's ONVIF
+  integration uses. It covers device/media/events/PTZ services and
+  PullPoint event subscriptions.
+
+**Worth flagging before building either part:** every bridge so far talks to
+a hub (Protect, Frigate, Home Assistant). ONVIF is the first that logs into
+cameras directly, so it stores a credential per camera. Same written-with-
+care posture as the other secrets in the config store, and ONVIF users
+should be the camera's lowest role that still works (Operator, never
+Administrator).
+
+#### ONVIF bridge (doorbells and cameras)
+
+- **Stage 1: notify-only bridge.** Discover the device, subscribe to its
+  events (PullPoint), and on a trigger send a snapshot (`GetSnapshotUri`,
+  digest auth) plus a vision description as a notification -- the same
+  one-shot shape as the Frigate bridge today. Useful on its own.
+- **Stage 2: a doorbell-press mapping.** "Button pressed" isn't
+  standardized; Reolink, Amcrest, Hikvision and Dahua each name it
+  differently. Ship a per-vendor table of event topics, plus a setting to
+  name the topic directly for anything not in the table. Without it, stage
+  1 only knows about motion, not rings.
+- **Stage 3: listening.** RTSP audio into STT through the runner's
+  `listen` hook -- existing code, new stream URL.
+- **Stage 4: talking back through go2rtc.** ONVIF Profile T's audio
+  backchannel is messy to implement directly. go2rtc already speaks it
+  (plus several vendors' own two-way audio) and is already the planned
+  talkback path for Frigate, so one solution covers both. Its own optional
+  container, the same way Ollama is.
+- **Stage 5: package camera.** A dual-lens doorbell shows up as a second
+  media profile. Package detection itself isn't an ONVIF standard, so it
+  comes from the vision model, feeding the existing package alert flow.
+
+#### PTZ aiming: letting KNOCK point a camera
+
+**ONVIF-only by design.** PTZ aiming has to work for anyone with an ONVIF
+PTZ camera -- no UniFi Protect, Frigate, Home Assistant or any other system
+required. Everything Stage A needs is plain ONVIF, straight to the camera:
+- **Moving:** the PTZ service (`GotoPreset`, `GetPresets`, `Stop`).
+- **Looking:** the media service's `GetSnapshotUri` for a still (digest
+  auth), or `GetStreamUri` for an RTSP stream when a frame from video is
+  needed.
+- **Detection:** KNOCK's own vision model, not the camera's analytics.
+
+Any bridge that starts a visit (UniFi, Frigate, Home Assistant, MQTT, the
+future ONVIF bridge above) can use the PTZ camera during that visit -- it's
+a camera KNOCK *looks through*, not a trigger source. So none of the ONVIF
+bridge stages above are prerequisites either.
+
+**Optional shortcuts when another system already has the camera.** If the
+same camera is also adopted into UniFi Protect (or another NVR), KNOCK can
+take snapshots through that system instead of logging in for them. That's
+a convenience, never a requirement: PTZ control always goes direct over
+ONVIF, since NVRs generally don't pass pan/tilt through for third-party
+cameras, and an ONVIF camera accepts more than one client, so the NVR
+keeps recording while KNOCK steers.
+
+**First real camera:** a Hikvision **DS-2DE3304W-DE** (3MP, 4x mini dome
+PTZ, no built-in auto-tracking), used as a second set of eyes next to the
+UniFi G6 doorbell. It happens to also be adopted into Protect, which makes
+it a good test of both paths: ONVIF-only, and the Protect snapshot
+shortcut. Camera address and ONVIF login live in Settings, never in code.
+
+Its view covers the walkway, the front yard and the street, so the
+natural presets are **walkway** (who's approaching), **street** (vehicles)
+and **porch** (packages, close up). The doorbell does the talking; the PTZ
+looks at things the doorbell can't see well. For example:
+- A vehicle is detected pulling up during a visit: swing to the street,
+  and the car becomes part of the visit's camera context and the
+  notification.
+- A package was detected: zoom on the porch for a closer photo than the
+  doorbell's package camera gets.
+- Someone is at the edge of the frame: turn to them for a clear photo for
+  the notification. Photo only -- no recognition (see Phase 8).
+
+**Camera-side setup first (Hikvision).** The most important safety rails
+live on the camera, not in KNOCK's code, so they hold even if KNOCK
+misbehaves or crashes mid-move:
+- ONVIF is off by default and has its **own user list** (Network ->
+  Advanced -> Integration Protocol). Create an Operator-level ONVIF user
+  there; the web admin login doesn't apply.
+- **Named presets** ("walkway", "street", "porch"). These names are the
+  entire vocabulary for aiming.
+- **Park action:** the camera returns to a home preset by itself after N
+  idle seconds. A hardware-level "go home".
+- **PTZ limits and privacy masks:** physical pan/tilt stops plus masked
+  areas, so the camera can't look into a neighbor's window regardless of
+  what any software asks for.
+
+**Stage A: presets and a guarded `look_at` step.**
+- A PTZ provider, same shape as the vision/STT/TTS providers: an interface
+  (`goto_preset`, `list_presets`, `stop`) with an ONVIF implementation.
+  Works on any ONVIF PTZ, not just Hikvision.
+- Settings: host, ONVIF user/password, and the **allowed presets**, each
+  with a short description ("street: parked cars and the road"). Presets
+  not on the list don't exist as far as KNOCK is concerned.
+- **Deciding where to look uses scene signals only, never visitor
+  speech.** The inputs are detector/vision output (vehicle detected, a
+  package detected, a person at the edge of the doorbell's frame) and
+  household actions. A visitor claiming to be a delivery driver must not
+  be able to pick the camera's view. Deterministic rules come first
+  (vehicle -> street, package -> porch). An optional LLM picker for cases
+  the rules don't cover gets a **scene-only prompt** -- the camera
+  observations and the preset list, no transcript -- and answers with a
+  structured choice from the allowlist.
+- **Its own guarded executor, not the existing tool calling.** Today's
+  `chat_with_tools` use is structured extraction only: the orchestrator
+  parses `classify_intent` / `flag_for_review` /
+  `extract_notification_details` out of a single response and never runs
+  a tool or sends a result back. So `look_at` is a separate step in the
+  visit, not a tool added to those prompts: validate the preset against
+  the allowlist and the per-visit move cap, move, wait a fixed settle time
+  (~2s -- not ONVIF `MoveStatus`, which some cameras never update, see
+  B1), snapshot, run vision, and add the result to the visit's camera
+  context (`SceneContext`), tagged with camera and preset. The
+  conversation sees it on the next turn and in the notification, not in
+  the response already being generated.
+- Return to the home preset at the end of every visit (the park action is
+  the backstop if this never runs).
+
+**Stage B: following someone (tracking).** Only matters for following a
+person who's moving around -- visitors mostly stand at the door, so this
+may never be needed. Two routes, cheapest first:
+- **B1: Frigate's auto-tracking**, for cameras Frigate supports. Frigate
+  already steers ONVIF PTZs from its own person detector, but needs
+  relative moves in field-of-view space and a working ONVIF `MoveStatus`.
+  **It doesn't apply to the DS-2DE3304W-DE:** Frigate's camera
+  compatibility table lists that model by name as not autotracking-capable
+  ("MoveStatus won't update even on latest firmware"). It stays here for
+  other cameras: check Frigate's table first, then its startup check.
+- **B2: KNOCK's own tracking** -- the route for the DS-2DE3304W-DE (and
+  any camera B1 rejects), and only if real use shows that presets aren't
+  enough. A small person detector gives a bounding
+  box; a simple control loop turns "box is right of center" into a
+  `ContinuousMove` pan at a speed proportional to the error, with a dead
+  zone so it doesn't jitter, optional zoom to keep the person a sensible
+  size, and a hard time limit. `ContinuousMove` is supported by almost
+  every ONVIF PTZ and the loop steers off the video, not `MoveStatus`, so
+  this works where B1 can't. The detector only runs
+  while tracking during a visit, never continuously.
+
+**Rules for every stage:**
+- **A visitor never steers the camera** -- neither directly ("turn the
+  camera left") nor indirectly (claiming to be a delivery driver to get
+  the street view). That's the same class of manipulation PolicyEngine
+  exists to refuse. Camera moves come only from scene/detector signals or
+  the household; the transcript is never an input to a move decision.
+- **The camera's own limits and masks are the real boundary**; KNOCK's
+  preset allowlist sits on top of them, not instead of them.
+- **No moving outside a visit**, and a cap on moves per visit so a
+  confused model can't keep the camera sweeping.
+- Every move is logged (which preset, why, which visit) alongside the
+  visit's audit entry.
+
+**Open questions:**
+- Is Frigate in the stack? Only matters for other cameras' B1; the
+  DS-2DE3304W-DE goes straight to B2 if tracking is ever needed.
+- Does Protect's public API serve snapshots for an adopted third-party
+  camera? Only decides whether the optional Protect snapshot shortcut
+  works; ONVIF snapshots are the default either way.
+- Are ONVIF events reliable enough on Hikvision, or is its native ISAPI
+  alert stream worth a dedicated path? Only matters for the bridge, not
+  for PTZ aiming.
 
 ### SIP / VoIP
 
@@ -400,12 +577,88 @@ SIP matters for two different reasons here, worth keeping separate:
   No separate SIP trunk/provider account is strictly needed if there's
   already a home VoIP box in the house (e.g. Ooma): its base station
   outputs a standard analog phone line on an RJ11 jack, same as an old
-  landline. An ATA (Analog Telephone Adapter -- e.g. a Grandstream
-  HT801/HT802) wired into that output turns the existing line into a SIP
-  endpoint KNOCK's own code can place/answer calls on and read DTMF from,
-  the same way a cordless phone or answering machine already can. The
-  provider's own cloud/app isn't part of this at all -- it's just the
-  phone line underneath, same as any other phone plugged into that jack.
+  landline. An ATA (Analog Telephone Adapter) with an **FXO** port -- e.g.
+  a Grandstream HT813 -- plugged into that jack turns the existing line
+  into a SIP endpoint KNOCK's own code can place/answer calls on and read
+  DTMF from, the same way a cordless phone or answering machine already
+  can. (Not an FXS-only adapter like the HT801/HT802: those *supply* a
+  line for a phone to plug into, so wiring one to the Ooma jack connects
+  two line sources together and does nothing.) The provider's own
+  cloud/app isn't part of this at all -- it's just the phone line
+  underneath, same as any other phone plugged into that jack.
+
+**SIP engine: baresip.** The mainstream Python SIP libraries are GPL
+(pyVoIP, pjsua2/PJSIP) or unmaintained (aiosip), and pyVoIP -- tried first
+-- also can't cancel a ringing call or carry video. baresip is a mature,
+BSD-licensed SIP client; KNOCK runs it as a helper process and drives it
+over its local control socket (`integrations/baresip.py`), so all the SIP
+details (auth, retransmits, CANCEL, busy, NAT) live in a battle-tested
+implementation and nothing GPL is linked in. A SIP server (UniFi Talk,
+Asterisk, FreeSWITCH, 3CX) or provider does the routing. It also does
+video (H.264, and an RTSP stream as the video source), which keeps a
+**doorbell-video call** on the table: UniFi doesn't pop up Protect
+doorbell video on Talk phones (only Access intercoms), so KNOCK placing a
+SIP video call carrying the G6's stream to a Talk Touch would fill a real
+gap -- unverified whether Talk accepts third-party SIP video until tested
+on real hardware.
+
+**Staged plan:**
+- **Stage 1: announcement calls.** ✅ Built
+  (`integrations/sip_caller.py`, wired into the UniFi bridge's
+  notifications). For the notification categories that
+  matter most (emergency, and optionally approval), KNOCK also rings a
+  configured extension or number and speaks the summary through TTS, then
+  hangs up. Picking up a phone becomes an alternative to the push
+  notification -- not a replacement, the push still goes out.
+- **Stage 2: answer with DTMF.** The same call offers keypad choices
+  ("press 1 if you're coming, 2 to turn them away"), mapped to the same
+  actions as the notification buttons, spoken back to the visitor.
+- **Stage 3: live handoff.** Bridge the call's audio to the doorbell's
+  talkback/mic so the person who picked up talks to the visitor directly.
+- **Stage 4: SIP door stations as a bridge.** Accept inbound calls from
+  SIP intercoms (2N, Akuvox, Doorbird, UniFi Access) and run the normal
+  conversation over the call audio.
+
+**Rules for every stage:** a visitor can never make KNOCK dial out --
+calls only go out from KNOCK's own notification logic, to numbers set in
+Settings. And KNOCK never sends a door-release DTMF code: many door
+stations and apartment buzzer systems unlock on a keypress, and KNOCK's
+policy already refuses "unlock" requests; a SIP bridge answers and hands
+off, it never buzzes anyone in.
+
+#### Example implementation: UniFi Talk + ATAs
+
+A concrete home setup using UniFi's phone system as the SIP server:
+
+- **KNOCK as a Talk extension.** Talk accepts third-party SIP devices
+  (with caveats: support has shifted between versions, reading SIP
+  credentials has at times needed the Pro plan or the CLI, and Ubiquiti
+  doesn't troubleshoot third-party devices). KNOCK registers as one with
+  its own extension, so Stage 1's announcement call can ring any Talk
+  phone -- or a ring group of all of them.
+- **The G6 can't do this alone.** Protect doorbells don't speak SIP, so
+  there's no native "doorbell rings the desk phones" in UniFi. KNOCK is
+  the glue: G6 ring -> KNOCK conversation -> Talk extension call.
+- **Analog phones via FXS ATAs.** A Grandstream HT801/HT802 registered in
+  Talk turns old desk phones and cordless bases into Talk extensions, so
+  KNOCK's call reaches them too, not just UniFi handsets. Watch ring load:
+  many handsets on one port may not all ring.
+- **Existing lines via FXO ATAs.** An HT813's FXO port brings an analog
+  line into Talk: an Ooma base's jack, a landline, or an apartment buzzer
+  that rings a phone line (a Stage 4 bridge target -- and exactly where
+  the never-send-unlock-DTMF rule matters).
+- **Settings to match on both ends:** DTMF method (RFC 2833 vs SIP INFO)
+  and codec (G.711) on the ATA, Talk and KNOCK, or keypad choices won't
+  register.
+- **Switching providers away from Ooma.** Ooma doesn't hand out SIP
+  credentials, so with Talk as the phone system the outside line comes
+  from a SIP trunk instead -- Talk's own subscription, or a third-party
+  provider (Talk ships templates for a handful; others use custom fields,
+  unsupported by Ubiquiti). The number can usually be ported from Ooma. On
+  a custom trunk, 911 is the provider's responsibility, and an ATA line's
+  emergency calling depends on that trunk -- check it before relying on
+  any of these phones for emergencies. That swap also makes the FXO/Ooma
+  path above unnecessary.
 
 ### Battery-powered doorbells
 

@@ -121,6 +121,7 @@ export const SETTINGS_SECTIONS: { key: string; label: string }[] = [
   { key: "frigate", label: "Frigate" },
   { key: "homeassistant", label: "Home Assistant" },
   { key: "unifi", label: "UniFi Protect" },
+  { key: "sip", label: "Phone calls (SIP)" },
 ]
 
 export const settingsApi = {
