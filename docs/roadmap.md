@@ -587,16 +587,20 @@ SIP matters for two different reasons here, worth keeping separate:
   cloud/app isn't part of this at all -- it's just the phone line
   underneath, same as any other phone plugged into that jack.
 
-**Built-in SIP client.** Mainstream Python SIP stacks are GPL (pyVoIP,
-pjsua2/PJSIP) or unmaintained (aiosip), which doesn't fit an MIT project
-that ships a Docker image. KNOCK carries its own small SIP user agent
-instead, scoped to what it actually needs: digest-authenticated
-REGISTER/INVITE over UDP, G.711 (PCMU/PCMA) RTP audio, DTMF, and BYE. No
-video, no transcoding beyond G.711, no full PBX features -- a SIP server
+**SIP library: pyVoIP (GPL-3.0).** The mainstream Python SIP stacks are
+GPL (pyVoIP, pjsua2/PJSIP) or unmaintained (aiosip). KNOCK is meant to
+stay open source anyway, so it uses pyVoIP and accepts that anything
+distributing KNOCK bundled with it (the Docker image included) falls
+under GPL-3.0 terms -- see the README's license note. KNOCK only needs
+the basics: register, call, G.711 audio, DTMF, hang up. A SIP server
 (UniFi Talk, Asterisk, FreeSWITCH, 3CX) or provider does the routing.
+Fallbacks if pyVoIP stalls (its 2.0 has been in alpha since January 2024):
+a small in-house client, or baresip (BSD) in its own container.
 
 **Staged plan:**
-- **Stage 1: announcement calls.** For the notification categories that
+- **Stage 1: announcement calls.** ✅ Built
+  (`integrations/sip_caller.py`, wired into the UniFi bridge's
+  notifications). For the notification categories that
   matter most (emergency, and optionally approval), KNOCK also rings a
   configured extension or number and speaks the summary through TTS, then
   hangs up. Picking up a phone becomes an alternative to the push

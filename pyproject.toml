@@ -26,6 +26,11 @@ dependencies = [
   "webauthn>=2.5.0,<4.0.0",
   "Pillow>=10.0.0,<12.0.0",
   "zxing-cpp>=3.0.0,<4.0.0",
+  # GPL-3.0 -- see the README's license note. Only imported when SIP
+  # calling is enabled.
+  "pyVoIP>=1.6.8,<2.0.0",
+  # pyVoIP 1.x uses the stdlib audioop module, removed in Python 3.13.
+  "audioop-lts>=0.2.1; python_version >= '3.13'",
 ]
 
 [project.optional-dependencies]

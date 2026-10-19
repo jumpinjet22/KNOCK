@@ -77,6 +77,7 @@ from knock.config import (
     KnockConfig,
     KokoroConfig,
     OllamaConfig,
+    SipConfig,
     UnifiConfig,
     VisionConfig,
     WhisperConfig,
@@ -113,6 +114,7 @@ from knock.integrations.package_alerts import (
     default_package_media_dir,
     record_rtsp_clip,
 )
+from knock.integrations.sip_caller import SipCaller, to_sip_audio
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
@@ -391,6 +393,7 @@ class UnifiBridge:
         package_log: PackageLog | None = None,
         package_media_dir: Path | None = None,
         clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
+        sip_caller: SipCaller | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -435,6 +438,11 @@ class UnifiBridge:
         self.package_media_dir = package_media_dir
         self._clip_recorder = clip_recorder or record_rtsp_clip
         self.packages = PackageAlerts(self)
+        # Optional phone calls for important notifications -- see
+        # `_maybe_call_household`.
+        self.sip_caller = sip_caller
+        self._last_call_at: dict[str, float] = {}
+        self._call_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def has_private_api(self) -> bool:
@@ -535,8 +543,10 @@ class UnifiBridge:
     ) -> None:
         """Best-effort, off the event loop (the HTTP call itself is
         synchronous) -- a down or unconfigured Home Assistant never affects
-        the rest of the response.
+        the rest of the response. Also places a phone call for the
+        categories `SipConfig.call_on` lists (see `_maybe_call_household`).
         """
+        self._maybe_call_household(device_id, message, category)
         if self.ha_notifier is None:
             return
         # Only passed when set, so the default per-category tag stays the
@@ -553,6 +563,55 @@ class UnifiBridge:
             )
         except Exception as exc:  # noqa: BLE001 - notification is best-effort
             logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
+
+    def _maybe_call_household(
+        self, device_id: str, message: str, category: NotificationCategory
+    ) -> None:
+        """Ring the house phones for this notification, in the background.
+
+        Never blocks the visit (a call can ring for 30s+), never replaces
+        the push notification, and at most one call per category per
+        `call_cooldown_seconds` -- a visitor can trip an emergency
+        escalation, so they mustn't be able to make the phones ring on a
+        loop. Needs TTS to have anything to say.
+        """
+        caller = self.sip_caller
+        if caller is None or not caller.configured or category not in caller.config.call_on:
+            return
+        if self.tts_provider is None:
+            logger.info("SIP call for %s skipped: no TTS provider to speak it", category)
+            return
+        now = time.monotonic()
+        last = self._last_call_at.get(category)
+        if last is not None and now - last < caller.config.call_cooldown_seconds:
+            logger.info("SIP call for %s skipped: within the call cooldown", category)
+            return
+        self._last_call_at[category] = now
+        task = asyncio.get_running_loop().create_task(
+            self._call_household(caller, self.tts_provider, device_id, message)
+        )
+        self._call_tasks.add(task)
+        task.add_done_callback(self._call_tasks.discard)
+
+    async def _call_household(
+        self, caller: SipCaller, tts: TTSProvider, device_id: str, message: str
+    ) -> None:
+        try:
+            spoken = await tts.synthesize(f"This is KNOCK, about the front door. {message}")
+            audio = await asyncio.to_thread(to_sip_audio, spoken)
+            outcome = await asyncio.to_thread(caller.announce, audio)
+        except Exception as exc:  # noqa: BLE001 - a call is best-effort
+            logger.warning("SIP call for device %s failed: %s", device_id, exc)
+            return
+        if outcome.answered_by:
+            logger.info("SIP call for %s answered by %s", device_id, outcome.answered_by)
+        else:
+            logger.info(
+                "SIP call for %s not answered (tried %s)%s",
+                device_id,
+                ", ".join(outcome.attempted) or "nobody",
+                f": {outcome.error}" if outcome.error else "",
+            )
 
     async def _build_snapshot_url(self, device_id: str, *, package: bool = False) -> str | None:
         """Best-effort: None (no photo attached, notification still sent)
@@ -1133,6 +1192,7 @@ def main() -> None:
         audit_log=JSONLAuditLog(),
         package_log=JSONLPackageLog(),
         package_media_dir=default_package_media_dir(),
+        sip_caller=SipCaller(SipConfig.from_env()),
         public_base_url=knock_config.public_base_url,
     )
     logger.info(

@@ -223,6 +223,15 @@ bridge = UnifiBridge(
 )
 ```
 
+### Phone calls (SIP)
+
+For the notification categories you pick (default: emergencies only), KNOCK can also **ring a phone** and speak the notification's summary through TTS, then hang up. This works with any SIP server: UniFi Talk, Asterisk, FreeSWITCH, 3CX or a SIP provider. Picking up a desk phone becomes an alternative to the push notification, not a replacement, since the push still goes out. It's Stage 1 of the SIP plan in `docs/roadmap.md`, which also covers a UniFi Talk + analog-adapter (ATA) example setup.
+
+- **KNOCK as an extension:** create a SIP extension or third-party device for KNOCK on your phone system, then set `KNOCK_SIP_ENABLED=true`, `KNOCK_SIP_SERVER`, `KNOCK_SIP_USERNAME`, `KNOCK_SIP_PASSWORD` and `KNOCK_SIP_CALL_TARGETS` (extensions or numbers tried in order until one answers; a ring group is usually the best single target). These are also in Settings under "Phone calls (SIP)".
+- **Which notifications call:** `KNOCK_SIP_CALL_ON` (default `emergency`; any of `emergency`, `approval`, `review`, `fyi`, `package`). At most one call per category per `KNOCK_SIP_CALL_COOLDOWN_SECONDS` (default 300), so a visitor who trips an emergency escalation can't make the house phones ring on a loop. Calls only ever go to the numbers you configured, and need a TTS provider to have anything to say.
+- **Ringing:** `KNOCK_SIP_RING_TIMEOUT_SECONDS` (default 30) is how long KNOCK waits on one target before trying the next. pyVoIP can't cancel a call that's still ringing, so an unanswered phone rings until your SIP server's own timeout ends it.
+- **Networking:** SIP sends call audio (RTP) to the address KNOCK advertises, `KNOCK_SIP_LOCAL_IP` (blank auto-detects the LAN address used to reach the server), on UDP ports `KNOCK_SIP_RTP_PORT_LOW`-`KNOCK_SIP_RTP_PORT_HIGH` (default 10000-10100), plus `KNOCK_SIP_LOCAL_SIP_PORT` (default 5060). **Behind Docker's default NAT this doesn't work.** pyVoIP binds to the address it advertises, so the container needs `network_mode: host` (and then the web UI is on port 8000 directly, not the `8080:8000` mapping).
+
 ## Quickstart
 
 ### 1) Install
@@ -371,4 +380,6 @@ GitHub Pages favicon (`docs/favicon.ico`) is generated from
 
 ## License
 
-MIT
+KNOCK's own code is MIT.
+
+Phone calls use [pyVoIP](https://github.com/tayler6000/pyVoIP), which is **GPL-3.0**. Anything that distributes KNOCK bundled with it, including the published Docker image and a normal `pip install`, is therefore subject to GPL-3.0 terms as a whole. In practice: KNOCK stays open source, and a closed-source product can't be built on the bundle. KNOCK's own files keep their MIT terms on their own.

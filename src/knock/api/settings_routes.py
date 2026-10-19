@@ -24,6 +24,7 @@ from knock.config import (
     KokoroConfig,
     MqttConfig,
     OllamaConfig,
+    SipConfig,
     UnifiConfig,
     VisionConfig,
     WhisperConfig,
@@ -42,6 +43,7 @@ SECTION_CONFIGS: dict[str, type[BaseModel]] = {
     "frigate": FrigateConfig,
     "homeassistant": HomeAssistantConfig,
     "unifi": UnifiConfig,
+    "sip": SipConfig,
 }
 
 # Each config's from_env()/from_sources() env-var prefix -- almost always
@@ -55,6 +57,7 @@ ENV_PREFIXES: dict[str, str] = {
     "frigate": "KNOCK_FRIGATE_",
     "homeassistant": "KNOCK_HA_",
     "unifi": "KNOCK_UNIFI_",
+    "sip": "KNOCK_SIP_",
 }
 
 # Fields that are free-text strings but deserve a multi-line editor in the

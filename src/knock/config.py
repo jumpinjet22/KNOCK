@@ -713,3 +713,89 @@ class UnifiConfig(BaseModel):
                 float,
             ),
         )
+
+
+class SipConfig(BaseModel):
+    """Phone calls through a SIP server (UniFi Talk, Asterisk, FreeSWITCH,
+    3CX, a SIP provider) -- see `integrations/sip_caller.py`.
+
+    Today: announcement calls. For the notification categories in
+    `call_on`, KNOCK also rings `call_targets` and speaks the summary,
+    alongside (never instead of) the push notification. KNOCK registers as
+    an ordinary SIP extension/device using `username`/`password`.
+    """
+
+    enabled: bool = False
+    server: str = ""
+    port: int = 5060
+    username: str = ""
+    password: SecretStr = SecretStr("")
+    # The address KNOCK tells the SIP server to send call audio to -- must
+    # be reachable from the phones. Blank auto-detects the LAN address used
+    # to reach `server`. Behind Docker's default NAT this has to be the
+    # host's address *and* the container needs host networking (see README).
+    local_ip: str = ""
+    # Local UDP port KNOCK's own SIP traffic uses; change it if something
+    # else on the host already listens on 5060.
+    local_sip_port: int = 5060
+    rtp_port_low: int = 10000
+    rtp_port_high: int = 10100
+    # Extensions or numbers to try, in order, until one picks up. A ring
+    # group on the SIP server (e.g. every Talk phone at once) is usually
+    # the better single target.
+    call_targets: list[str] = Field(default_factory=list)
+    # Which notification categories also place a call: "emergency",
+    # "approval", "review", "fyi", "package".
+    call_on: list[str] = Field(default_factory=lambda: ["emergency"])
+    ring_timeout_seconds: float = 30.0
+    # At most one call per category in this window -- a visitor can trip an
+    # emergency escalation, so they must not be able to make the house
+    # phones ring over and over.
+    call_cooldown_seconds: float = 300.0
+
+    @classmethod
+    def from_env(cls) -> SipConfig:
+        call_targets = _csv(os.environ.get("KNOCK_SIP_CALL_TARGETS"))
+        call_on = _csv(os.environ.get("KNOCK_SIP_CALL_ON"))
+        return cls(
+            enabled=_bool(os.environ.get("KNOCK_SIP_ENABLED", "false")),
+            server=os.environ.get("KNOCK_SIP_SERVER", ""),
+            port=int(os.environ.get("KNOCK_SIP_PORT", "5060")),
+            username=os.environ.get("KNOCK_SIP_USERNAME", ""),
+            password=os.environ.get("KNOCK_SIP_PASSWORD", ""),
+            local_ip=os.environ.get("KNOCK_SIP_LOCAL_IP", ""),
+            local_sip_port=int(os.environ.get("KNOCK_SIP_LOCAL_SIP_PORT", "5060")),
+            rtp_port_low=int(os.environ.get("KNOCK_SIP_RTP_PORT_LOW", "10000")),
+            rtp_port_high=int(os.environ.get("KNOCK_SIP_RTP_PORT_HIGH", "10100")),
+            call_targets=call_targets if call_targets is not None else [],
+            call_on=call_on if call_on is not None else ["emergency"],
+            ring_timeout_seconds=float(os.environ.get("KNOCK_SIP_RING_TIMEOUT_SECONDS", "30")),
+            call_cooldown_seconds=float(os.environ.get("KNOCK_SIP_CALL_COOLDOWN_SECONDS", "300")),
+        )
+
+    @classmethod
+    def from_sources(cls, store: ConfigStore) -> SipConfig:
+        s = store.get_section("sip")
+        call_targets_env = _csv(os.environ.get("KNOCK_SIP_CALL_TARGETS"))
+        call_on_env = _csv(os.environ.get("KNOCK_SIP_CALL_ON"))
+        return cls(
+            enabled=_resolve("KNOCK_SIP_ENABLED", s, "enabled", False, _bool),
+            server=_resolve("KNOCK_SIP_SERVER", s, "server", ""),
+            port=_resolve("KNOCK_SIP_PORT", s, "port", 5060, int),
+            username=_resolve("KNOCK_SIP_USERNAME", s, "username", ""),
+            password=_resolve("KNOCK_SIP_PASSWORD", s, "password", ""),
+            local_ip=_resolve("KNOCK_SIP_LOCAL_IP", s, "local_ip", ""),
+            local_sip_port=_resolve("KNOCK_SIP_LOCAL_SIP_PORT", s, "local_sip_port", 5060, int),
+            rtp_port_low=_resolve("KNOCK_SIP_RTP_PORT_LOW", s, "rtp_port_low", 10000, int),
+            rtp_port_high=_resolve("KNOCK_SIP_RTP_PORT_HIGH", s, "rtp_port_high", 10100, int),
+            call_targets=(
+                call_targets_env if call_targets_env is not None else s.get("call_targets", [])
+            ),
+            call_on=call_on_env if call_on_env is not None else s.get("call_on", ["emergency"]),
+            ring_timeout_seconds=_resolve(
+                "KNOCK_SIP_RING_TIMEOUT_SECONDS", s, "ring_timeout_seconds", 30.0, float
+            ),
+            call_cooldown_seconds=_resolve(
+                "KNOCK_SIP_CALL_COOLDOWN_SECONDS", s, "call_cooldown_seconds", 300.0, float
+            ),
+        )
