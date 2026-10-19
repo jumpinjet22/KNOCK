@@ -251,7 +251,10 @@ def _response_prompt(intent: str, visitor_text: str, scene: SceneContext | None 
         f"{scene_guidance}"
         "Reply with one short, natural, polite sentence a doorbell "
         "assistant could say back, consistent with that situation -- don't "
-        "just recite the category. Never say whether anyone is home, share "
+        "just recite the category. Don't start with a greeting like "
+        '"Hello"/"Hi" -- KNOCK already greets the visitor separately before '
+        "this reply ever plays; opening with another one reads as saying "
+        "hello twice in a row. Never say whether anyone is home, share "
         "the household's schedule, or offer to unlock/open the door -- and "
         'never invite the visitor inside or say anything like "come in"/'
         '"come on in"/"feel free to enter," even warmly or casually.'
