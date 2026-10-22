@@ -1,0 +1,100 @@
+name: 🐛 Bug report
+description: Something in KNOCK is broken or behaving unexpectedly.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug!
+
+        **Privacy reminder:** KNOCK handles visitor audio, video, and conversations. Please **do not** attach camera footage, recordings, transcripts with real names, API keys, or anything from your `.env` file. Redact before pasting.
+
+        Found a security issue (e.g. a way to make KNOCK unlock a door or leak data)? Please don't file it here — report it privately to the maintainers instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the bug.
+      placeholder: When a visitor rang the doorbell, KNOCK...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `...`
+        2. Trigger a visitor event with `...`
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Core / orchestration
+        - Conversation & safety policy
+        - Providers (LLM / STT / TTS / vision)
+        - Integrations (doorbell / camera / intercom)
+        - API
+        - CLI
+        - Web UI
+        - Docker / deployment
+        - Docs
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How are you running KNOCK?
+      options:
+        - Local Python install
+        - Docker (compose.yml)
+        - Docker (compose.local.yml)
+        - Docker (compose.demo.yml)
+        - Distributed Docker setup
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: KNOCK version or commit
+      placeholder: "0.2.0 or abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, hardware, providers in use, browser (for web UI issues).
+      placeholder: |
+        - OS: Ubuntu 24.04
+        - Python: 3.12.4
+        - Hardware: Raspberry Pi 5
+        - Providers: local LLM via ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any relevant log output (redacted!). This will be formatted as code automatically.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this hasn't been reported yet.
+          required: true
+        - label: I removed personal data, recordings, and secrets from this report.
+          required: true

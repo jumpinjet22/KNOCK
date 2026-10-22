@@ -1,0 +1,68 @@
+name: 💡 Idea / feature request
+description: Suggest a new feature or improvement for KNOCK.
+title: "[Idea]: "
+labels: ["enhancement", "idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Got an idea? Love to hear it. KNOCK is **safety-first, local-first, and privacy-first**, so ideas that fit those principles are much more likely to land. Check the [roadmap](https://github.com/jumpinjet22/KNOCK/blob/main/docs/roadmap.md) first — it might already be planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation or frustration behind the idea.
+      placeholder: When a delivery driver shows up, I'd like KNOCK to...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like KNOCK to do? How would it work?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've thought about.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Core / orchestration
+        - Conversation & safety policy
+        - Providers (LLM / STT / TTS / vision)
+        - Integrations / new hardware
+        - API
+        - CLI
+        - Web UI
+        - Docker / deployment
+        - Docs
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety & privacy impact
+      description: Could this affect household security, send data off-device, or retain sensitive info? How should that be handled?
+      placeholder: Runs fully locally, no new data stored...
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you be willing to help build this?
+      options:
+        - Yes, I'd like to open a PR
+        - Maybe, with some guidance
+        - No, just suggesting
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and the roadmap for similar ideas.
+          required: true
