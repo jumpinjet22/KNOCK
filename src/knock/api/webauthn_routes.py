@@ -4,8 +4,8 @@ No hand-rolled crypto or COSE/attestation parsing -- `py_webauthn` (the
 Python port of the SimpleWebAuthn project) does the actual ceremony
 verification; this module is just the KNOCK-specific plumbing around it:
 credential storage (`PasskeyStore`), resolving the relying-party id/origin
-from the live request, and stashing the per-ceremony challenge in the
-(Starlette) session between the options and verify steps of each ceremony.
+from the live request, and carrying the per-ceremony challenge between the
+options and verify steps of each ceremony (see `_ChallengeStore`).
 
 Registration is authenticated (only an already-logged-in admin can attach a
 new passkey to their own account). Login is not, by definition -- a passkey
@@ -23,6 +23,9 @@ requirement, it's enforced by the browser itself.
 
 from __future__ import annotations
 
+import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -44,6 +47,68 @@ router = APIRouter(prefix="/api/webauthn", tags=["webauthn"])
 
 RP_NAME = "KNOCK"
 _CHALLENGE_SESSION_KEY = "webauthn_challenge"
+
+
+class _ChallengeStore:
+    """Server-side record of issued challenges: each verifies at most once.
+
+    The Starlette session is a signed cookie the browser holds, so popping a
+    challenge from it only changes the cookie sent back -- replaying the
+    pre-verify cookie alongside a captured response would present the same
+    challenge again. Synced passkeys (iCloud Keychain, Google Password
+    Manager) always report a sign count of 0, so the sign-count check can't
+    catch that replay either; consuming the challenge here does.
+
+    In-process memory: KNOCK runs a single uvicorn worker, and a ceremony
+    interrupted by a restart just has to be started again.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = 300.0,
+        max_pending: int = 1000,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl = ttl_seconds
+        self._max_pending = max_pending
+        self._clock = clock
+        self._expires: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def issue(self, challenge_b64url: str) -> None:
+        with self._lock:
+            now = self._clock()
+            self._expires = {c: exp for c, exp in self._expires.items() if exp > now}
+            # The login-options endpoint is unauthenticated -- bound memory by
+            # dropping the oldest pending challenges first.
+            while len(self._expires) >= self._max_pending:
+                del self._expires[next(iter(self._expires))]
+            self._expires[challenge_b64url] = now + self._ttl
+
+    def consume(self, challenge_b64url: str) -> bool:
+        with self._lock:
+            expires = self._expires.pop(challenge_b64url, None)
+            return expires is not None and expires > self._clock()
+
+
+_challenges = _ChallengeStore()
+
+
+def _start_ceremony(request: Request, challenge: bytes) -> None:
+    challenge_b64url = webauthn.helpers.bytes_to_base64url(challenge)
+    _challenges.issue(challenge_b64url)
+    request.session[_CHALLENGE_SESSION_KEY] = challenge_b64url
+
+
+def _finish_ceremony(request: Request, ceremony: str) -> bytes:
+    challenge_b64url = request.session.pop(_CHALLENGE_SESSION_KEY, None)
+    if not challenge_b64url:
+        raise HTTPException(status_code=400, detail=f"no {ceremony} ceremony in progress")
+    if not _challenges.consume(challenge_b64url):
+        raise HTTPException(
+            status_code=400, detail=f"{ceremony} challenge expired or already used; start again"
+        )
+    return webauthn.base64url_to_bytes(challenge_b64url)
 
 
 def get_passkey_store() -> PasskeyStore:
@@ -86,7 +151,7 @@ def get_registration_options(
             user_verification=UserVerificationRequirement.PREFERRED,
         ),
     )
-    request.session[_CHALLENGE_SESSION_KEY] = webauthn.helpers.bytes_to_base64url(options.challenge)
+    _start_ceremony(request, options.challenge)
     return Response(content=webauthn.options_to_json(options), media_type="application/json")
 
 
@@ -109,14 +174,12 @@ def verify_registration(
     *,
     store: PasskeyStoreDep,
 ) -> PasskeyOut:
-    challenge_b64url = request.session.pop(_CHALLENGE_SESSION_KEY, None)
-    if not challenge_b64url:
-        raise HTTPException(status_code=400, detail="no registration ceremony in progress")
+    expected_challenge = _finish_ceremony(request, "registration")
 
     try:
         verification = webauthn.verify_registration_response(
             credential=body.credential,
-            expected_challenge=webauthn.base64url_to_bytes(challenge_b64url),
+            expected_challenge=expected_challenge,
             expected_rp_id=_rp_id(request),
             expected_origin=_origin(request),
         )
@@ -173,7 +236,7 @@ def get_authentication_options(request: Request, *, store: PasskeyStoreDep) -> R
         allow_credentials=[_descriptor(cred.credential_id) for cred in all_credentials],
         user_verification=UserVerificationRequirement.PREFERRED,
     )
-    request.session[_CHALLENGE_SESSION_KEY] = webauthn.helpers.bytes_to_base64url(options.challenge)
+    _start_ceremony(request, options.challenge)
     return Response(content=webauthn.options_to_json(options), media_type="application/json")
 
 
@@ -194,9 +257,7 @@ def verify_authentication(
     store: PasskeyStoreDep,
     session_store: WebSessionStoreDep,
 ) -> MeResponse:
-    challenge_b64url = request.session.pop(_CHALLENGE_SESSION_KEY, None)
-    if not challenge_b64url:
-        raise HTTPException(status_code=400, detail="no sign-in ceremony in progress")
+    expected_challenge = _finish_ceremony(request, "sign-in")
 
     raw_credential_id = body.credential.get("id")
     stored = store.get(raw_credential_id) if raw_credential_id else None
@@ -206,7 +267,7 @@ def verify_authentication(
     try:
         verification = webauthn.verify_authentication_response(
             credential=body.credential,
-            expected_challenge=webauthn.base64url_to_bytes(challenge_b64url),
+            expected_challenge=expected_challenge,
             expected_rp_id=_rp_id(request),
             expected_origin=_origin(request),
             credential_public_key=webauthn.base64url_to_bytes(stored.public_key),
