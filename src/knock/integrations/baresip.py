@@ -208,9 +208,14 @@ class BaresipProcess:
         (self.directory / "config").write_text(
             render_config(self.config, self.announcement_path, self.config.baresip_ctrl_port)
         )
-        accounts = self.directory / "accounts"
-        accounts.write_text(render_accounts(self.config))
-        accounts.chmod(0o600)  # it holds the SIP password
+        # It holds the SIP password (baresip needs it in plain text): create it
+        # owner-only rather than chmod-ing after the write, which left it
+        # world-readable for a moment -- and fchmod an existing file too,
+        # since O_CREAT's mode only applies to a new one.
+        fd = os.open(self.directory / "accounts", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as accounts:
+            os.fchmod(accounts.fileno(), 0o600)
+            accounts.write(render_accounts(self.config))
 
     def start(self, ready_timeout: float = 10.0) -> None:
         if self.running:
