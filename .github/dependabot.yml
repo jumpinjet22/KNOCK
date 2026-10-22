@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Dependencies are ranges and CI/Docker already install the newest
+    # in-range version -- only open a PR when a release falls outside the
+    # range, not to raise the lower bound. Vulnerable versions are still
+    # handled by Dependabot security updates.
+    versioning-strategy: increase-if-necessary
     groups:
       python-minor-patch:
         update-types: [minor, patch]
@@ -12,6 +17,13 @@ updates:
     directory: /web
     schedule:
       interval: weekly
+    # Node types track the runtime (Node 22, see test.yml/Dockerfile) and a
+    # TypeScript major is a compiler upgrade -- both are bumped deliberately.
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
     groups:
       web-minor-patch:
         update-types: [minor, patch]
@@ -20,6 +32,10 @@ updates:
     directory: /docker
     schedule:
       interval: weekly
+    # Node majors are upgraded deliberately, to the next LTS release only.
+    ignore:
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /
