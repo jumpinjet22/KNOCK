@@ -1,6 +1,6 @@
 # Build the React frontend separately -- keeps Node entirely out of the
 # final runtime image.
-FROM node:22-slim AS web-build
+FROM node:25-slim AS web-build
 
 WORKDIR /web
 
