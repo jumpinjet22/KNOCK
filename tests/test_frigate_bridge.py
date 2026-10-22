@@ -3,6 +3,8 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import respx
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 import knock.integrations.frigate as frigate_module
 from knock.config import FrigateConfig
@@ -187,9 +189,20 @@ def test_on_connect_subscribes_to_events_topic(tmp_path) -> None:
     bridge = _bridge(tmp_path)
     client = MagicMock()
 
-    bridge._on_connect(client, None, {}, 0, None)
+    bridge._on_connect(client, None, {}, ReasonCode(PacketTypes.CONNACK, "Success"), None)
 
     client.subscribe.assert_called_once_with("frigate/events")
+
+
+def test_on_connect_logs_and_skips_subscribe_when_refused(tmp_path, caplog) -> None:
+    bridge = _bridge(tmp_path)
+    client = MagicMock()
+
+    refused = ReasonCode(PacketTypes.CONNACK, "Not authorized")
+    bridge._on_connect(client, None, {}, refused, None)
+
+    client.subscribe.assert_not_called()
+    assert "refused the connection: Not authorized" in caplog.text
 
 
 def test_on_message_publishes_response_for_matching_detection(tmp_path) -> None:
