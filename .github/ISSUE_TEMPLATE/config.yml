@@ -3,3 +3,6 @@ contact_links:
   - name: 📖 Documentation
     url: https://github.com/jumpinjet22/KNOCK/tree/main/docs
     about: Architecture, hardware, and roadmap docs.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/jumpinjet22/KNOCK/security/advisories/new
+    about: Please report security issues privately, not as a public issue.
