@@ -308,6 +308,12 @@ docker pull ghcr.io/jumpinjet22/knock:0.1.0-alpha
 docker run --rm -p 8000:8000 ghcr.io/jumpinjet22/knock:0.1.0-alpha
 ```
 
+There's also a bleeding-edge **`edge`** tag, rebuilt from `main` on every merge and again every Monday from scratch (fresh base image, no layer cache) so OS and dependency security fixes land without waiting for a release. It's whatever is on `main` right now -- untested beyond CI, and it may break -- so stick to a version tag or `latest` unless you want to live on the edge:
+
+```bash
+docker pull ghcr.io/jumpinjet22/knock:edge
+```
+
 Pull requests still build the image on every PR (to catch a broken `Dockerfile` or a missing packaged file immediately) but never push it -- only a tag push or a manual run does, since those are the only contexts with a usable registry-write token anyway.
 
 Note: GHCR packages publish as **private** by default on their first push, regardless of the repo's own visibility -- after the workflow runs once, you'll need to flip it to public yourself (package settings on GitHub) if you want `docker pull` to work without authenticating.
