@@ -1,0 +1,34 @@
+# Labels pull requests by the files they change (actions/labeler).
+'area: core':
+  - changed-files:
+      - any-glob-to-any-file: ['src/knock/core/**', 'src/knock/config.py']
+'area: safety':
+  - changed-files:
+      - any-glob-to-any-file: 'src/knock/conversation/**'
+'area: providers':
+  - changed-files:
+      - any-glob-to-any-file: 'src/knock/providers/**'
+'area: integrations':
+  - changed-files:
+      - any-glob-to-any-file: 'src/knock/integrations/**'
+'area: api':
+  - changed-files:
+      - any-glob-to-any-file: 'src/knock/api/**'
+'area: cli':
+  - changed-files:
+      - any-glob-to-any-file: 'src/knock/cli/**'
+'area: web-ui':
+  - changed-files:
+      - any-glob-to-any-file: 'web/**'
+'area: docker':
+  - changed-files:
+      - any-glob-to-any-file: ['docker/**', '.dockerignore']
+'area: docs':
+  - changed-files:
+      - any-glob-to-any-file: ['docs/**', '**/*.md']
+'tests':
+  - changed-files:
+      - any-glob-to-any-file: 'tests/**'
+'ci':
+  - changed-files:
+      - any-glob-to-any-file: '.github/**'
