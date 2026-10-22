@@ -22,10 +22,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import knock.integrations.baresip as baresip_module
 from knock.config import SipConfig, UnifiConfig
 from knock.core.session_store import JSONFileSessionStore
 from knock.integrations.baresip import (
     BaresipControl,
+    BaresipProcess,
     NetstringReader,
     encode_netstring,
     render_accounts,
@@ -341,6 +343,47 @@ def test_accounts_line_registers_with_the_login() -> None:
 
 def test_accounts_line_without_registration() -> None:
     assert ";regint=0;" in render_accounts(_config(registration=False))
+
+
+def _mode_while_writing_password(tmp_path, monkeypatch) -> int | None:
+    """The accounts file's permissions at the moment its contents (the SIP
+    password) are rendered for writing, or None if it doesn't exist yet."""
+    seen: list[int | None] = []
+    real_render = baresip_module.render_accounts
+
+    def probe(config: SipConfig) -> str:
+        accounts = tmp_path / "accounts"
+        seen.append(accounts.stat().st_mode & 0o777 if accounts.exists() else None)
+        return real_render(config)
+
+    monkeypatch.setattr(baresip_module, "render_accounts", probe)
+    BaresipProcess(_config(), directory=tmp_path).write_config()
+    return seen[0]
+
+
+def test_accounts_file_is_owner_only_before_the_password_goes_in(tmp_path, monkeypatch) -> None:
+    old_umask = os.umask(0)  # the most permissive default a process could have
+    try:
+        mode = _mode_while_writing_password(tmp_path, monkeypatch)
+    finally:
+        os.umask(old_umask)
+
+    assert mode == 0o600
+    accounts = tmp_path / "accounts"
+    assert accounts.stat().st_mode & 0o777 == 0o600
+    assert "auth_pass=secret" in accounts.read_text()
+
+
+def test_an_existing_loose_accounts_file_is_tightened_before_rewriting(
+    tmp_path, monkeypatch
+) -> None:
+    accounts = tmp_path / "accounts"
+    accounts.write_text("old")
+    accounts.chmod(0o644)
+
+    assert _mode_while_writing_password(tmp_path, monkeypatch) == 0o600
+    assert accounts.stat().st_mode & 0o777 == 0o600
+    assert accounts.read_text() == render_accounts(_config())
 
 
 @pytest.mark.parametrize("field", ["password", "username", "server"])
