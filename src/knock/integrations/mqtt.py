@@ -83,6 +83,16 @@ class MqttBridge:
     def _on_connect(
         self, client: mqtt.Client, userdata: object, flags, reason_code, properties
     ) -> None:
+        # A refused connection (bad credentials, ...) still lands here; without
+        # this the bridge just sits silently never receiving anything.
+        if reason_code.is_failure:
+            logger.error(
+                "MQTT broker %s:%s refused the connection: %s",
+                self.config.host,
+                self.config.port,
+                reason_code,
+            )
+            return
         client.subscribe(self.config.topic_in)
 
     def _on_message(self, client: mqtt.Client, userdata: object, msg: mqtt.MQTTMessage) -> None:

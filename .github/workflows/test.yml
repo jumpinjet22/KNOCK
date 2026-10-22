@@ -23,6 +23,33 @@ jobs:
       - name: Pytest (with coverage)
         run: pytest --cov=knock --cov-report=term-missing
 
+  # The opt-in MQTT/Frigate bridge tests in test_mqtt_integration.py, which
+  # start their own password-protected Mosquitto and drive the real paho
+  # client end to end.
+  mqtt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Mosquitto
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mosquitto
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      # The tests skip themselves when Mosquitto is missing -- fail instead of
+      # going green without having touched a broker.
+      - name: Real broker tests
+        env:
+          KNOCK_TEST_MQTT: '1'
+        run: |
+          pytest tests/test_mqtt_integration.py -rs | tee pytest.log
+          grep -q " 3 passed" pytest.log
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
