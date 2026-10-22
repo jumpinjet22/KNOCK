@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
+from knock.api import webauthn_routes
 from knock.api.app import app
 from knock.api.auth_routes import get_auth_store, get_web_session_store
 from knock.api.webauthn_routes import get_passkey_store
@@ -244,3 +245,80 @@ def test_a_sign_count_that_goes_backwards_is_rejected(client) -> None:
     resp = _sign_in(client, authenticator)
 
     assert resp.status_code == 401
+
+
+# -- replay ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sign_count_step", [1, 0], ids=["counting", "synced-passkey"])
+def test_a_captured_sign_in_cannot_be_replayed_with_the_old_cookie(client, sign_count_step) -> None:
+    # The challenge rides in a signed client-side cookie, so an attacker who
+    # captured the sign-in request also has the pre-verify cookie. A synced
+    # passkey always reports sign count 0, so only consuming the challenge
+    # server-side stops the replay.
+    authenticator = _SoftAuthenticator(sign_count_step=sign_count_step)
+    _register(client, authenticator)
+    options = _post(client, "/api/webauthn/login/options").json()
+    captured_cookies = dict(client.cookies)
+    credential = authenticator.sign_in(options)
+    assert (
+        _post(client, "/api/webauthn/login/verify", {"credential": credential}).status_code == 200
+    )
+
+    client.cookies.clear()
+    for name, value in captured_cookies.items():
+        client.cookies.set(name, value)
+    replay = _post(client, "/api/webauthn/login/verify", {"credential": credential})
+
+    assert replay.status_code in (400, 401)
+    assert "knock_session" not in replay.cookies
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_a_captured_registration_cannot_be_replayed_with_the_old_cookie(
+    client, passkey_store
+) -> None:
+    resp = _post(client, "/api/auth/setup", {"username": "jon", "password": "a-good-password"})
+    assert resp.status_code == 201
+    options = _post(client, "/api/webauthn/register/options").json()
+    captured_cookies = dict(client.cookies)
+    body = {"credential": _SoftAuthenticator().register(options), "nickname": "soft"}
+    assert _post(client, "/api/webauthn/register/verify", body).status_code == 200
+
+    client.cookies.clear()
+    for name, value in captured_cookies.items():
+        client.cookies.set(name, value)
+    replay = _post(client, "/api/webauthn/register/verify", body)
+
+    assert replay.status_code == 400
+    assert len(passkey_store.list_for_user("jon")) == 1
+
+
+def test_an_expired_challenge_is_rejected(client, monkeypatch) -> None:
+    authenticator = _SoftAuthenticator()
+    _register(client, authenticator)
+    now = [1000.0]
+    monkeypatch.setattr(
+        webauthn_routes,
+        "_challenges",
+        webauthn_routes._ChallengeStore(ttl_seconds=300, clock=lambda: now[0]),
+    )
+    options = _post(client, "/api/webauthn/login/options").json()
+    now[0] += 301
+
+    resp = _post(
+        client, "/api/webauthn/login/verify", {"credential": authenticator.sign_in(options)}
+    )
+
+    assert resp.status_code == 400
+    assert "expired or already used" in resp.json()["detail"]
+
+
+def test_challenge_store_bounds_pending_challenges() -> None:
+    store = webauthn_routes._ChallengeStore(max_pending=2)
+    for challenge in ("a", "b", "c"):
+        store.issue(challenge)
+
+    assert store.consume("a") is False  # oldest dropped
+    assert store.consume("c") is True
+    assert store.consume("c") is False  # single use
