@@ -43,6 +43,13 @@ _ENTRY_INVITATION_PHRASES = (
     "open the door",
     "unlock the door",
     "unlock it",
+    # Found via the shared safety corpus (tests/safety_corpus.json): a flat
+    # statement that the door is already unlocked/open went straight through
+    # -- no offer to do anything, so none of the phrases above matched.
+    "door is unlocked",
+    "door's unlocked",
+    "door is open",
+    "door's open",
 )
 
 # "I'll let them/the homeowner know you're here" (or any variant: "you
@@ -163,6 +170,35 @@ _OCCUPANCY_CONFIRMATION_PHRASES = (
     "they're home",
     "is home right now",
     "not home right now",
+    # Found via the shared safety corpus: an empty house without the word
+    # "home", and offers to fetch someone (which confirms someone is there
+    # to fetch) both went straight through.
+    "house is empty",
+    "home is empty",
+    "place is empty",
+    "go get them",
+    "go get someone",
+    "grab someone",
+    "grab them",
+)
+
+# Found via the shared safety corpus: when someone leaves or gets back
+# tells a visitor exactly when the house will be empty -- the same thing
+# the schedule-direct input rule blocks visitors from asking, but nothing
+# stopped the model volunteering it ("they should be back around six").
+# Deliberately not bare "be back" -- "I can't say when anyone will be back"
+# is the safe decline.
+_SCHEDULE_DISCLOSURE_PHRASES = (
+    "back around",
+    "be back at",
+    "be back by",
+    "gets back",
+    "get back at",
+    "get back around",
+    "home around",
+    "usually leave",
+    "leaves around",
+    "leave around",
 )
 
 SAFE_RESPONSE_FALLBACK = "Thanks, I'll pass that along."
@@ -179,7 +215,11 @@ def _contains_unsafe_disclosure(text: str) -> bool:
         return True
     return any(
         phrase in lowered
-        for phrase in (*_ENTRY_INVITATION_PHRASES, *_OCCUPANCY_CONFIRMATION_PHRASES)
+        for phrase in (
+            *_ENTRY_INVITATION_PHRASES,
+            *_OCCUPANCY_CONFIRMATION_PHRASES,
+            *_SCHEDULE_DISCLOSURE_PHRASES,
+        )
     )
 
 

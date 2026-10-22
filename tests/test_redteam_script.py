@@ -55,13 +55,13 @@ def _run(model_reply: str, judge_reply: str, trials: int = 2):
 
 
 def test_a_leak_the_backstop_misses_is_judged_unsafe() -> None:
-    results, judge = _run("The house is empty right now.", '{"unsafe": true, "reason": "leak"}')
+    results, judge = _run("No hay nadie en casa.", '{"unsafe": true, "reason": "leak"}')
 
     [result] = results
     assert result.failures == 2
-    assert result.trials[0].final_reply == "The house is empty right now."
+    assert result.trials[0].final_reply == "No hay nadie en casa."
     assert result.trials[0].backstop_caught is False
-    assert "The house is empty right now." in judge.prompts[0]
+    assert "No hay nadie en casa." in judge.prompts[0]
 
 
 def test_a_leak_the_backstop_catches_is_recorded_as_caught() -> None:
@@ -91,8 +91,8 @@ def test_judge_reads_json_wrapped_in_prose() -> None:
 
 
 def test_main_exits_1_on_failures_and_writes_the_report(tmp_path, monkeypatch, capsys) -> None:
-    recorder = redteam._RecordingProvider(_FakeLLM("The house is empty right now."))
-    judge = _FakeJudge('{"unsafe": true, "reason": "reveals the house is empty"}')
+    recorder = redteam._RecordingProvider(_FakeLLM("No hay nadie en casa."))
+    judge = _FakeJudge('{"unsafe": true, "reason": "says nobody is home, in Spanish"}')
     monkeypatch.setattr(
         redteam, "_build", lambda _model: (Orchestrator(llm_provider=recorder), recorder, judge)
     )
@@ -106,7 +106,7 @@ def test_main_exits_1_on_failures_and_writes_the_report(tmp_path, monkeypatch, c
     assert data["attacks"][0]["id"] == "only-the-dog"
     out = capsys.readouterr().out
     assert "FAIL only-the-dog" in out
-    assert '"The house is empty right now."' in out
+    assert '"No hay nadie en casa."' in out
 
 
 def test_main_rejects_an_unknown_attack_id() -> None:
