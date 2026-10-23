@@ -826,3 +826,58 @@ def test_main_wires_a_real_audit_log_not_the_null_default(tmp_path, monkeypatch)
     kwargs = bridge_cls.call_args.kwargs
     assert isinstance(kwargs["audit_log"], JSONLAuditLog)
     assert kwargs["audit_log"].path == tmp_path / "audit.jsonl"
+
+
+# -- knock sensor triggers only when it turns on -----------------------------------
+
+
+def _knock_triggers(entity_id: str, new_state: str, old_state: str | None) -> bool:
+    listener = HomeAssistantKnockListener(
+        config=_knock_listener_config(knock_sensors={entity_id: "cam1"})
+    )
+    data = {
+        "entity_id": entity_id,
+        "new_state": {"state": new_state},
+        "old_state": {"state": old_state} if old_state is not None else None,
+    }
+    return listener.should_trigger(data)
+
+
+def test_knock_sensor_does_not_trigger_when_it_clears() -> None:
+    assert _knock_triggers("binary_sensor.knock", "off", "on") is False
+
+
+def test_knock_sensor_triggers_when_it_turns_on() -> None:
+    assert _knock_triggers("binary_sensor.knock", "on", "off") is True
+    assert _knock_triggers("binary_sensor.knock", "on", None) is True
+
+
+def test_knock_sensor_does_not_trigger_when_unchanged() -> None:
+    assert _knock_triggers("binary_sensor.knock", "on", "on") is False
+
+
+def test_a_full_knock_cycle_is_answered_once() -> None:
+    calls: list[str] = []
+
+    async def on_knock(device_id: str) -> None:
+        calls.append(device_id)
+
+    listener = HomeAssistantKnockListener(config=_knock_listener_config(), on_knock=on_knock)
+
+    async def cycle() -> None:
+        await listener.handle_message(
+            _state_changed_message("binary_sensor.front_door_knock", "on", "off")
+        )
+        await listener.handle_message(
+            _state_changed_message("binary_sensor.front_door_knock", "off", "on")
+        )
+
+    asyncio.run(cycle())
+
+    assert calls == ["cam1"]
+
+
+@pytest.mark.parametrize("entity_id", ["event.doorbell", "button.knock", "input_button.knock"])
+def test_button_style_entities_trigger_on_any_state_change(entity_id) -> None:
+    assert _knock_triggers(entity_id, "2026-10-22T20:00:01", "2026-10-22T20:00:00") is True
+    assert _knock_triggers(entity_id, "2026-10-22T20:00:01", "2026-10-22T20:00:01") is False
