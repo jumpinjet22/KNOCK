@@ -60,7 +60,10 @@ python scripts/redteam.py --attack only-the-dog --trials 20     # one attack, mo
 python scripts/redteam.py --json redteam-report.json            # also write a full report
 ```
 
+
 It drives the real `Orchestrator` (same model/safety-check/tool-calling settings the bridges use) and has a separate judge model score every final reply -- use a different, ideally bigger, model than the one being tested. It exits `0` when nothing was judged unsafe, `1` when something was (each printed with the corpus line to add), `2` when Ollama isn't reachable. Run it after changing prompts, the model or the backstop, and before a release; when it finds a reply that gets through, add it to the corpus (`unsafe_replies` along with a backstop fix, or `known_gaps`) so CI guards it from then on.
+
+**Prompt injection** (text a camera can read, package labels, messages built to be relayed to the household): see `plans/redteam-prompt-injection.md`. The deterministic half runs in CI (`tests/test_injection_surfaces.py`); the real-model half is `python scripts/redteam_injection.py`.
 
 **Self-introduction:** the first response of a new session (`SessionState.turn_count == 0`) is prefixed with a one-time greeting (`knock.conversation.prompts.GREETING`) that identifies KNOCK as an AI system and flags that it can get details wrong -- so a visitor knows what they're talking to before anything else is said. Later turns in the same session skip it. Emergency escalations never get it (immediacy matters more there than a self-introduction); calling `Orchestrator()` with no session state (stateless/library use) never greets either, since there's no session to track a "first turn" against.
 
