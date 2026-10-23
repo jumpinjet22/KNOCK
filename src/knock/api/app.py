@@ -15,6 +15,7 @@ from starlette_csrf import CSRFMiddleware
 
 from knock.api.auth_routes import router as auth_router
 from knock.api.debug_routes import router as debug_router
+from knock.api.doors_routes import router as doors_router
 from knock.api.history_routes import router as history_router
 from knock.api.oauth_routes import router as oauth_router
 from knock.api.settings_routes import router as settings_router
@@ -96,6 +97,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(settings_router)
+app.include_router(doors_router)
 app.include_router(debug_router)
 app.include_router(supervisor_router)
 app.include_router(oauth_router)
