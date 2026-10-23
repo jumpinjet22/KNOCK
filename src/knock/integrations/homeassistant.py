@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 
 _IGNORED_STATES = {None, "unknown", "unavailable"}
 
+# Entity domains whose state is a press timestamp rather than on/off.
+_BUTTON_DOMAINS = {"event", "button", "input_button"}
+
 # Notification-action identifiers KNOCK sends (see UnifiBridge's
 # signature-required notification) and the listener below reacts to. The
 # device id rides along embedded in the action string itself (see
@@ -464,7 +467,16 @@ class HomeAssistantKnockListener:
             return False
 
         old_state = (event_data.get("old_state") or {}).get("state")
-        return new_state != old_state
+        if new_state == old_state:
+            return False
+        # A sensor is "a knock" when it turns on, not when it clears again:
+        # triggering on any change answered the door twice (on, then off).
+        # Button-style entities have no on/off -- their state is a timestamp
+        # that changes on every press -- so for those any change counts.
+        entity_id = event_data["entity_id"]
+        if entity_id.split(".", 1)[0] in _BUTTON_DOMAINS:
+            return True
+        return new_state == "on"
 
     async def handle_message(self, raw_message: str | bytes) -> None:
         message = json.loads(raw_message)
