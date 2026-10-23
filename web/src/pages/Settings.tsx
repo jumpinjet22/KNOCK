@@ -2,6 +2,7 @@ import { startRegistration } from "@simplewebauthn/browser"
 import { useCallback, useEffect, useState } from "react"
 import { Navigate, useNavigate, useParams } from "react-router-dom"
 import { SettingsFieldInput } from "../components/SettingsFieldInput"
+import { DoorsSettings } from "./DoorsSettings"
 import {
   ApiError,
   oauthApi,
@@ -19,8 +20,10 @@ const ACRONYMS = new Set(["api", "url", "ssl", "mqtt", "id", "http", "rtsp"])
 const OAUTH_SECTION = { key: "oauth_google", label: "Google Sign-In" }
 const OAUTH_AUTHENTIK_SECTION = { key: "oauth_authentik", label: "Authentik Sign-In" }
 const PASSKEYS_SECTION = { key: "passkeys", label: "Passkeys" }
+const DOORS_SECTION = { key: "doors", label: "Doors" }
 const NAV_SECTIONS = [
   ...SETTINGS_SECTIONS,
+  DOORS_SECTION,
   OAUTH_SECTION,
   OAUTH_AUTHENTIK_SECTION,
   PASSKEYS_SECTION,
@@ -57,7 +60,9 @@ export function Settings() {
         </ul>
       </nav>
       <div className="min-w-0 flex-1">
-        {section === OAUTH_SECTION.key ? (
+        {section === DOORS_SECTION.key ? (
+          <DoorsSettings />
+        ) : section === OAUTH_SECTION.key ? (
           <GoogleOAuthSettingsForm />
         ) : section === OAUTH_AUTHENTIK_SECTION.key ? (
           <AuthentikOAuthSettingsForm />

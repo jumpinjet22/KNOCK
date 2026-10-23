@@ -131,6 +131,33 @@ export const settingsApi = {
   kokoroVoices: () => apiFetch<KokoroVoices>("/api/settings/kokoro/voices"),
 }
 
+export interface DoorTriggers {
+  protect_cameras: string[]
+  ha_entities: string[]
+}
+
+export interface DoorData {
+  key: string
+  name: string
+  triggers: DoorTriggers
+  listen_device: string | null
+  speak_device: string | null
+  look_devices: string[]
+  call_targets: string[]
+}
+
+export interface DoorsResponse {
+  doors: DoorData[]
+  shadowed_by_env: boolean
+  error: string | null
+}
+
+export const doorsApi = {
+  get: () => apiFetch<DoorsResponse>("/api/doors"),
+  update: (doors: DoorData[]) =>
+    apiFetch<DoorsResponse>("/api/doors", { method: "PUT", body: { doors } }),
+}
+
 export interface VisionDescribeResult {
   raw: string
   sanitized: string
