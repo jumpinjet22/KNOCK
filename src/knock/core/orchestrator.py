@@ -756,7 +756,8 @@ class Orchestrator:
             logger.warning("LLM intent classification failed: %s", exc)
             return _IntentRefinement("unknown", False, [], None)
 
-        result = guess if guess in _LLM_CLASSIFIABLE_INTENTS else "unknown"
+        # The matching entry from the trusted list, never the model's own string.
+        result = next((name for name in _LLM_CLASSIFIABLE_INTENTS if name == guess), "unknown")
         logger.info(
             "LLM intent refinement: text=%s guess=%s -> %s",
             log_safe(visitor_text),

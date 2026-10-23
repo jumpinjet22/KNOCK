@@ -108,3 +108,23 @@ def test_real_files_are_still_served(spa) -> None:
     assert spa.get("/app.js").text == "real-asset"
     assert spa.get("/").text == "knock-spa"
     assert spa.get("/some/client/route").text == "knock-spa"
+
+
+def test_the_refined_intent_is_always_one_of_the_trusted_names(caplog) -> None:
+    from knock.core.orchestrator import _LLM_CLASSIFIABLE_INTENTS
+
+    class _LLM:
+        name = "fake"
+
+        def __init__(self, reply: str) -> None:
+            self.reply = reply
+
+        def generate(self, prompt: str) -> str:
+            return self.reply
+
+    for reply, expected in (
+        (_LLM_CLASSIFIABLE_INTENTS[0], _LLM_CLASSIFIABLE_INTENTS[0]),
+        ("not-a-real-intent\nINFO forged", "unknown"),
+    ):
+        refined = Orchestrator(llm_provider=_LLM(reply))._refine_unknown_intent("hi there")
+        assert refined.intent == expected
