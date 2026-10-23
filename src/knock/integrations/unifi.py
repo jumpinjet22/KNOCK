@@ -55,14 +55,13 @@ import asyncio
 import functools
 import io
 import logging
-import re
 import tempfile
 import time
 import uuid
 import wave
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import cache
 from importlib import resources
 from pathlib import Path
@@ -73,6 +72,7 @@ from uiprotect import EventChange, ProtectApiClient
 from uiprotect.stream import TalkbackStream
 
 from knock.config import (
+    DoorsConfig,
     HomeAssistantConfig,
     KnockConfig,
     KokoroConfig,
@@ -83,23 +83,16 @@ from knock.config import (
     WhisperConfig,
 )
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
-from knock.core.conversation_runner import ConversationHooks, run_conversation_loop
+from knock.core.doors import Door, DoorRegistry, resolve_doors
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
 from knock.core.responses import ResponseDecision
-from knock.core.scene import SceneContext, SceneObservation
+from knock.core.session_ids import build_session_id
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.snapshot_store import SnapshotStore
-from knock.core.state import SessionState
-from knock.core.systems_check import (
-    is_systems_check_trigger,
-    run_systems_check,
-    summarize_systems_check,
-)
-from knock.core.tool_calling_detection import resolve_tool_calling
+from knock.core.visit import VisitRunner
 from knock.integrations.homeassistant import (
-    ACTION_DEVICE_ID_SEP,
     KNOCK_COMING_TO_DOOR_ACTION,
     KNOCK_ON_MY_WAY_ACTION,
     KNOCK_PACKAGE_ACK_ACTION,
@@ -109,41 +102,24 @@ from knock.integrations.homeassistant import (
     HomeAssistantNotifier,
     NotificationCategory,
 )
+from knock.integrations.household import HouseholdNotifier
 from knock.integrations.package_alerts import (
     PackageAlerts,
     default_package_media_dir,
     record_rtsp_clip,
 )
-from knock.integrations.sip_caller import SipCaller, to_sip_audio
-from knock.providers.llm.ollama import OllamaProvider
+from knock.integrations.sip_caller import SipCaller
 from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.base import SynthesizedAudio, TTSProvider
 from knock.providers.tts.kokoro import KokoroTTSProvider
-from knock.providers.vision.base import VisionProvider, observe_scene, read_package_label
-from knock.providers.vision.ollama import OllamaVisionProvider
+from knock.providers.vision.base import VisionProvider
+from knock.wiring import build_orchestrator
 
 logger = logging.getLogger(__name__)
 
-_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _SMART_DETECT_EVENT_TYPES = {"smartDetectZone", "smartDetectLine", "smartDetectLoiterZone"}
 _CAPTURE_SAMPLE_RATE = 16000
-
-# A per-camera session has no expiry on its own -- without this, a greeting
-# meant to play once per *visit* would instead play exactly once ever for a
-# given camera, never again for any later, unrelated visitor. Two distinct
-# triggers for a fresh visit: an explicit `ring` (a visitor pressing the
-# button is as clear a "this is a new visit" signal as exists -- always
-# restarts), or enough idle time since the session's last turn that whatever
-# was happening before is almost certainly over.
-_SESSION_IDLE_TIMEOUT = timedelta(minutes=5)
-
-# Safety cap on how many listen/respond round-trips one visit can run,
-# regardless of how talkative the visitor is -- end-of-conversation
-# detection (see `handle_event`) is "the visitor went quiet," which is a
-# good default but not a guarantee against e.g. background noise keeping
-# Whisper returning short junk transcripts forever.
-_MAX_CONVERSATION_TURNS = 5
 
 # Played right after listening ends and before the (sometimes slow --
 # vision description, an LLM fallback call) processing that decides the
@@ -174,29 +150,8 @@ _COMING_TO_DOOR_PHRASE = "Good news, they'll be right at the door."
 _SCENE_WAIT_SECONDS = 15.0
 
 
-def _merge_observations(main: SceneObservation, extra: SceneObservation) -> SceneObservation:
-    """Fold the package camera's view into the main camera's observation:
-    the package lens is what actually sees a box on the porch, the main
-    lens is what sees the person, so each contributes what it's good at.
-    """
-    carrying = list(dict.fromkeys([*main.carrying, *extra.carrying]))
-    package_visible = (
-        True
-        if main.package_visible or extra.package_visible
-        else (main.package_visible if main.package_visible is not None else extra.package_visible)
-    )
-    return main.model_copy(
-        update={
-            "carrying": carrying,
-            "package_visible": package_visible,
-            "package_label": extra.package_label,
-        }
-    )
-
-
 def _default_session_id(device_id: str) -> str:
-    safe = _UNSAFE_SESSION_CHARS.sub("_", device_id) or "unknown"
-    return f"unifi-{safe}"[:128]
+    return build_session_id("unifi", device_id)
 
 
 def _rms(pcm: bytes) -> float:
@@ -394,6 +349,7 @@ class UnifiBridge:
         package_media_dir: Path | None = None,
         clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
         sip_caller: SipCaller | None = None,
+        doors: DoorsConfig | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -402,20 +358,6 @@ class UnifiBridge:
         self.vision_provider = vision_provider
         self.tts_provider = tts_provider
         self.stt_provider = stt_provider
-        # Optional: lets the household get an actual phone notification for
-        # situations that need a human, not just a spoken reply at the door
-        # -- today, only a signature-required delivery (see handle_event).
-        # None by default (not every UniFi deployment also runs Home
-        # Assistant); notify() itself is already a no-op without a
-        # configured notify_service, so this stays harmless either way.
-        self.ha_notifier = ha_notifier
-        self.snapshot_store = snapshot_store or SnapshotStore()
-        # None (the default) means notifications go out without a photo
-        # attachment -- see _build_snapshot_url. Needs to be an externally-
-        # reachable URL since Home Assistant's mobile app fetches it
-        # directly from the household's phone, not through KNOCK's own
-        # session system.
-        self.public_base_url = public_base_url
         self.client = client or ProtectApiClient(
             host=self.config.host,
             port=self.config.port,
@@ -438,11 +380,30 @@ class UnifiBridge:
         self.package_media_dir = package_media_dir
         self._clip_recorder = clip_recorder or record_rtsp_clip
         self.packages = PackageAlerts(self)
-        # Optional phone calls for important notifications -- see
-        # `_maybe_call_household`.
-        self.sip_caller = sip_caller
-        self._last_call_at: dict[str, float] = {}
-        self._call_tasks: set[asyncio.Task[None]] = set()
+        # Which door a camera belongs to. With no doors configured every
+        # camera is its own implicit door (see core/doors.py), which is
+        # exactly how the bridge always treated a camera.
+        self.doors: DoorRegistry = resolve_doors(
+            self.config, HomeAssistantConfig(), doors or DoorsConfig()
+        )
+        # Who gets told what (push notifications, phone calls) lives in
+        # integrations/household.py; this bridge only supplies snapshots.
+        # The lambdas look `self.client` / `self.orchestrator` up on each
+        # call so replacing either after construction keeps working.
+        self.visits = VisitRunner(self)
+        self.household = HouseholdNotifier(
+            fetch_snapshot=lambda device_id, package: self.client.get_public_api_camera_snapshot(
+                device_id, package=package
+            ),
+            extract_details=lambda *args, **kwargs: self.orchestrator.extract_notification_details(
+                *args, **kwargs
+            ),
+            ha_notifier=ha_notifier,
+            sip_caller=sip_caller,
+            tts_provider=tts_provider,
+            snapshot_store=snapshot_store,
+            public_base_url=public_base_url,
+        )
 
     @property
     def has_private_api(self) -> bool:
@@ -454,7 +415,7 @@ class UnifiBridge:
     # -- pure logic: directly testable without a real console -----------------
 
     def should_trigger(self, event: _ProtectEventLike) -> bool:
-        if self.config.trigger_camera_ids and event.device_id not in self.config.trigger_camera_ids:
+        if self.doors.for_protect_event(event.device_id) is None:
             return False
 
         event_type = str(event.type)
@@ -480,56 +441,31 @@ class UnifiBridge:
             source=f"unifi-{event.device_id}", text=text, timestamp=datetime.now(UTC)
         )
 
-    def _start_or_resume_session(
-        self, session_id: str, event: _ProtectEventLike, timestamp: datetime
-    ) -> SessionState:
-        """A fresh `SessionState` for a new visit, or the persisted one if
-        this still looks like the same ongoing visit.
+    # -- household notifications (see integrations/household.py) -------------------
 
-        See `_SESSION_IDLE_TIMEOUT`'s docstring for why a per-camera session
-        can't just persist forever, and `UnifiConfig.ring_cooldown_seconds`'
-        for why a `ring` doesn't unconditionally force a restart -- an
-        impatient double-press of the button would otherwise re-play the
-        entire greeting mid-conversation instead of being debounced.
-        """
-        existing = self.session_store.load(session_id)
-        is_ring = str(event.type) == "ring"
-        is_stale = (
-            existing is not None and (timestamp - existing.updated_at) > _SESSION_IDLE_TIMEOUT
-        )
-        is_within_cooldown = existing is not None and (
-            timestamp - existing.updated_at
-        ) <= timedelta(seconds=self.config.ring_cooldown_seconds)
+    @property
+    def ha_notifier(self) -> HomeAssistantNotifier | None:
+        return self.household.ha_notifier
 
-        if existing is None or is_stale or (is_ring and not is_within_cooldown):
-            return SessionState(session_id=session_id, updated_at=timestamp)
-        return existing
+    @ha_notifier.setter
+    def ha_notifier(self, value: HomeAssistantNotifier | None) -> None:
+        self.household.ha_notifier = value
 
-    def _approval_actions(self, device_id: str) -> list[dict[str, str]]:
-        """The "I'm on my way" / "Turn them away" button pair for a
-        notification that needs a household decision, not just an FYI.
+    @property
+    def public_base_url(self) -> str | None:
+        return self.household.public_base_url
 
-        The device id rides along embedded in the action identifier itself
-        (parsed back out by `HomeAssistantActionListener`) -- the simplest
-        way to know which camera a button tap refers to, without depending
-        on whatever extra context a given Home Assistant mobile app version
-        does or doesn't echo back on the action event.
-        """
-        on_my_way = f"{KNOCK_ON_MY_WAY_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
-        turn_away = f"{KNOCK_TURN_AWAY_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
-        return [
-            {"action": on_my_way, "title": "I'm on my way"},
-            {"action": turn_away, "title": "Turn them away"},
-        ]
+    @public_base_url.setter
+    def public_base_url(self, value: str | None) -> None:
+        self.household.public_base_url = value
 
-    def _coming_to_door_action(self, device_id: str) -> list[dict[str, str]]:
-        """A single acknowledgement button for a service_appointment
-        notification -- unlike `_approval_actions`, there's no "turn them
-        away" decision here (the technician is already expected), just a
-        way to tell a waiting visitor someone's coming.
-        """
-        coming = f"{KNOCK_COMING_TO_DOOR_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
-        return [{"action": coming, "title": "I'm coming to the door"}]
+    @property
+    def snapshot_store(self) -> SnapshotStore:
+        return self.household.snapshot_store
+
+    @property
+    def _call_tasks(self) -> set[asyncio.Task[None]]:
+        return self.household._call_tasks
 
     async def _notify_household(
         self,
@@ -540,193 +476,54 @@ class UnifiBridge:
         category: NotificationCategory = "fyi",
         image_url: str | None = None,
         tag: str | None = None,
+        door: Door | None = None,
     ) -> None:
-        """Best-effort, off the event loop (the HTTP call itself is
-        synchronous) -- a down or unconfigured Home Assistant never affects
-        the rest of the response. Also places a phone call for the
-        categories `SipConfig.call_on` lists (see `_maybe_call_household`).
-        """
-        self._maybe_call_household(device_id, message, category)
-        if self.ha_notifier is None:
-            return
-        # Only passed when set, so the default per-category tag stays the
-        # notifier's own decision.
-        extra: dict[str, Any] = {"tag": tag} if tag is not None else {}
-        try:
-            await asyncio.to_thread(
-                self.ha_notifier.notify,
-                message,
-                actions=actions,
-                category=category,
-                image=image_url,
-                **extra,
-            )
-        except Exception as exc:  # noqa: BLE001 - notification is best-effort
-            logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
-
-    def _maybe_call_household(
-        self, device_id: str, message: str, category: NotificationCategory
-    ) -> None:
-        """Ring the house phones for this notification, in the background.
-
-        Never blocks the visit (a call can ring for 30s+), never replaces
-        the push notification, and at most one call per category per
-        `call_cooldown_seconds` -- a visitor can trip an emergency
-        escalation, so they mustn't be able to make the phones ring on a
-        loop. Needs TTS to have anything to say.
-        """
-        caller = self.sip_caller
-        if caller is None or not caller.configured or category not in caller.config.call_on:
-            return
-        if self.tts_provider is None:
-            logger.info("SIP call for %s skipped: no TTS provider to speak it", category)
-            return
-        now = time.monotonic()
-        last = self._last_call_at.get(category)
-        if last is not None and now - last < caller.config.call_cooldown_seconds:
-            logger.info("SIP call for %s skipped: within the call cooldown", category)
-            return
-        self._last_call_at[category] = now
-        task = asyncio.get_running_loop().create_task(
-            self._call_household(caller, self.tts_provider, device_id, message)
+        await self.household._notify_household(
+            device_id,
+            message,
+            actions=actions,
+            category=category,
+            image_url=image_url,
+            tag=tag,
+            door=door,
         )
-        self._call_tasks.add(task)
-        task.add_done_callback(self._call_tasks.discard)
-
-    async def _call_household(
-        self, caller: SipCaller, tts: TTSProvider, device_id: str, message: str
-    ) -> None:
-        try:
-            spoken = await tts.synthesize(f"This is KNOCK, about the front door. {message}")
-            audio = await asyncio.to_thread(to_sip_audio, spoken)
-            outcome = await asyncio.to_thread(caller.announce, audio)
-        except Exception as exc:  # noqa: BLE001 - a call is best-effort
-            logger.warning("SIP call for device %s failed: %s", device_id, exc)
-            return
-        if outcome.answered_by:
-            logger.info("SIP call for %s answered by %s", device_id, outcome.answered_by)
-        else:
-            logger.info(
-                "SIP call for %s not answered (tried %s)%s",
-                device_id,
-                ", ".join(outcome.attempted) or "nobody",
-                f": {outcome.error}" if outcome.error else "",
-            )
 
     async def _build_snapshot_url(self, device_id: str, *, package: bool = False) -> str | None:
-        """Best-effort: None (no photo attached, notification still sent)
-        if `public_base_url` isn't configured, the snapshot fetch fails, or
-        the camera has no snapshot available. `package` selects the
-        doorbell's package camera (a separate, downward-angled lens) over
-        the main view -- a far more useful photo for a delivery than seeing
-        the front of the house.
-        """
-        if not self.public_base_url:
-            return None
-        try:
-            snapshot = await self.client.get_public_api_camera_snapshot(device_id, package=package)
-        except Exception as exc:  # noqa: BLE001 - photo attachment is best-effort
-            logger.warning("Snapshot fetch failed for device %s: %s", device_id, exc)
-            return None
-        if snapshot is None:
-            return None
-        return self._snapshot_url_for(snapshot)
+        return await self.household._build_snapshot_url(device_id, package=package)
 
     def _snapshot_url_for(self, snapshot: bytes) -> str | None:
-        """A notification-attachable link for already-captured image bytes
-        (see `_build_snapshot_url`), or None without `public_base_url`.
+        return self.household._snapshot_url_for(snapshot)
+
+    async def _on_escalate_notify(
+        self,
+        decision: ResponseDecision,
+        visitor_event: VisitorEvent,
+        device_id: str,
+        door: Door | None = None,
+    ) -> None:
+        await self.household._on_escalate_notify(decision, visitor_event, device_id, door)
+
+    async def _handle_turn_notifications(
+        self,
+        decision: ResponseDecision,
+        visitor_event: VisitorEvent,
+        device_id: str,
+        door: Door | None = None,
+    ) -> None:
+        await self.household._handle_turn_notifications(decision, visitor_event, device_id, door)
+
+    @property
+    def scene_wait_seconds(self) -> float:
+        # Read from the module on each visit so it can be adjusted at runtime.
+        return _SCENE_WAIT_SECONDS
+
+    async def snapshot(self, device_id: str, *, package: bool = False) -> bytes | None:
+        """A still from `device_id` (the doorbell's package lens when
+        `package`), as the visit runner asks for it.
         """
-        if not self.public_base_url:
-            return None
-        token = self.snapshot_store.put(snapshot)
-        return f"{self.public_base_url.rstrip('/')}/api/snapshot/{token}"
-
-    async def _run_systems_check_and_reply(self, device_id: str) -> None:
-        """Voice-triggered diagnostic (see core/systems_check.py) -- tests
-        whatever's actually configured on this bridge and speaks back a
-        short result. Called by handle_event before orchestrator.respond()
-        is ever reached, so this never touches PolicyEngine/classification.
-        """
-        vision_provider = self.vision_provider
-        ha_notifier = self.ha_notifier
-
-        snapshot_fetcher: Callable[[], Awaitable[bytes | None]] | None = None
-        if vision_provider is not None:
-
-            async def snapshot_fetcher() -> bytes | None:
-                return await self.client.get_public_api_camera_snapshot(device_id)
-
-        notify: Callable[[str], None] | None = None
-        if ha_notifier is not None:
-
-            def notify(message: str) -> None:
-                ha_notifier.notify(message, category="fyi")
-
-        results = await run_systems_check(
-            llm_provider=self.orchestrator.llm_provider,
-            vision_provider=vision_provider,
-            snapshot_fetcher=snapshot_fetcher,
-            notify=notify,
-        )
-        summary = summarize_systems_check(results)
-        logger.info("Systems check for %s: %s", device_id, summary)
-        if self.tts_provider is not None:
-            await self.speak_to_visitor(device_id, summary)
-
-    def _detector_scene(self, event: _ProtectEventLike) -> SceneContext:
-        """The scene context UniFi's own detector gives for free -- smart
-        detect types (person/package/vehicle) -- with no vision model
-        involved at all.
-        """
-        return SceneContext(
-            camera=event.device_id,
-            detected_labels=[str(t) for t in event.smart_detect_types],
-            captured_at=datetime.now(UTC),
-        )
-
-    async def _capture_scene(self, event: _ProtectEventLike) -> tuple[SceneContext, bytes | None]:
-        """Snapshot + structured vision observation for this event's camera,
-        plus the raw snapshot (for the opt-in send-image-to-brain path).
-
-        Best-effort like every other vision path here: no snapshot, or any
-        snapshot/vision failure, still returns the detector-only scene.
-        When UniFi's own detector already saw a package, the doorbell's
-        package camera is looked through too and merged in.
-        """
-        scene = self._detector_scene(event)
-        if self.vision_provider is None:
-            return scene, None
-        vision_provider = self.vision_provider
-        try:
-            snapshot = await self.client.get_public_api_camera_snapshot(event.device_id)
-            if snapshot is None:
-                return scene, None
-            observation = await asyncio.to_thread(observe_scene, vision_provider, snapshot)
-            if "package" in scene.detected_labels:
-                try:
-                    package_snapshot = await self.client.get_public_api_camera_snapshot(
-                        event.device_id, package=True
-                    )
-                    if package_snapshot is not None:
-                        package_observation = await asyncio.to_thread(
-                            observe_scene, vision_provider, package_snapshot
-                        )
-                        label = await asyncio.to_thread(
-                            read_package_label, vision_provider, package_snapshot
-                        )
-                        if label is not None:
-                            package_observation = package_observation.model_copy(
-                                update={"package_label": label}
-                            )
-                        observation = _merge_observations(observation, package_observation)
-                except Exception as exc:  # noqa: BLE001 - package view is a bonus
-                    logger.info(
-                        "Package-camera observation failed for %s: %s", event.device_id, exc
-                    )
-            return scene.model_copy(update={"observation": observation}), snapshot
-        except Exception as exc:  # noqa: BLE001 - vision enrichment is best-effort
-            logger.warning("Vision enrichment failed for device %s: %s", event.device_id, exc)
-            return scene, None
+        if package:
+            return await self.client.get_public_api_camera_snapshot(device_id, package=True)
+        return await self.client.get_public_api_camera_snapshot(device_id)
 
     async def handle_event(self, event: _ProtectEventLike) -> ResponseDecision | None:
         is_package = self.packages.is_package_detection(event)
@@ -734,19 +531,24 @@ class UnifiBridge:
         if not is_package and not converses:
             return None
 
+        door = self.doors.for_camera(event.device_id)
+        # Package state is per physical camera: the camera the door looks
+        # through (for an implicit door, the triggering camera -- unchanged).
+        presence_key = door.look_devices[0]
+
         # Counted before the package check so a box seen mid-conversation is
         # held until the visitor leaves, not announced while they stand there.
         if converses:
-            self.packages.conversation_started(event.device_id)
+            self.packages.conversation_started(presence_key)
         try:
             if is_package:
                 await self.packages.on_package_detected(event.device_id)
             if not converses:
                 return None
-            return await self._run_conversation(event)
+            return await self.visits.run(event, door)
         finally:
             if converses:
-                self.packages.conversation_ended(event.device_id)
+                self.packages.conversation_ended(presence_key)
 
     async def handle_knock(self, device_id: str) -> ResponseDecision | None:
         """Entry point for an external (non-Protect) knock-sensor trigger
@@ -759,192 +561,13 @@ class UnifiBridge:
         doesn't fire mid-visit.
         """
         event = _KnockEvent(device_id=device_id)
-        self.packages.conversation_started(device_id)
+        door = self.doors.for_camera(device_id)
+        presence_key = door.look_devices[0]
+        self.packages.conversation_started(presence_key)
         try:
-            return await self._run_conversation(event)
+            return await self.visits.run(event, door)
         finally:
-            self.packages.conversation_ended(device_id)
-
-    async def _on_escalate_notify(
-        self, decision: ResponseDecision, visitor_event: VisitorEvent, device_id: str
-    ) -> None:
-        """An emergency alert goes out immediately -- ahead of speaking,
-        since TTS synthesis/streaming takes real seconds an urgent
-        notification shouldn't wait on.
-        """
-        if decision.escalate:
-            await self._notify_household(
-                device_id,
-                f'Possible emergency at the door: "{visitor_event.text}"',
-                category="emergency",
-            )
-
-    async def _handle_turn_notifications(
-        self, decision: ResponseDecision, visitor_event: VisitorEvent, device_id: str
-    ) -> None:
-        """Per-intent household notification, called after speaking so it
-        reflects what was just said out loud (a signature-required delivery
-        gets the "give me a sec" acknowledgement spoken first, *then* the
-        actual notification goes out).
-        """
-        intent = decision.intent or "unknown"
-
-        if decision.needs_review:
-            # Closes the gap where a visitor's phrasing matched neither
-            # the keyword rules nor a confident LLM category: previously
-            # this silently fell through as "unknown" with zero
-            # notification (see Orchestrator._refine_unknown_intent_via_tools
-            # for how "uncertain" is decided). Mutually exclusive with
-            # the intent-specific branches below -- this is already the
-            # richer notification (summary, top-3 guesses, photo), so
-            # sending both would double-notify the household for one visit.
-            candidate_text = (
-                ", ".join(decision.review_candidates) if decision.review_candidates else "unclear"
-            )
-            fallback = f"Unsure what a visitor at the door wants (camera: {device_id})."
-            details = self.orchestrator.extract_notification_details(
-                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-            )
-            summary = decision.review_summary or details.summary
-            # Main camera, not the package camera -- the uncertain case
-            # is "who/what is this," not a known delivery.
-            image_url = await self._build_snapshot_url(device_id, package=False)
-            await self._notify_household(
-                device_id,
-                f"{summary} (best guesses: {candidate_text})",
-                category="review",
-                image_url=image_url,
-            )
-
-        elif intent in ("delivery_signature_required", "food_delivery"):
-            # Both are time-sensitive in a way a plain delivery isn't
-            # (can't just be left indefinitely), so the household gets
-            # "I'm on my way" / "Turn them away" buttons, not just an
-            # FYI -- see `_approval_actions` for why the device id rides
-            # along embedded in the action identifier itself.
-            fallback = (
-                f"A delivery at the door needs a signature (camera: {device_id})."
-                if intent == "delivery_signature_required"
-                else f"A food delivery is at the door (camera: {device_id})."
-            )
-            details = self.orchestrator.extract_notification_details(
-                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-            )
-            # The doorbell's package camera (a separate, downward-angled
-            # lens from the main view) shows the actual package instead
-            # of just the front of the house.
-            image_url = await self._build_snapshot_url(device_id, package=True)
-            # Prefer a label-led summary (carrier/recipient/tracking, read
-            # off the package camera's own photo -- see
-            # OllamaVisionProvider.read_package_label) over the generic,
-            # speech-derived one whenever the label was legible enough to
-            # at least name a carrier. No label (no vision provider, or
-            # nothing legible) falls back to today's unchanged summary.
-            label = (
-                visitor_event.scene.observation.package_label
-                if visitor_event.scene is not None and visitor_event.scene.observation is not None
-                else None
-            )
-            summary = details.summary
-            if label is not None and label.carrier:
-                parts = [label.carrier, "package"]
-                if label.recipient_name:
-                    parts.append(f"for {label.recipient_name}")
-                if label.tracking_number:
-                    parts.append(f"(tracking ...{label.tracking_number[-4:]})")
-                summary = " ".join(parts)
-            await self._notify_household(
-                device_id,
-                summary,
-                actions=self._approval_actions(device_id),
-                category="approval",
-                image_url=image_url,
-            )
-
-        elif intent in ("official_visit", "suspicious_activity", "ride_arrived"):
-            # No button-press decision to make here, just an FYI.
-            # ride_arrived is here because a waiting driver is
-            # time-sensitive the same way food is; visitation
-            # deliberately isn't -- a routine friendly visit doesn't
-            # need to interrupt anyone with a push notification.
-            fallback = {
-                "official_visit": "Someone claiming official business is at the door",
-                "suspicious_activity": "Possibly concerning activity at the door",
-                "ride_arrived": "A rideshare/taxi driver is here for pickup",
-            }[intent] + f" (camera: {device_id})."
-            details = self.orchestrator.extract_notification_details(
-                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-            )
-            image_url = await self._build_snapshot_url(device_id, package=False)
-            await self._notify_household(device_id, details.summary, image_url=image_url)
-
-        elif intent == "service_appointment":
-            # A technician who's arrived and getting no response will
-            # leave, so this carries a single acknowledgement button
-            # (see `_coming_to_door_action`) rather than a plain FYI --
-            # there's no "turn them away" decision since the
-            # appointment is already expected, just a way to tell a
-            # waiting visitor someone's coming.
-            fallback = f"A technician has arrived for a service appointment (camera: {device_id})."
-            details = self.orchestrator.extract_notification_details(
-                visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
-            )
-            image_url = await self._build_snapshot_url(device_id, package=False)
-            await self._notify_household(
-                device_id,
-                details.summary,
-                actions=self._coming_to_door_action(device_id),
-                category="approval",
-                image_url=image_url,
-            )
-
-    def _systems_check_interceptor(self, device_id: str) -> Callable[[str], Awaitable[bool]]:
-        async def intercept(transcript: str) -> bool:
-            if not is_systems_check_trigger(transcript):
-                return False
-            await self._run_systems_check_and_reply(device_id)
-            return True
-
-        return intercept
-
-    async def _run_conversation(self, event: _ProtectEventLike) -> ResponseDecision | None:
-        if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
-            # Let the physical doorbell chime finish before KNOCK starts
-            # talking over it or opens its listen window early enough to
-            # capture the tail of the chime instead of just the visitor. A
-            # silent smart-detect trigger has no chime to wait out.
-            await asyncio.sleep(self.config.ring_chime_delay_seconds)
-
-        visitor_event = self.build_event(event)
-        session_id = _default_session_id(event.device_id)
-        state = self._start_or_resume_session(session_id, event, visitor_event.timestamp)
-
-        device_id = event.device_id
-        hooks = ConversationHooks(
-            listen=(lambda: self.listen_to_visitor(device_id)) if self.stt_provider else None,
-            speak=(
-                (lambda text: self.speak_to_visitor(device_id, text)) if self.tts_provider else None
-            ),
-            play_thinking_tone=(
-                (lambda: self._play_thinking_tone(device_id)) if self.tts_provider else None
-            ),
-            capture_scene=lambda: self._capture_scene(event),
-            scene_fallback=lambda: self._detector_scene(event),
-            intercept_transcript=self._systems_check_interceptor(device_id),
-            before_speak=lambda d, ve: self._on_escalate_notify(d, ve, device_id),
-            after_speak=lambda d, ve: self._handle_turn_notifications(d, ve, device_id),
-        )
-
-        return await run_conversation_loop(
-            visitor_event,
-            state=state,
-            orchestrator=self.orchestrator,
-            session_store=self.session_store,
-            hooks=hooks,
-            audit_log=self.audit_log,
-            max_turns=_MAX_CONVERSATION_TURNS,
-            scene_wait_seconds=_SCENE_WAIT_SECONDS,
-        )
+            self.packages.conversation_ended(presence_key)
 
     async def handle_notification_action(self, action_id: str, device_id: str) -> None:
         """React to a Home Assistant mobile app notification-action tap --
@@ -1152,28 +775,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ollama_config = OllamaConfig.from_env()
     vision_config = VisionConfig.from_env()
-    # None (unset) leaves this whole layer off -- the deterministic
-    # apply_style() backstop still applies regardless. When set, this is a
-    # second OllamaProvider pointed at a different model (and optionally a
-    # different Ollama server, see OllamaConfig.safety_check_config) so a
-    # bigger/more careful model can be used for this one extra-opinion call
-    # without slowing down every-turn response phrasing.
-    safety_check_config = ollama_config.safety_check_config()
-    safety_check_provider = (
-        OllamaProvider(config=safety_check_config) if safety_check_config is not None else None
-    )
-    llm_provider = OllamaProvider(config=ollama_config)
-    vision_provider = OllamaVisionProvider(config=vision_config)
-    # Load every model now rather than on the first ring -- see warm_up().
-    for provider in (llm_provider, vision_provider, safety_check_provider):
-        if provider is not None:
-            provider.warm_up()
-    orchestrator = Orchestrator(
-        llm_provider=llm_provider,
-        use_tool_calling=resolve_tool_calling(ollama_config),
-        safety_check_provider=safety_check_provider,
-        send_image_to_brain=vision_config.send_image_to_brain,
-    )
+    orchestrator, vision_provider = build_orchestrator(ollama_config, vision_config)
     ha_config = HomeAssistantConfig.from_env()
     knock_config = KnockConfig.from_env()
     bridge = UnifiBridge(
@@ -1194,6 +796,7 @@ def main() -> None:
         package_media_dir=default_package_media_dir(),
         sip_caller=SipCaller(SipConfig.from_env()),
         public_base_url=knock_config.public_base_url,
+        doors=DoorsConfig.from_env(),
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",

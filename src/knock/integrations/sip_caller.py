@@ -157,9 +157,12 @@ class SipCaller:
         self._backend.stop()
         self._registered = False
 
-    def announce(self, audio: bytes) -> CallOutcome:
+    def announce(self, audio: bytes, targets: list[str] | None = None) -> CallOutcome:
         """Blocking: ring each target in order until one answers, play
         `audio` (see `to_sip_audio`) to it, and let the call end.
+
+        `targets` overrides `config.call_targets` for this call (a door's
+        own phones); None rings the configured list, as always.
         """
         outcome = CallOutcome()
         if not self.configured:
@@ -176,7 +179,7 @@ class SipCaller:
             return outcome
         try:
             seconds = write_announcement(self._backend.announcement_path, audio)
-            for target in self.config.call_targets:
+            for target in targets or self.config.call_targets:
                 outcome.attempted.append(target)
                 if self._ring_and_play(control, target, seconds):
                     outcome.answered_by = target

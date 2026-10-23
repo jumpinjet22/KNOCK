@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from knock.core.config_store import ConfigStore
+from knock.core.doors import DoorConfig
 
 
 def _resolve(
@@ -822,3 +824,62 @@ class SipConfig(BaseModel):
                 "KNOCK_SIP_BARESIP_MODULE_PATH", s, "baresip_module_path", ""
             ),
         )
+
+
+class DoorsConfig(BaseModel):
+    """The explicit doors (see `core/doors.py` and plans/doors-routing.md).
+    Empty -- the default -- means every camera is its own implicit door,
+    exactly as before doors existed.
+
+    Not in the Settings UI yet: set `KNOCK_DOORS` (a JSON list) or the
+    `doors` section of the config store.
+    """
+
+    doors: list[DoorConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _no_overlaps(self) -> DoorsConfig:
+        keys: set[str] = set()
+        cameras: dict[str, str] = {}
+        entities: dict[str, str] = {}
+        for door in self.doors:
+            if door.key in keys:
+                raise ValueError(f"door key {door.key!r} is used twice")
+            keys.add(door.key)
+            for claimed, triggers in (
+                (cameras, door.triggers.protect_cameras),
+                (entities, door.triggers.ha_entities),
+            ):
+                for trigger in triggers:
+                    if trigger in claimed:
+                        raise ValueError(
+                            f"{trigger!r} triggers both door {claimed[trigger]!r} "
+                            f"and door {door.key!r}"
+                        )
+                    claimed[trigger] = door.key
+        return self
+
+    @staticmethod
+    def _parse(raw: Any, source: str) -> list[Any]:
+        if isinstance(raw, str):
+            if not raw.strip():
+                return []
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{source} is not valid JSON: {exc}") from exc
+        if not isinstance(raw, list):
+            raise ValueError(f"{source} must be a list of doors")
+        return raw
+
+    @classmethod
+    def from_env(cls) -> DoorsConfig:
+        return cls(doors=cls._parse(os.environ.get("KNOCK_DOORS", ""), "KNOCK_DOORS"))
+
+    @classmethod
+    def from_sources(cls, store: ConfigStore) -> DoorsConfig:
+        s = store.get_section("doors")
+        env = os.environ.get("KNOCK_DOORS")
+        if env is not None:
+            return cls(doors=cls._parse(env, "KNOCK_DOORS"))
+        return cls(doors=cls._parse(s.get("doors") or [], "stored doors"))
