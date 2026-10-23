@@ -1,6 +1,6 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -18,5 +18,11 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+  },
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    // Only our own tests -- never anything under node_modules or dist.
+    include: ['src/**/*.test.{ts,tsx}'],
   },
 })
