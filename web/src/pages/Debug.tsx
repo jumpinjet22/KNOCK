@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import {
   ApiError,
   debugApi,
@@ -98,8 +98,27 @@ function ErrorBanner({ message }: { message: string | null }) {
   )
 }
 
+const PREVIEW_MAX_HEIGHT = 256
+
+/** Draw `file` (if it is an image) onto `canvas`, scaled down to fit. */
+async function drawPreview(file: File, canvas: HTMLCanvasElement | null): Promise<boolean> {
+  if (!canvas || !file.type.startsWith("image/")) return false
+  try {
+    const bitmap = await createImageBitmap(file)
+    const scale = Math.min(1, PREVIEW_MAX_HEIGHT / bitmap.height)
+    canvas.width = Math.round(bitmap.width * scale)
+    canvas.height = Math.round(bitmap.height * scale)
+    canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    bitmap.close()
+    return true
+  } catch {
+    return false // not a decodable image: no preview, but the upload still works
+  }
+}
+
 function VisionPanel() {
-  const [imagePreview, setImagePreview] = useState<string | null>(null)
+  const [hasPreview, setHasPreview] = useState(false)
+  const previewCanvas = useRef<HTMLCanvasElement>(null)
   const [imageBase64, setImageBase64] = useState<string | null>(null)
   const [prompt, setPrompt] = useState("")
   const [loading, setLoading] = useState(false)
@@ -110,10 +129,9 @@ function VisionPanel() {
 
   async function handleFile(file: File | undefined) {
     if (!file) return
-    // Only ever preview a blob: URL made from the chosen file -- never any other
-    // scheme -- so nothing but the user's own local image can reach <img src>.
-    const previewUrl = URL.createObjectURL(file)
-    setImagePreview(file.type.startsWith("image/") && previewUrl.startsWith("blob:") ? previewUrl : null)
+    // The preview is drawn onto a canvas rather than put in an <img src>, so
+    // nothing derived from the chosen file is ever used as a URL or as markup.
+    setHasPreview(await drawPreview(file, previewCanvas.current))
     setImageBase64(await fileToBase64(file))
     setResult(null)
     setObserveResult(null)
@@ -159,9 +177,13 @@ function VisionPanel() {
           onChange={(event) => void handleFile(event.target.files?.[0])}
           className={inputClass}
         />
-        {imagePreview && (
-          <img src={imagePreview} alt="Selected snapshot" className="max-h-64 rounded-md border border-steel/20" />
-        )}
+        <canvas
+          ref={previewCanvas}
+          role="img"
+          aria-label="Selected snapshot"
+          hidden={!hasPreview}
+          className="max-h-64 rounded-md border border-steel/20"
+        />
         <input
           type="text"
           value={prompt}
