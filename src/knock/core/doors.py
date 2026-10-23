@@ -263,6 +263,11 @@ class DoorRegistry:
     def explicit_doors(self) -> list[Door]:
         return list(self._explicit)
 
+    @property
+    def has_ha_triggers(self) -> bool:
+        """Whether any explicit door is triggered by a Home Assistant entity."""
+        return bool(self._ha_claims)
+
 
 def resolve_doors(
     unifi_config: UnifiConfig,

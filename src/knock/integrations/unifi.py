@@ -350,6 +350,8 @@ class UnifiBridge:
         clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
         sip_caller: SipCaller | None = None,
         doors: DoorsConfig | None = None,
+        ha_config: HomeAssistantConfig | None = None,
+        dry_run: bool = False,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -373,6 +375,8 @@ class UnifiBridge:
             end_silence_seconds=self.config.end_silence_seconds,
             silence_rms_threshold=self.config.silence_rms_threshold,
         )
+        # See KnockConfig.dry_run: resolve and log, never act.
+        self.dry_run = dry_run
         self.package_log = package_log or NullPackageLog()
         # Where photos/clips of a package taken without a "Got it" are kept.
         # None (the default) keeps nothing on disk -- the notification still
@@ -384,7 +388,7 @@ class UnifiBridge:
         # camera is its own implicit door (see core/doors.py), which is
         # exactly how the bridge always treated a camera.
         self.doors: DoorRegistry = resolve_doors(
-            self.config, HomeAssistantConfig(), doors or DoorsConfig()
+            self.config, ha_config or HomeAssistantConfig(), doors or DoorsConfig()
         )
         # Who gets told what (push notifications, phone calls) lives in
         # integrations/household.py; this bridge only supplies snapshots.
@@ -532,6 +536,9 @@ class UnifiBridge:
             return None
 
         door = self.doors.for_camera(event.device_id)
+        if self.dry_run:
+            self._log_dry_run(door, f"{event.type}:{event.device_id}")
+            return None
         # Package state is per physical camera: the camera the door looks
         # through (for an implicit door, the triggering camera -- unchanged).
         presence_key = door.look_devices[0]
@@ -560,14 +567,37 @@ class UnifiBridge:
         same way a real conversation does, so a package notification
         doesn't fire mid-visit.
         """
-        event = _KnockEvent(device_id=device_id)
-        door = self.doors.for_camera(device_id)
+        return await self.handle_door_knock(self.doors.for_camera(device_id), device_id)
+
+    async def handle_door_knock(
+        self, door: Door, device_id: str | None = None, trigger: str | None = None
+    ) -> ResponseDecision | None:
+        """A knock at a specific door -- the entry point for a Home Assistant
+        entity an explicit door lists as a trigger. Runs the same visit a
+        ring does, on the door's own devices and session, so a knock and a
+        person-detect on one door continue one conversation.
+        """
+        if self.dry_run:
+            self._log_dry_run(door, trigger or f"knock:{device_id or door.look_devices[0]}")
+            return None
+        event = _KnockEvent(device_id=device_id or door.look_devices[0])
         presence_key = door.look_devices[0]
         self.packages.conversation_started(presence_key)
         try:
             return await self.visits.run(event, door)
         finally:
             self.packages.conversation_ended(presence_key)
+
+    def _log_dry_run(self, door: Door, trigger: str) -> None:
+        logger.info(
+            "DRY RUN door=%s trigger=%s listen=%s speak=%s look=%s session=%s",
+            door.key,
+            trigger,
+            door.listen_device,
+            door.speak_device,
+            list(door.look_devices),
+            door.session_id,
+        )
 
     async def handle_notification_action(self, action_id: str, device_id: str) -> None:
         """React to a Home Assistant mobile app notification-action tap --
@@ -580,6 +610,9 @@ class UnifiBridge:
         (see `main()`), which has already parsed the device id back out of
         the action identifier itself.
         """
+        if self.dry_run:
+            logger.info("DRY RUN notification action %s for %s ignored", action_id, device_id)
+            return
         if action_id == KNOCK_ON_MY_WAY_ACTION:
             await self.speak_to_visitor(device_id, _ON_MY_WAY_PHRASE)
         elif action_id == KNOCK_TURN_AWAY_ACTION:
@@ -731,7 +764,8 @@ class UnifiBridge:
     def _on_event(self, event: _ProtectEventLike, change: EventChange) -> None:
         # uiprotect swallows (and so silently loses) anything this raises.
         try:
-            self.packages.track_presence(event, change)
+            if not self.dry_run:  # presence tracking can fetch snapshots and send alerts
+                self.packages.track_presence(event, change)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Presence tracking failed for %s: %s", event.device_id, exc)
         if change != EventChange.STARTED:
@@ -763,9 +797,12 @@ async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistant
         # Only worth its own connection when at least one sensor->camera
         # mapping is actually configured -- see
         # HomeAssistantConfig.knock_sensors's docstring.
-        if ha_config.knock_sensors:
+        if ha_config.knock_sensors or bridge.doors.has_ha_triggers:
             knock_listener = HomeAssistantKnockListener(
-                config=ha_config, on_knock=bridge.handle_knock
+                config=ha_config,
+                on_knock=bridge.handle_knock,
+                doors=bridge.doors,
+                on_door_knock=bridge.handle_door_knock,
             )
             tasks.append(knock_listener.run())
     await asyncio.gather(*tasks)
@@ -797,7 +834,14 @@ def main() -> None:
         sip_caller=SipCaller(SipConfig.from_env()),
         public_base_url=knock_config.public_base_url,
         doors=DoorsConfig.from_env(),
+        ha_config=ha_config,
+        dry_run=knock_config.dry_run,
     )
+    if bridge.dry_run:
+        logger.warning(
+            "DRY RUN MODE: doors are resolved and logged only. No audio, notifications, "
+            "calls, package alerts or history entries."
+        )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",
         bridge.config.host,

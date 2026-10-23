@@ -91,6 +91,11 @@ class KnockConfig(BaseModel):
     # the household's phone, not just from localhost. None (the default)
     # means notifications go out without a photo attachment.
     public_base_url: str | None = None
+    # Dry run: the UniFi bridge works out which door a trigger belongs to and
+    # logs what it WOULD do, then does nothing -- no audio, notifications,
+    # calls, package alerts or history entries. For trying a new door setup
+    # next to a production KNOCK that is still answering the real door.
+    dry_run: bool = False
 
     @classmethod
     def from_env(cls) -> KnockConfig:
@@ -98,6 +103,7 @@ class KnockConfig(BaseModel):
             app_name=os.environ.get("KNOCK_APP_NAME", "KNOCK"),
             short_response_limit=int(os.environ.get("KNOCK_SHORT_RESPONSE_LIMIT", "140")),
             public_base_url=os.environ.get("KNOCK_PUBLIC_BASE_URL"),
+            dry_run=_bool(os.environ.get("KNOCK_DRY_RUN", "false")),
         )
 
     @classmethod
@@ -109,6 +115,7 @@ class KnockConfig(BaseModel):
                 "KNOCK_SHORT_RESPONSE_LIMIT", s, "short_response_limit", 140, int
             ),
             public_base_url=_resolve("KNOCK_PUBLIC_BASE_URL", s, "public_base_url", None),
+            dry_run=_resolve("KNOCK_DRY_RUN", s, "dry_run", False, _bool),
         )
 
 

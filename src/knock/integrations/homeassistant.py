@@ -37,6 +37,7 @@ import websockets
 
 from knock.config import HomeAssistantConfig, OllamaConfig
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
+from knock.core.doors import Door, DoorRegistry
 from knock.core.events import VisitorEvent
 from knock.core.one_shot import answer_once
 from knock.core.orchestrator import Orchestrator
@@ -453,13 +454,22 @@ class HomeAssistantKnockListener:
         # Awaitable[Any], not [None]: the real callback (UnifiBridge.handle_knock)
         # returns a ResponseDecision, which this listener never needs to inspect.
         on_knock: Callable[[str], Awaitable[Any]] | None = None,
+        # Optional: explicit doors that list Home Assistant entities as
+        # triggers (see core/doors.py). An entity such a door claims starts a
+        # visit at that door through `on_door_knock`; every other sensor
+        # keeps going through `knock_sensors` and `on_knock` as before.
+        doors: DoorRegistry | None = None,
+        on_door_knock: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
         self.config = config or HomeAssistantConfig()
         self._on_knock = on_knock
+        self._doors = doors
+        self._on_door_knock = on_door_knock
         self._request_ids = itertools.count(1)
 
     def should_trigger(self, event_data: dict[str, Any]) -> bool:
-        if event_data.get("entity_id") not in self.config.knock_sensors:
+        entity_id = event_data.get("entity_id")
+        if entity_id not in self.config.knock_sensors and self._explicit_door(entity_id) is None:
             return False
 
         new_state = (event_data.get("new_state") or {}).get("state")
@@ -489,9 +499,22 @@ class HomeAssistantKnockListener:
         if not self.should_trigger(data):
             return
 
+        door = self._explicit_door(data["entity_id"])
+        if door is not None:
+            if self._on_door_knock is not None:
+                await self._on_door_knock(door, trigger=data["entity_id"])
+            return
+
         camera_id = self.config.knock_sensors.get(data["entity_id"])
         if self._on_knock is not None and camera_id:
             await self._on_knock(camera_id)
+
+    def _explicit_door(self, entity_id: Any) -> Door | None:
+        """The explicit door that lists this entity as a trigger, if any."""
+        if self._doors is None or not isinstance(entity_id, str):
+            return None
+        door = self._doors.for_ha_entity(entity_id)
+        return door if door is not None and not door.implicit else None
 
     async def run(self) -> None:
         async with websockets.connect(websocket_url(self.config.base_url)) as ws:
