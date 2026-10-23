@@ -74,7 +74,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     get_bridge_supervisor().shutdown_all()
 
 
-app = FastAPI(title="KNOCK API", version="0.2.0", lifespan=_lifespan)
+app = FastAPI(title="KNOCK API", version="0.3.0", lifespan=_lifespan)
 app.add_middleware(
     CSRFMiddleware,
     secret=_get_or_create_secret("KNOCK_CSRF_SECRET", "csrf_secret"),
