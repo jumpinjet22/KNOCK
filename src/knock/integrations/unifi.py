@@ -91,7 +91,6 @@ from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.snapshot_store import SnapshotStore
-from knock.core.tool_calling_detection import resolve_tool_calling
 from knock.core.visit import VisitRunner
 from knock.integrations.homeassistant import (
     KNOCK_COMING_TO_DOOR_ACTION,
@@ -110,13 +109,12 @@ from knock.integrations.package_alerts import (
     record_rtsp_clip,
 )
 from knock.integrations.sip_caller import SipCaller
-from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.stt.base import STTProvider
 from knock.providers.stt.whisper import WhisperSTTProvider
 from knock.providers.tts.base import SynthesizedAudio, TTSProvider
 from knock.providers.tts.kokoro import KokoroTTSProvider
 from knock.providers.vision.base import VisionProvider
-from knock.providers.vision.ollama import OllamaVisionProvider
+from knock.wiring import build_orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -779,28 +777,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ollama_config = OllamaConfig.from_env()
     vision_config = VisionConfig.from_env()
-    # None (unset) leaves this whole layer off -- the deterministic
-    # apply_style() backstop still applies regardless. When set, this is a
-    # second OllamaProvider pointed at a different model (and optionally a
-    # different Ollama server, see OllamaConfig.safety_check_config) so a
-    # bigger/more careful model can be used for this one extra-opinion call
-    # without slowing down every-turn response phrasing.
-    safety_check_config = ollama_config.safety_check_config()
-    safety_check_provider = (
-        OllamaProvider(config=safety_check_config) if safety_check_config is not None else None
-    )
-    llm_provider = OllamaProvider(config=ollama_config)
-    vision_provider = OllamaVisionProvider(config=vision_config)
-    # Load every model now rather than on the first ring -- see warm_up().
-    for provider in (llm_provider, vision_provider, safety_check_provider):
-        if provider is not None:
-            provider.warm_up()
-    orchestrator = Orchestrator(
-        llm_provider=llm_provider,
-        use_tool_calling=resolve_tool_calling(ollama_config),
-        safety_check_provider=safety_check_provider,
-        send_image_to_brain=vision_config.send_image_to_brain,
-    )
+    orchestrator, vision_provider = build_orchestrator(ollama_config, vision_config)
     ha_config = HomeAssistantConfig.from_env()
     knock_config = KnockConfig.from_env()
     bridge = UnifiBridge(

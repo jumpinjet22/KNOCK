@@ -43,8 +43,7 @@ from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.state import SessionState
-from knock.core.tool_calling_detection import resolve_tool_calling
-from knock.providers.llm.ollama import OllamaProvider
+from knock.wiring import build_orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -523,26 +522,7 @@ class HomeAssistantKnockListener:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ollama_config = OllamaConfig.from_env()
-    # None (unset) leaves this whole layer off -- the deterministic
-    # apply_style() backstop still applies regardless. When set, this is a
-    # second OllamaProvider pointed at a different model (and optionally a
-    # different Ollama server, see OllamaConfig.safety_check_config) so a
-    # bigger/more careful model can be used for this one extra-opinion call
-    # without slowing down every-turn response phrasing.
-    safety_check_config = ollama_config.safety_check_config()
-    safety_check_provider = (
-        OllamaProvider(config=safety_check_config) if safety_check_config is not None else None
-    )
-    llm_provider = OllamaProvider(config=ollama_config)
-    # Load models now rather than on the first trigger -- see warm_up().
-    llm_provider.warm_up()
-    if safety_check_provider is not None:
-        safety_check_provider.warm_up()
-    orchestrator = Orchestrator(
-        llm_provider=llm_provider,
-        use_tool_calling=resolve_tool_calling(ollama_config),
-        safety_check_provider=safety_check_provider,
-    )
+    orchestrator, _ = build_orchestrator(ollama_config)
     bridge = HomeAssistantBridge(
         config=HomeAssistantConfig.from_env(),
         orchestrator=orchestrator,
