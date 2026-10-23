@@ -19,6 +19,7 @@ from typing import Any
 
 from knock.core.doors import Door
 from knock.core.events import VisitorEvent
+from knock.core.outbound_text import for_call, for_push, one_line
 from knock.core.responses import ResponseDecision
 from knock.core.snapshot_store import SnapshotStore
 from knock.integrations.homeassistant import (
@@ -33,6 +34,8 @@ from knock.integrations.sip_caller import SipCaller, to_sip_audio
 from knock.providers.tts.base import TTSProvider
 
 logger = logging.getLogger(__name__)
+
+_EMERGENCY_QUOTE_CHARS = 120
 
 
 def location_text(device_id: str, door: Door | None) -> str:
@@ -118,13 +121,26 @@ class HouseholdNotifier:
         image_url: str | None = None,
         tag: str | None = None,
         door: Door | None = None,
+        call_message: str | None = None,
     ) -> None:
         """Best-effort, off the event loop (the HTTP call itself is
         synchronous) -- a down or unconfigured Home Assistant never affects
         the rest of the response. Also places a phone call for the
         categories `SipConfig.call_on` lists (see `_maybe_call_household`).
+
+        Text that may carry someone else's words is made safe per channel
+        (see core/outbound_text.py): the push is one bounded line, flagged if
+        it holds a link or number; the call never reads one aloud.
+        `call_message` is what the call says when it should differ from the
+        push (an emergency call doesn't repeat what the visitor said).
         """
-        self._maybe_call_household(device_id, message, category, door)
+        self._maybe_call_household(
+            device_id,
+            for_call(call_message if call_message is not None else message),
+            category,
+            door,
+        )
+        message = for_push(message)
         if self.ha_notifier is None:
             return
         # Only passed when set, so the default per-category tag stays the
@@ -253,11 +269,16 @@ class HouseholdNotifier:
         notification shouldn't wait on.
         """
         if decision.escalate:
+            # The visitor's words are only quoted in the push (bounded). The
+            # phone call says there is a possible emergency, nothing more:
+            # whoever is shouting at the door doesn't get to script it.
+            quote = one_line(visitor_event.text, _EMERGENCY_QUOTE_CHARS).replace('"', "'")
             await self._notify_household(
                 device_id,
-                f'Possible emergency at the door: "{visitor_event.text}"',
+                f'Possible emergency at the door: "{quote}"',
                 category="emergency",
                 door=door,
+                call_message="Possible emergency at the door.",
             )
 
     async def _handle_turn_notifications(

@@ -204,6 +204,15 @@ _INTENT_CLASSIFICATION_HINTS = {
 }
 
 
+def _visitor_words(text: str) -> str:
+    """The visitor's words as they go inside a prompt: one line, with double
+    quotes swapped for single so nothing they say can close the quote and add
+    instructions -- the same treatment camera text gets (see core/scene.py).
+    Ordinary speech comes out unchanged.
+    """
+    return " ".join(text.split()).replace('"', "'")
+
+
 def _classification_prompt(visitor_text: str, scene: SceneContext | None = None) -> str:
     labels = (
         ", ".join(
@@ -212,7 +221,7 @@ def _classification_prompt(visitor_text: str, scene: SceneContext | None = None)
         + ", unknown"
     )
     return (
-        f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f'A visitor at the door said or triggered: "{_visitor_words(visitor_text)}"\n'
         f"{_scene_block(scene)}"
         "The system's keyword rules found no match. First decide: is this "
         "actually addressed to the door/household at all, or does it read "
@@ -246,7 +255,7 @@ def _response_prompt(intent: str, visitor_text: str, scene: SceneContext | None 
         else ""
     )
     return (
-        f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f'A visitor at the door said or triggered: "{_visitor_words(visitor_text)}"\n'
         f"{scene_block}"
         f"The system's keyword classifier guesses this is: {category}.\n"
         f"{scene_guidance}"
@@ -311,7 +320,7 @@ def _safety_check_prompt(response_text: str) -> str:
 
 def _notification_summary_prompt(visitor_text: str, scene: SceneContext | None = None) -> str:
     return (
-        f'Context from a doorbell visit: "{visitor_text}"\n'
+        f'Context from a doorbell visit: "{_visitor_words(visitor_text)}"\n'
         f"{_scene_block(scene)}"
         "Write one short phrase (under 12 words) summarizing who's at the "
         'door, suitable as a phone push notification -- e.g. "A FedEx '
@@ -424,7 +433,7 @@ def _tool_classification_messages(
         f"{name} ({_INTENT_CLASSIFICATION_HINTS[name]})" for name in _LLM_CLASSIFIABLE_INTENTS
     )
     user_content = (
-        f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f'A visitor at the door said or triggered: "{_visitor_words(visitor_text)}"\n'
         f"{_scene_block(scene)}"
         "The system's keyword rules found no match. First judge directedness: "
         "does this actually address the door/household, or does it read like a "
@@ -450,7 +459,7 @@ def _extract_details_messages(
 ) -> list[dict[str, str]]:
     category = _INTENT_DESCRIPTIONS.get(intent, intent)
     user_content = (
-        f'A visitor at the door said or triggered: "{visitor_text}"\n'
+        f'A visitor at the door said or triggered: "{_visitor_words(visitor_text)}"\n'
         f"{_scene_block(scene)}"
         f"This has been classified as: {category}.\n"
         "Call extract_notification_details with a short natural summary (under 12 "
