@@ -240,6 +240,14 @@ class DoorRegistry:
             return None
         return self._implicit_for(device_id)
 
+    def for_camera(self, device_id: str) -> Door:
+        """The door for a camera that is already known to be triggering,
+        with no allow-list check -- an external knock sensor has always
+        bypassed `trigger_camera_ids`, so a knock mapped to a camera that
+        isn't on the list still gets answered.
+        """
+        return self._protect_claims.get(device_id) or self._implicit_for(device_id)
+
     def for_ha_entity(self, entity_id: str) -> Door | None:
         """The door a Home Assistant entity (a knock sensor) belongs to.
 

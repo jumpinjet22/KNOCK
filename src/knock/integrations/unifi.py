@@ -73,6 +73,7 @@ from uiprotect import EventChange, ProtectApiClient
 from uiprotect.stream import TalkbackStream
 
 from knock.config import (
+    DoorsConfig,
     HomeAssistantConfig,
     KnockConfig,
     KokoroConfig,
@@ -84,6 +85,7 @@ from knock.config import (
 )
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.conversation_runner import ConversationHooks, run_conversation_loop
+from knock.core.doors import Door, DoorRegistry, resolve_doors
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
@@ -192,6 +194,16 @@ def _merge_observations(main: SceneObservation, extra: SceneObservation) -> Scen
             "package_label": extra.package_label,
         }
     )
+
+
+def _where(device_id: str, door: Door | None) -> str:
+    """How a notification says where a visit is. Implicit doors (and a bare
+    camera ID, as direct callers pass) keep today's exact `(camera: <id>)`;
+    only an explicit door reads as `(door: <name>)`.
+    """
+    if door is None or door.implicit:
+        return f"(camera: {device_id})"
+    return f"(door: {door.name})"
 
 
 def _default_session_id(device_id: str) -> str:
@@ -394,6 +406,7 @@ class UnifiBridge:
         package_media_dir: Path | None = None,
         clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
         sip_caller: SipCaller | None = None,
+        doors: DoorsConfig | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -438,6 +451,12 @@ class UnifiBridge:
         self.package_media_dir = package_media_dir
         self._clip_recorder = clip_recorder or record_rtsp_clip
         self.packages = PackageAlerts(self)
+        # Which door a camera belongs to. With no doors configured every
+        # camera is its own implicit door (see core/doors.py), which is
+        # exactly how the bridge always treated a camera.
+        self.doors: DoorRegistry = resolve_doors(
+            self.config, HomeAssistantConfig(), doors or DoorsConfig()
+        )
         # Optional phone calls for important notifications -- see
         # `_maybe_call_household`.
         self.sip_caller = sip_caller
@@ -454,7 +473,7 @@ class UnifiBridge:
     # -- pure logic: directly testable without a real console -----------------
 
     def should_trigger(self, event: _ProtectEventLike) -> bool:
-        if self.config.trigger_camera_ids and event.device_id not in self.config.trigger_camera_ids:
+        if self.doors.for_protect_event(event.device_id) is None:
             return False
 
         event_type = str(event.type)
@@ -540,13 +559,14 @@ class UnifiBridge:
         category: NotificationCategory = "fyi",
         image_url: str | None = None,
         tag: str | None = None,
+        door: Door | None = None,
     ) -> None:
         """Best-effort, off the event loop (the HTTP call itself is
         synchronous) -- a down or unconfigured Home Assistant never affects
         the rest of the response. Also places a phone call for the
         categories `SipConfig.call_on` lists (see `_maybe_call_household`).
         """
-        self._maybe_call_household(device_id, message, category)
+        self._maybe_call_household(device_id, message, category, door)
         if self.ha_notifier is None:
             return
         # Only passed when set, so the default per-category tag stays the
@@ -565,7 +585,11 @@ class UnifiBridge:
             logger.warning("Home Assistant notify failed for device %s: %s", device_id, exc)
 
     def _maybe_call_household(
-        self, device_id: str, message: str, category: NotificationCategory
+        self,
+        device_id: str,
+        message: str,
+        category: NotificationCategory,
+        door: Door | None = None,
     ) -> None:
         """Ring the house phones for this notification, in the background.
 
@@ -588,18 +612,36 @@ class UnifiBridge:
             return
         self._last_call_at[category] = now
         task = asyncio.get_running_loop().create_task(
-            self._call_household(caller, self.tts_provider, device_id, message)
+            self._call_household(
+                caller,
+                self.tts_provider,
+                device_id,
+                message,
+                door.call_targets if door is not None else (),
+            )
         )
         self._call_tasks.add(task)
         task.add_done_callback(self._call_tasks.discard)
 
     async def _call_household(
-        self, caller: SipCaller, tts: TTSProvider, device_id: str, message: str
+        self,
+        caller: SipCaller,
+        tts: TTSProvider,
+        device_id: str,
+        message: str,
+        targets: Sequence[str] = (),
     ) -> None:
         try:
             spoken = await tts.synthesize(f"This is KNOCK, about the front door. {message}")
             audio = await asyncio.to_thread(to_sip_audio, spoken)
-            outcome = await asyncio.to_thread(caller.announce, audio)
+            # A door with its own call targets rings those instead of the
+            # global SIP list; everything else announces exactly as before.
+            if targets:
+                outcome = await asyncio.to_thread(
+                    functools.partial(caller.announce, audio, targets=list(targets))
+                )
+            else:
+                outcome = await asyncio.to_thread(caller.announce, audio)
         except Exception as exc:  # noqa: BLE001 - a call is best-effort
             logger.warning("SIP call for device %s failed: %s", device_id, exc)
             return
@@ -641,7 +683,7 @@ class UnifiBridge:
         token = self.snapshot_store.put(snapshot)
         return f"{self.public_base_url.rstrip('/')}/api/snapshot/{token}"
 
-    async def _run_systems_check_and_reply(self, device_id: str) -> None:
+    async def _run_systems_check_and_reply(self, device_id: str, door: Door | None = None) -> None:
         """Voice-triggered diagnostic (see core/systems_check.py) -- tests
         whatever's actually configured on this bridge and speaks back a
         short result. Called by handle_event before orchestrator.respond()
@@ -649,12 +691,14 @@ class UnifiBridge:
         """
         vision_provider = self.vision_provider
         ha_notifier = self.ha_notifier
+        look_device = door.look_devices[0] if door is not None else device_id
+        speak_device = door.speak_device if door is not None else device_id
 
         snapshot_fetcher: Callable[[], Awaitable[bytes | None]] | None = None
         if vision_provider is not None:
 
             async def snapshot_fetcher() -> bytes | None:
-                return await self.client.get_public_api_camera_snapshot(device_id)
+                return await self.client.get_public_api_camera_snapshot(look_device)
 
         notify: Callable[[str], None] | None = None
         if ha_notifier is not None:
@@ -671,7 +715,7 @@ class UnifiBridge:
         summary = summarize_systems_check(results)
         logger.info("Systems check for %s: %s", device_id, summary)
         if self.tts_provider is not None:
-            await self.speak_to_visitor(device_id, summary)
+            await self.speak_to_visitor(speak_device, summary)
 
     def _detector_scene(self, event: _ProtectEventLike) -> SceneContext:
         """The scene context UniFi's own detector gives for free -- smart
@@ -684,7 +728,9 @@ class UnifiBridge:
             captured_at=datetime.now(UTC),
         )
 
-    async def _capture_scene(self, event: _ProtectEventLike) -> tuple[SceneContext, bytes | None]:
+    async def _capture_scene(
+        self, event: _ProtectEventLike, door: Door | None = None
+    ) -> tuple[SceneContext, bytes | None]:
         """Snapshot + structured vision observation for this event's camera,
         plus the raw snapshot (for the opt-in send-image-to-brain path).
 
@@ -697,15 +743,18 @@ class UnifiBridge:
         if self.vision_provider is None:
             return scene, None
         vision_provider = self.vision_provider
+        # The door's main snapshot camera (the triggering camera, for an
+        # implicit door).
+        look_device = door.look_devices[0] if door is not None else event.device_id
         try:
-            snapshot = await self.client.get_public_api_camera_snapshot(event.device_id)
+            snapshot = await self.client.get_public_api_camera_snapshot(look_device)
             if snapshot is None:
                 return scene, None
             observation = await asyncio.to_thread(observe_scene, vision_provider, snapshot)
             if "package" in scene.detected_labels:
                 try:
                     package_snapshot = await self.client.get_public_api_camera_snapshot(
-                        event.device_id, package=True
+                        look_device, package=True
                     )
                     if package_snapshot is not None:
                         package_observation = await asyncio.to_thread(
@@ -734,19 +783,24 @@ class UnifiBridge:
         if not is_package and not converses:
             return None
 
+        door = self.doors.for_camera(event.device_id)
+        # Package state is per physical camera: the camera the door looks
+        # through (for an implicit door, the triggering camera -- unchanged).
+        presence_key = door.look_devices[0]
+
         # Counted before the package check so a box seen mid-conversation is
         # held until the visitor leaves, not announced while they stand there.
         if converses:
-            self.packages.conversation_started(event.device_id)
+            self.packages.conversation_started(presence_key)
         try:
             if is_package:
                 await self.packages.on_package_detected(event.device_id)
             if not converses:
                 return None
-            return await self._run_conversation(event)
+            return await self._run_conversation(event, door)
         finally:
             if converses:
-                self.packages.conversation_ended(event.device_id)
+                self.packages.conversation_ended(presence_key)
 
     async def handle_knock(self, device_id: str) -> ResponseDecision | None:
         """Entry point for an external (non-Protect) knock-sensor trigger
@@ -759,14 +813,20 @@ class UnifiBridge:
         doesn't fire mid-visit.
         """
         event = _KnockEvent(device_id=device_id)
-        self.packages.conversation_started(device_id)
+        door = self.doors.for_camera(device_id)
+        presence_key = door.look_devices[0]
+        self.packages.conversation_started(presence_key)
         try:
-            return await self._run_conversation(event)
+            return await self._run_conversation(event, door)
         finally:
-            self.packages.conversation_ended(device_id)
+            self.packages.conversation_ended(presence_key)
 
     async def _on_escalate_notify(
-        self, decision: ResponseDecision, visitor_event: VisitorEvent, device_id: str
+        self,
+        decision: ResponseDecision,
+        visitor_event: VisitorEvent,
+        device_id: str,
+        door: Door | None = None,
     ) -> None:
         """An emergency alert goes out immediately -- ahead of speaking,
         since TTS synthesis/streaming takes real seconds an urgent
@@ -777,10 +837,15 @@ class UnifiBridge:
                 device_id,
                 f'Possible emergency at the door: "{visitor_event.text}"',
                 category="emergency",
+                door=door,
             )
 
     async def _handle_turn_notifications(
-        self, decision: ResponseDecision, visitor_event: VisitorEvent, device_id: str
+        self,
+        decision: ResponseDecision,
+        visitor_event: VisitorEvent,
+        device_id: str,
+        door: Door | None = None,
     ) -> None:
         """Per-intent household notification, called after speaking so it
         reflects what was just said out loud (a signature-required delivery
@@ -788,6 +853,9 @@ class UnifiBridge:
         actual notification goes out).
         """
         intent = decision.intent or "unknown"
+        where = _where(device_id, door)
+        # Notification buttons talk back through the door's speaker.
+        speak_device = door.speak_device if door is not None else device_id
 
         if decision.needs_review:
             # Closes the gap where a visitor's phrasing matched neither
@@ -801,7 +869,7 @@ class UnifiBridge:
             candidate_text = (
                 ", ".join(decision.review_candidates) if decision.review_candidates else "unclear"
             )
-            fallback = f"Unsure what a visitor at the door wants (camera: {device_id})."
+            fallback = f"Unsure what a visitor at the door wants {where}."
             details = self.orchestrator.extract_notification_details(
                 visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
             )
@@ -814,6 +882,7 @@ class UnifiBridge:
                 f"{summary} (best guesses: {candidate_text})",
                 category="review",
                 image_url=image_url,
+                door=door,
             )
 
         elif intent in ("delivery_signature_required", "food_delivery"):
@@ -823,9 +892,9 @@ class UnifiBridge:
             # FYI -- see `_approval_actions` for why the device id rides
             # along embedded in the action identifier itself.
             fallback = (
-                f"A delivery at the door needs a signature (camera: {device_id})."
+                f"A delivery at the door needs a signature {where}."
                 if intent == "delivery_signature_required"
-                else f"A food delivery is at the door (camera: {device_id})."
+                else f"A food delivery is at the door {where}."
             )
             details = self.orchestrator.extract_notification_details(
                 visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
@@ -856,9 +925,10 @@ class UnifiBridge:
             await self._notify_household(
                 device_id,
                 summary,
-                actions=self._approval_actions(device_id),
+                actions=self._approval_actions(speak_device),
                 category="approval",
                 image_url=image_url,
+                door=door,
             )
 
         elif intent in ("official_visit", "suspicious_activity", "ride_arrived"):
@@ -871,12 +941,12 @@ class UnifiBridge:
                 "official_visit": "Someone claiming official business is at the door",
                 "suspicious_activity": "Possibly concerning activity at the door",
                 "ride_arrived": "A rideshare/taxi driver is here for pickup",
-            }[intent] + f" (camera: {device_id})."
+            }[intent] + f" {where}."
             details = self.orchestrator.extract_notification_details(
                 visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
             )
             image_url = await self._build_snapshot_url(device_id, package=False)
-            await self._notify_household(device_id, details.summary, image_url=image_url)
+            await self._notify_household(device_id, details.summary, image_url=image_url, door=door)
 
         elif intent == "service_appointment":
             # A technician who's arrived and getting no response will
@@ -885,7 +955,7 @@ class UnifiBridge:
             # there's no "turn them away" decision since the
             # appointment is already expected, just a way to tell a
             # waiting visitor someone's coming.
-            fallback = f"A technician has arrived for a service appointment (camera: {device_id})."
+            fallback = f"A technician has arrived for a service appointment {where}."
             details = self.orchestrator.extract_notification_details(
                 visitor_event.text, intent, fallback=fallback, scene=visitor_event.scene
             )
@@ -893,21 +963,28 @@ class UnifiBridge:
             await self._notify_household(
                 device_id,
                 details.summary,
-                actions=self._coming_to_door_action(device_id),
+                actions=self._coming_to_door_action(speak_device),
                 category="approval",
                 image_url=image_url,
+                door=door,
             )
 
-    def _systems_check_interceptor(self, device_id: str) -> Callable[[str], Awaitable[bool]]:
+    def _systems_check_interceptor(
+        self, device_id: str, door: Door | None = None
+    ) -> Callable[[str], Awaitable[bool]]:
         async def intercept(transcript: str) -> bool:
             if not is_systems_check_trigger(transcript):
                 return False
-            await self._run_systems_check_and_reply(device_id)
+            await self._run_systems_check_and_reply(device_id, door)
             return True
 
         return intercept
 
-    async def _run_conversation(self, event: _ProtectEventLike) -> ResponseDecision | None:
+    async def _run_conversation(
+        self, event: _ProtectEventLike, door: Door | None = None
+    ) -> ResponseDecision | None:
+        if door is None:
+            door = self.doors.for_camera(event.device_id)
         if str(event.type) == "ring" and self.config.ring_chime_delay_seconds > 0:
             # Let the physical doorbell chime finish before KNOCK starts
             # talking over it or opens its listen window early enough to
@@ -916,23 +993,28 @@ class UnifiBridge:
             await asyncio.sleep(self.config.ring_chime_delay_seconds)
 
         visitor_event = self.build_event(event)
-        session_id = _default_session_id(event.device_id)
-        state = self._start_or_resume_session(session_id, event, visitor_event.timestamp)
+        state = self._start_or_resume_session(door.session_id, event, visitor_event.timestamp)
 
-        device_id = event.device_id
+        # Every role comes from the door. For an implicit door that is the
+        # triggering camera for all of them, as it always was.
+        listen_device = door.listen_device
+        speak_device = door.speak_device
+        look_device = door.look_devices[0]
         hooks = ConversationHooks(
-            listen=(lambda: self.listen_to_visitor(device_id)) if self.stt_provider else None,
+            listen=(lambda: self.listen_to_visitor(listen_device)) if self.stt_provider else None,
             speak=(
-                (lambda text: self.speak_to_visitor(device_id, text)) if self.tts_provider else None
+                (lambda text: self.speak_to_visitor(speak_device, text))
+                if self.tts_provider
+                else None
             ),
             play_thinking_tone=(
-                (lambda: self._play_thinking_tone(device_id)) if self.tts_provider else None
+                (lambda: self._play_thinking_tone(speak_device)) if self.tts_provider else None
             ),
-            capture_scene=lambda: self._capture_scene(event),
+            capture_scene=lambda: self._capture_scene(event, door),
             scene_fallback=lambda: self._detector_scene(event),
-            intercept_transcript=self._systems_check_interceptor(device_id),
-            before_speak=lambda d, ve: self._on_escalate_notify(d, ve, device_id),
-            after_speak=lambda d, ve: self._handle_turn_notifications(d, ve, device_id),
+            intercept_transcript=self._systems_check_interceptor(look_device, door),
+            before_speak=lambda d, ve: self._on_escalate_notify(d, ve, look_device, door),
+            after_speak=lambda d, ve: self._handle_turn_notifications(d, ve, look_device, door),
         )
 
         return await run_conversation_loop(
@@ -1194,6 +1276,7 @@ def main() -> None:
         package_media_dir=default_package_media_dir(),
         sip_caller=SipCaller(SipConfig.from_env()),
         public_base_url=knock_config.public_base_url,
+        doors=DoorsConfig.from_env(),
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",
