@@ -28,7 +28,6 @@ import asyncio
 import itertools
 import json
 import logging
-import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
@@ -39,15 +38,15 @@ import websockets
 from knock.config import HomeAssistantConfig, OllamaConfig
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
+from knock.core.one_shot import answer_once
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
+from knock.core.session_ids import build_session_id
 from knock.core.session_store import JSONFileSessionStore, SessionStore
-from knock.core.state import SessionState
 from knock.wiring import build_orchestrator
 
 logger = logging.getLogger(__name__)
 
-_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _IGNORED_STATES = {None, "unknown", "unavailable"}
 
 # Notification-action identifiers KNOCK sends (see UnifiBridge's
@@ -73,8 +72,7 @@ ACTION_DEVICE_ID_SEP = "::"
 
 
 def _default_session_id(entity_id: str) -> str:
-    safe = _UNSAFE_SESSION_CHARS.sub("_", entity_id) or "unknown"
-    return f"ha-{safe}"[:128]
+    return build_session_id("ha", entity_id)
 
 
 # Lets the same three kinds of door event ring differently on a phone,
@@ -276,12 +274,13 @@ class HomeAssistantBridge:
             return None
 
         event = self.build_event(event_data)
-        session_id = _default_session_id(event_data["entity_id"])
-        state = self.session_store.load(session_id) or SessionState(
-            session_id=session_id, updated_at=event.timestamp
+        decision = answer_once(
+            self.orchestrator,
+            self.session_store,
+            self.audit_log,
+            _default_session_id(event_data["entity_id"]),
+            event,
         )
-        decision = self.orchestrator.respond(event, state=state, audit_log=self.audit_log)
-        self.session_store.save(state)
 
         try:
             if decision.escalate:

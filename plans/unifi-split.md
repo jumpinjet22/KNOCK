@@ -45,8 +45,15 @@ implements it; a Frigate or HA connector can provide its own.
    package-presence bookkeeping around a visit. Introduce `DevicePort`.
 3. **Neutral entry point.** Move provider wiring out of `unifi.main()`
    into one place that builds the orchestrator/providers and the connectors.
-4. **Point Frigate and HA at the shared core** (separate PR; only if
-   wanted).
+4. **Share what Frigate, Home Assistant and MQTT really have in common.**
+   Done as: pin their behavior first (`tests/test_one_shot_flows.py`), then
+   move the identical parts into core -- `core/session_ids.py` (one session-ID
+   sanitizer, was copied into five modules) and `core/one_shot.py`
+   (`answer_once`: load or start the session, ask the orchestrator once, save).
+   They were deliberately **not** moved onto `VisitRunner` or
+   `HouseholdNotifier`: they have no listen/speak loop, their sessions never
+   reset on idle, the orchestrator's greeting stays in their reply text, and
+   `HouseholdNotifier` would add SIP phone calls they don't make today.
 
 Not in scope: orchestrator, prompts, policy, conversation logic. If a step
 needs to touch those, stop and ask.

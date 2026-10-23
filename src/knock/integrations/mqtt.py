@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import UTC, datetime
 
 import paho.mqtt.client as mqtt
@@ -25,20 +24,18 @@ import paho.mqtt.client as mqtt
 from knock.config import MqttConfig, OllamaConfig
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
+from knock.core.one_shot import answer_once
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
+from knock.core.session_ids import build_session_id
 from knock.core.session_store import JSONFileSessionStore, SessionStore
-from knock.core.state import SessionState
 from knock.providers.llm.ollama import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
-_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
-
 
 def _default_session_id(source: str) -> str:
-    safe = _UNSAFE_SESSION_CHARS.sub("_", source) or "unknown"
-    return f"mqtt-{safe}"[:128]
+    return build_session_id("mqtt", source)
 
 
 class MqttBridge:
@@ -120,12 +117,7 @@ class MqttBridge:
         return event, session_id
 
     def handle_event(self, event: VisitorEvent, session_id: str) -> ResponseDecision:
-        state = self.session_store.load(session_id) or SessionState(
-            session_id=session_id, updated_at=event.timestamp
-        )
-        decision = self.orchestrator.respond(event, state=state, audit_log=self.audit_log)
-        self.session_store.save(state)
-        return decision
+        return answer_once(self.orchestrator, self.session_store, self.audit_log, session_id, event)
 
 
 def main() -> None:

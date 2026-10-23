@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -30,23 +29,21 @@ import paho.mqtt.client as mqtt
 from knock.config import FrigateConfig, OllamaConfig, VisionConfig
 from knock.core.audit import AuditLog, JSONLAuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
+from knock.core.one_shot import answer_once
 from knock.core.orchestrator import Orchestrator
 from knock.core.responses import ResponseDecision
 from knock.core.scene import SceneContext
+from knock.core.session_ids import build_session_id
 from knock.core.session_store import JSONFileSessionStore, SessionStore
-from knock.core.state import SessionState
 from knock.providers.llm.ollama import OllamaProvider
 from knock.providers.vision.base import VisionProvider, observe_scene
 from knock.providers.vision.ollama import OllamaVisionProvider
 
 logger = logging.getLogger(__name__)
 
-_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
-
 
 def _default_session_id(camera: str) -> str:
-    safe = _UNSAFE_SESSION_CHARS.sub("_", camera) or "unknown"
-    return f"frigate-{safe}"[:128]
+    return build_session_id("frigate", camera)
 
 
 @dataclass(frozen=True)
@@ -190,14 +187,14 @@ class FrigateBridge:
             timestamp=datetime.now(UTC),
             scene=scene,
         )
-        state = self.session_store.load(session_id) or SessionState(
-            session_id=session_id, updated_at=event.timestamp
+        return answer_once(
+            self.orchestrator,
+            self.session_store,
+            self.audit_log,
+            session_id,
+            event,
+            image=snapshot,
         )
-        decision = self.orchestrator.respond(
-            event, state=state, audit_log=self.audit_log, image=snapshot
-        )
-        self.session_store.save(state)
-        return decision
 
     def _fetch_snapshot(self, event_id: str) -> bytes:
         url = f"http://{self.config.http_host}:{self.config.http_port}/api/events/{event_id}/snapshot.jpg"

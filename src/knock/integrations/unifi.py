@@ -55,7 +55,6 @@ import asyncio
 import functools
 import io
 import logging
-import re
 import tempfile
 import time
 import uuid
@@ -89,6 +88,7 @@ from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
 from knock.core.package_log import JSONLPackageLog, NullPackageLog, PackageLog
 from knock.core.responses import ResponseDecision
+from knock.core.session_ids import build_session_id
 from knock.core.session_store import JSONFileSessionStore, SessionStore
 from knock.core.snapshot_store import SnapshotStore
 from knock.core.visit import VisitRunner
@@ -118,7 +118,6 @@ from knock.wiring import build_orchestrator
 
 logger = logging.getLogger(__name__)
 
-_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _SMART_DETECT_EVENT_TYPES = {"smartDetectZone", "smartDetectLine", "smartDetectLoiterZone"}
 _CAPTURE_SAMPLE_RATE = 16000
 
@@ -152,8 +151,7 @@ _SCENE_WAIT_SECONDS = 15.0
 
 
 def _default_session_id(device_id: str) -> str:
-    safe = _UNSAFE_SESSION_CHARS.sub("_", device_id) or "unknown"
-    return f"unifi-{safe}"[:128]
+    return build_session_id("unifi", device_id)
 
 
 def _rms(pcm: bytes) -> float:

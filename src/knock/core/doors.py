@@ -25,13 +25,10 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from knock.core.session_ids import build_session_id
+
 if TYPE_CHECKING:
     from knock.config import DoorsConfig, HomeAssistantConfig, UnifiConfig
-
-# Same sanitizer UnifiBridge's `_default_session_id` uses. Duplicated (not
-# imported) because core/ must not depend on integrations/; a test pins the
-# two to the same output so they can't drift apart.
-_UNSAFE_SESSION_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 # A door key ends up in a session ID, and session IDs are filenames in
 # JSONFileSessionStore -- so a key must never be able to contain a path
@@ -41,8 +38,7 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 def implicit_session_id(device_id: str) -> str:
     """The session ID a camera has always had -- `unifi-<sanitized id>`."""
-    safe = _UNSAFE_SESSION_CHARS.sub("_", device_id) or "unknown"
-    return f"unifi-{safe}"[:128]
+    return build_session_id("unifi", device_id)
 
 
 class DoorTriggers(BaseModel):
