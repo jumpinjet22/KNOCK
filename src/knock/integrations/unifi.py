@@ -481,6 +481,7 @@ class UnifiBridge:
         image_url: str | None = None,
         tag: str | None = None,
         door: Door | None = None,
+        call_message: str | None = None,
     ) -> None:
         await self.household._notify_household(
             device_id,
@@ -490,6 +491,7 @@ class UnifiBridge:
             image_url=image_url,
             tag=tag,
             door=door,
+            call_message=call_message,
         )
 
     async def _build_snapshot_url(self, device_id: str, *, package: bool = False) -> str | None:

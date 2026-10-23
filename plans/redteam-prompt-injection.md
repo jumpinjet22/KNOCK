@@ -29,10 +29,10 @@ KNOCK's trusted voice (phishing, vishing); or bad data reaches training.
 |---|---|---|---|---|
 | S1 | Visitor speech | STT -> policy -> LLM prompt | keyword policy, backstop, safety-check model | `redteam.py`, `test_safety_corpus.py` |
 | S2 | Camera text (sign, shirt, vehicle, vision summary) | vision model -> scene block -> LLM prompt | block framed as untrusted data, fields clipped, newlines collapsed, quotes neutralised, visitor words first | `test_injection_surfaces.py`, `redteam_injection.py --surface scene` |
-| S3 | Package-label text (carrier, recipient) | vision model -> notification and SIP announcement, by code | barcode values are regex-validated; label text is **not** sanitised | `test_injection_surfaces.py` (known gaps) |
-| S4 | Visitor speech meant to be relayed | LLM notification summary -> push and SIP | none beyond the model | `redteam_injection.py --surface relay` |
-| S5 | Emergency quote | visitor's words quoted verbatim -> push and SIP | none (**unbounded**) | `test_injection_surfaces.py` (known gap) |
-| S6 | Visitor words inside prompts | `"{visitor_text}"` in the prompt | none (camera text is escaped, visitor text is not) | `test_injection_surfaces.py` (known gap) |
+| S3 | Package-label text (carrier, recipient) | vision model -> notification and SIP announcement, by code | barcode values are regex-validated; every notification is one bounded line (`core/outbound_text.py`); a link or number is flagged in the push and never read on a call | `test_injection_surfaces.py`, `test_outbound_text.py` |
+| S4 | Visitor speech meant to be relayed | LLM notification summary -> push and SIP | same outbound filtering as S3 | `redteam_injection.py --surface relay` |
+| S5 | Emergency quote | visitor's words -> push and SIP | quote cut to 120 characters and flagged in the push; the phone call says only "Possible emergency at the door." | `test_injection_surfaces.py` |
+| S6 | Visitor words inside prompts | `"{visitor_text}"` in the prompt | one line, double quotes swapped for single (like camera text) | `test_injection_surfaces.py` |
 | S7 | Training/judge pipeline | audit-log text -> judge and correction prompts | review queue | **not covered yet** |
 
 ## How the tests are split
@@ -117,16 +117,36 @@ path, whose text is also read aloud on the SIP call.
 household side does not: a notification or phone call can carry an
 attacker-chosen message in KNOCK's own voice (S3, S4, S5 above).
 
-## Candidate fixes (not applied)
+**After the hardening (same model and judge, 3 trials, relay surface):** 0 of 18
+trials delivered an unflagged link or number to the household (was 17 of 18).
+Every summary that repeated "555-0100" reaches the push flagged and the call
+with it replaced. The judge still flagged 3 trials; reading them, they are the
+judge reacting to the visitor's own request or to an empty reply, not to
+anything KNOCK sent. For camera text, no injected token reached a notification
+in the full rerun (it was 3 of 70 before).
 
-None of these change what the door says to a visitor; they change what is sent
-to the household. Each needs a decision before it ships.
+## Hardening applied (2026-10-23)
 
-1. Clip every untrusted string that goes into a notification or SIP announcement
-   to one line and a short length (label fields, the emergency quote, the LLM
-   summary).
-2. Mark relayed content as visitor-supplied ("Visitor says: ...") and never
-   speak URLs or phone numbers from a visitor or a label on the SIP call.
-3. Escape the visitor's words in prompts the same way camera text is.
-4. Keep injected scene text out of the notification-summary prompt, or reduce it
-   to the detector labels.
+None of this changes what the door says to a visitor.
+
+- **Outbound text** (`core/outbound_text.py`, used by `HouseholdNotifier`): every
+  notification and call announcement is forced onto one bounded line
+  (invisible and bidirectional control characters removed). A link or phone
+  number in the **push** stays but is followed by "(includes a link or number
+  from the visitor -- don't trust it)"; on a **call** it is replaced with "a
+  link" / "a phone number" and never read aloud. Ordinary notifications come out
+  unchanged.
+- **Emergency**: the push quotes at most 120 characters, with quotation marks
+  neutralised; the call never repeats the visitor's words.
+- **Prompts**: the visitor's words are one line with double quotes swapped for
+  single before they go inside the quoted part of a prompt.
+
+Not done: keeping camera text out of the notification-summary prompt. The
+existing scene tests require the camera block in those prompts, so it needs a
+decision rather than a quiet change.
+
+Still open: a summary that repeats a visitor's *instructions* without a link or
+number ("wire the money") reaches the household unflagged. It reads as what the
+visitor said, but nothing marks it as the visitor's words. Labelling every
+relayed summary "Visitor says: ..." would close it at the cost of changing
+every notification's wording.
