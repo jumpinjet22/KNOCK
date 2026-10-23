@@ -659,3 +659,13 @@ def test_real_baresip_call(tmp_path) -> None:
     segment = samples[loud[0] + 800 : loud[-1] - 800]
     crossings = sum(1 for i in range(1, len(segment)) if (segment[i - 1] < 0) != (segment[i] < 0))
     assert crossings / 2 / (len(segment) / 8000) == pytest.approx(440, abs=10)
+
+
+def test_announce_rings_only_the_given_targets_when_a_door_overrides_them(tmp_path) -> None:
+    uri = "sip:101@192.0.2.10"
+    caller, control, _ = _caller(tmp_path, {uri: _answers(uri)})
+
+    outcome = caller.announce(b"\x10\x00" * 800, targets=["101"])
+
+    assert outcome.attempted == ["101"]
+    assert control.commands == [("dial", uri)]

@@ -8,13 +8,92 @@ the door's name, and use their own phones.
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
-from knock.config import DoorsConfig, HomeAssistantConfig
+from knock.config import DoorsConfig, HomeAssistantConfig, SipConfig, UnifiConfig
 from knock.core.doors import DoorConfig, resolve_doors
 from knock.core.events import VisitorEvent
 from knock.core.responses import ResponseDecision
-from tests.test_routing_characterization import _event, _Routed, _sip_caller
+from knock.core.session_store import JSONFileSessionStore
+from knock.integrations.unifi import UnifiBridge
+from knock.providers.tts.base import SynthesizedAudio
+
+# -- fixtures (same shape as test_routing_characterization.py's, kept local so this
+# file doesn't depend on another test module's import path) ----------------------
+
+
+def _event(event_type: str = "ring", device_id: str = "cam1", smart=()) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="evt1", type=event_type, device_id=device_id, smart_detect_types=smart
+    )
+
+
+class _Routed:
+    """A bridge whose camera-facing calls record which device they used."""
+
+    def __init__(
+        self, tmp_path, *, transcripts=("",), vision=True, sip_caller=None, **config
+    ) -> None:
+        self.calls: list[tuple] = []
+        self.spoken: list[str] = []
+        self.notifier = MagicMock()
+        client = MagicMock()
+
+        async def snapshot(device_id: str, package: bool = False) -> bytes:
+            self.calls.append(("snapshot", device_id, package))
+            return b"fake-jpeg-bytes"
+
+        client.get_public_api_camera_snapshot = AsyncMock(side_effect=snapshot)
+
+        tts = MagicMock()
+
+        async def synthesize(text: str) -> SynthesizedAudio:
+            self.spoken.append(text)
+            return SynthesizedAudio(audio=b"\x01\x02" * 400, rate=8000, width=2, channels=1)
+
+        tts.synthesize = synthesize
+
+        self.bridge = UnifiBridge(
+            config=UnifiConfig(
+                host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0, **config
+            ),
+            session_store=JSONFileSessionStore(tmp_path),
+            client=client,
+            tts_provider=tts,
+            stt_provider=MagicMock(),
+            vision_provider=MagicMock() if vision else None,
+            ha_notifier=self.notifier,
+            sip_caller=sip_caller,
+        )
+        remaining = iter(transcripts)
+
+        async def listen(device_id: str) -> str:
+            self.calls.append(("listen", device_id))
+            return next(remaining, "")
+
+        async def speak(device_id: str, text: str) -> None:
+            self.calls.append(("speak", device_id))
+            self.spoken.append(text)
+
+        async def thinking(device_id: str) -> None:
+            self.calls.append(("thinking", device_id))
+
+        self.bridge.listen_to_visitor = listen  # type: ignore[method-assign]
+        self.bridge.speak_to_visitor = speak  # type: ignore[method-assign]
+        self.bridge._play_thinking_tone = thinking  # type: ignore[method-assign]
+
+    def devices(self, role: str) -> set[str]:
+        return {call[1] for call in self.calls if call[0] == role}
+
+
+def _sip_caller(call_on: list[str]) -> MagicMock:
+    caller = MagicMock()
+    caller.configured = True
+    caller.config = SipConfig(enabled=True, call_on=call_on, call_cooldown_seconds=300.0)
+    caller.announce.return_value = SimpleNamespace(answered_by="101", attempted=["101"], error=None)
+    return caller
 
 
 def _split_door(**overrides) -> DoorConfig:
@@ -157,18 +236,6 @@ def test_a_camera_claimed_by_a_door_triggers_even_off_the_allow_list(tmp_path) -
     assert routed.bridge.should_trigger(_event(device_id="cam1")) is False
     claimed = _routed(tmp_path, _split_door(), trigger_camera_ids=["other"])
     assert claimed.bridge.should_trigger(_event(device_id="cam1")) is True
-
-
-def test_announce_rings_only_the_given_targets_when_a_door_overrides_them(tmp_path) -> None:
-    from tests.test_sip_caller import _answers, _caller
-
-    uri = "sip:101@192.0.2.10"
-    caller, control, _ = _caller(tmp_path, {uri: _answers(uri)})
-
-    outcome = caller.announce(b"\x10\x00" * 800, targets=["101"])
-
-    assert outcome.attempted == ["101"]
-    assert control.commands == [("dial", uri)]
 
 
 def test_a_knock_still_bypasses_the_camera_allow_list(tmp_path) -> None:
