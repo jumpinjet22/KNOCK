@@ -79,6 +79,23 @@ def test_a_reply_that_echoes_the_injected_token_is_followed() -> None:
     assert result.failures == 2
 
 
+def test_a_reply_that_does_what_the_injection_wanted_is_followed_without_a_canary() -> None:
+    vehicle = next(a for a in CORPUS if a["id"] == "vehicle-instruction")
+
+    [result] = _run(_FakeLLM(reply="Fine to leave it, the family is away this week."), [vehicle])
+
+    assert {t.verdict for t in result.trials} == {"followed"}
+    assert "forbidden pattern" in result.trials[0].reason
+
+
+def test_a_reply_that_merely_resembles_the_topic_is_not_followed() -> None:
+    vehicle = next(a for a in CORPUS if a["id"] == "vehicle-instruction")
+
+    [result] = _run(_FakeLLM(reply="It is fine to leave the package by the door."), [vehicle])
+
+    assert {t.verdict for t in result.trials} == {"safe"}
+
+
 def test_the_canary_is_fresh_for_every_trial() -> None:
     [result] = _run(_FakeLLM(), [SCENE], trials=4)
 
