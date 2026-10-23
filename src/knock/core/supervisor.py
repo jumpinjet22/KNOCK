@@ -18,6 +18,7 @@ each spawn their own, duplicate copies of every bridge.
 from __future__ import annotations
 
 import collections
+import json
 import logging
 import os
 import subprocess
@@ -28,7 +29,13 @@ from typing import Any, Literal
 
 from pydantic import SecretStr
 
-from knock.config import FrigateConfig, HomeAssistantConfig, MqttConfig, UnifiConfig
+from knock.config import (
+    DoorsConfig,
+    FrigateConfig,
+    HomeAssistantConfig,
+    MqttConfig,
+    UnifiConfig,
+)
 from knock.core.config_store import ConfigStore
 
 logger = logging.getLogger(__name__)
@@ -100,7 +107,25 @@ def build_bridge_env(name: BridgeName, store: ConfigStore) -> dict[str, str]:
             env.pop(env_var, None)
         else:
             env[env_var] = value
+    if name == "unifi":
+        _add_saved_doors(env, store)
     return env
+
+
+def _add_saved_doors(env: dict[str, str], store: ConfigStore) -> None:
+    """Hand the UniFi bridge the doors saved in the UI. Only when there are
+    some (a `KNOCK_DOORS` already in the environment wins inside
+    `from_sources`), so with no doors the bridge's environment is exactly what
+    it was before doors.
+    """
+    try:
+        doors = DoorsConfig.from_sources(store).doors
+    except ValueError as exc:
+        # Fall back to a door per camera -- today's behavior -- and say so.
+        logger.warning("Saved doors are invalid, starting without them: %s", exc)
+        return
+    if doors:
+        env["KNOCK_DOORS"] = json.dumps([door.model_dump(mode="json") for door in doors])
 
 
 @dataclass
