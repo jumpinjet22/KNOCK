@@ -14,7 +14,7 @@ bumps the image tag.
 | Protect client, event websocket, trigger filtering by event type | UniFi (stays) |
 | Camera audio in (RTSP capture) and out (talkback), snapshots, clips | UniFi (stays) |
 | Run a visit: session resume, hooks, turn loop | core |
-| Tell the household: per-intent wording, buttons, photos, SIP calls | core |
+| Tell the household: per-intent wording, buttons, photos, SIP calls | `integrations/household.py` |
 | Wire up Ollama/Whisper/Kokoro/SIP in `main()` | a neutral entry point |
 
 Frigate and Home Assistant would otherwise have to copy or import the
@@ -25,7 +25,7 @@ UniFi bridge to get the same visit behavior.
     connectors (unifi.py, homeassistant.py, frigate.py)
         translate an event into "a trigger on a door"; provide DevicePort
     core/visit.py          VisitRunner: runs a visit for a Door via a DevicePort
-    core/household.py      HouseholdNotifier: notification wording, buttons, SIP calls
+    integrations/household.py  HouseholdNotifier: notification wording, buttons, SIP calls
     core/orchestrator.py   unchanged: what to say, intent, policy
 
 `DevicePort` is a small Protocol: `listen(device)`, `speak(device, text)`,
