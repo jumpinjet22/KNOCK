@@ -10,6 +10,7 @@ from knock.conversation.prompts import GREETING, SYSTEM_PROMPT
 from knock.conversation.responses import response_for
 from knock.core.audit import AuditEntry, AuditLog, NullAuditLog
 from knock.core.events import VisitorEvent
+from knock.core.logsafe import log_safe
 from knock.core.responses import ResponseDecision
 from knock.core.scene import SceneContext, format_scene_for_prompt
 from knock.core.state import SessionState
@@ -709,12 +710,12 @@ class Orchestrator:
         )
 
         logger.info(
-            "Orchestrator decision: text=%r intent=%r reason=%r escalate=%s response=%r",
-            event.text,
+            "Orchestrator decision: text=%s intent=%r reason=%r escalate=%s response=%s",
+            log_safe(event.text),
             last_intent,
             response.reason,
             response.escalate,
-            response.text,
+            log_safe(response.text),
         )
 
         return response
@@ -755,8 +756,14 @@ class Orchestrator:
             logger.warning("LLM intent classification failed: %s", exc)
             return _IntentRefinement("unknown", False, [], None)
 
-        result = guess if guess in _LLM_CLASSIFIABLE_INTENTS else "unknown"
-        logger.info("LLM intent refinement: text=%r guess=%r -> %s", visitor_text, guess, result)
+        # The matching entry from the trusted list, never the model's own string.
+        result = next((name for name in _LLM_CLASSIFIABLE_INTENTS if name == guess), "unknown")
+        logger.info(
+            "LLM intent refinement: text=%s guess=%s -> %s",
+            log_safe(visitor_text),
+            log_safe(guess),
+            result,
+        )
         return _IntentRefinement(result, False, [], None)
 
     def _refine_unknown_intent_via_tools(
@@ -789,9 +796,9 @@ class Orchestrator:
             or model_flagged
         )
         logger.info(
-            "Tool-call intent classification: text=%r candidates=%r uncertain=%s",
-            visitor_text,
-            candidates,
+            "Tool-call intent classification: text=%s candidates=%s uncertain=%s",
+            log_safe(visitor_text),
+            log_safe(candidates),
             uncertain,
         )
         return _IntentRefinement(
@@ -863,8 +870,8 @@ class Orchestrator:
         if flagged:
             logger.warning(
                 "LLM safety check flagged a response the deterministic backstop "
-                "allowed through: %r",
-                response_text,
+                "allowed through: %s",
+                log_safe(response_text),
             )
         return flagged
 

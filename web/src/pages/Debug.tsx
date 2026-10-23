@@ -110,7 +110,10 @@ function VisionPanel() {
 
   async function handleFile(file: File | undefined) {
     if (!file) return
-    setImagePreview(URL.createObjectURL(file))
+    // Only ever preview a blob: URL made from the chosen file -- never any other
+    // scheme -- so nothing but the user's own local image can reach <img src>.
+    const previewUrl = URL.createObjectURL(file)
+    setImagePreview(file.type.startsWith("image/") && previewUrl.startsWith("blob:") ? previewUrl : null)
     setImageBase64(await fileToBase64(file))
     setResult(null)
     setObserveResult(null)
