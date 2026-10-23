@@ -459,7 +459,7 @@ class HomeAssistantKnockListener:
         # visit at that door through `on_door_knock`; every other sensor
         # keeps going through `knock_sensors` and `on_knock` as before.
         doors: DoorRegistry | None = None,
-        on_door_knock: Callable[[Door], Awaitable[Any]] | None = None,
+        on_door_knock: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
         self.config = config or HomeAssistantConfig()
         self._on_knock = on_knock
@@ -502,7 +502,7 @@ class HomeAssistantKnockListener:
         door = self._explicit_door(data["entity_id"])
         if door is not None:
             if self._on_door_knock is not None:
-                await self._on_door_knock(door)
+                await self._on_door_knock(door, trigger=data["entity_id"])
             return
 
         camera_id = self.config.knock_sensors.get(data["entity_id"])
