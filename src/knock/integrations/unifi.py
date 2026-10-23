@@ -350,6 +350,7 @@ class UnifiBridge:
         clip_recorder: Callable[[str, Path, float, bool], None] | None = None,
         sip_caller: SipCaller | None = None,
         doors: DoorsConfig | None = None,
+        ha_config: HomeAssistantConfig | None = None,
     ) -> None:
         self.config = config or UnifiConfig()
         self.orchestrator = orchestrator or Orchestrator()
@@ -384,7 +385,7 @@ class UnifiBridge:
         # camera is its own implicit door (see core/doors.py), which is
         # exactly how the bridge always treated a camera.
         self.doors: DoorRegistry = resolve_doors(
-            self.config, HomeAssistantConfig(), doors or DoorsConfig()
+            self.config, ha_config or HomeAssistantConfig(), doors or DoorsConfig()
         )
         # Who gets told what (push notifications, phone calls) lives in
         # integrations/household.py; this bridge only supplies snapshots.
@@ -560,8 +561,17 @@ class UnifiBridge:
         same way a real conversation does, so a package notification
         doesn't fire mid-visit.
         """
-        event = _KnockEvent(device_id=device_id)
-        door = self.doors.for_camera(device_id)
+        return await self.handle_door_knock(self.doors.for_camera(device_id), device_id)
+
+    async def handle_door_knock(
+        self, door: Door, device_id: str | None = None
+    ) -> ResponseDecision | None:
+        """A knock at a specific door -- the entry point for a Home Assistant
+        entity an explicit door lists as a trigger. Runs the same visit a
+        ring does, on the door's own devices and session, so a knock and a
+        person-detect on one door continue one conversation.
+        """
+        event = _KnockEvent(device_id=device_id or door.look_devices[0])
         presence_key = door.look_devices[0]
         self.packages.conversation_started(presence_key)
         try:
@@ -763,9 +773,12 @@ async def _run_bridge_and_listener(bridge: UnifiBridge, ha_config: HomeAssistant
         # Only worth its own connection when at least one sensor->camera
         # mapping is actually configured -- see
         # HomeAssistantConfig.knock_sensors's docstring.
-        if ha_config.knock_sensors:
+        if ha_config.knock_sensors or bridge.doors.has_ha_triggers:
             knock_listener = HomeAssistantKnockListener(
-                config=ha_config, on_knock=bridge.handle_knock
+                config=ha_config,
+                on_knock=bridge.handle_knock,
+                doors=bridge.doors,
+                on_door_knock=bridge.handle_door_knock,
             )
             tasks.append(knock_listener.run())
     await asyncio.gather(*tasks)
@@ -797,6 +810,7 @@ def main() -> None:
         sip_caller=SipCaller(SipConfig.from_env()),
         public_base_url=knock_config.public_base_url,
         doors=DoorsConfig.from_env(),
+        ha_config=ha_config,
     )
     logger.info(
         "Starting KNOCK UniFi Protect bridge: %s:%s (trigger_on=%s)",
