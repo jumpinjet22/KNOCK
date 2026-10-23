@@ -191,14 +191,20 @@ if _web_dist.is_dir():
     # real API route above, so this only ever catches what nothing else
     # matched. Skipped entirely if the frontend hasn't been built (e.g. in
     # CI, or a backend-only checkout) rather than crashing the whole app.
-    _web_dist_resolved = _web_dist.resolve()
+    _web_dist_root = os.path.realpath(_web_dist)
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_web(full_path: str) -> FileResponse:
-        # full_path is raw, attacker-controlled URL input -- resolve and
-        # confirm it's still inside the dist dir before ever serving it, or
-        # a path like "../../../../etc/passwd" would escape it.
-        candidate = (_web_dist_resolved / full_path).resolve()
-        if full_path and candidate.is_relative_to(_web_dist_resolved) and candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(_web_dist_resolved / "index.html")
+        # full_path is raw, attacker-controlled URL input -- resolve it
+        # (symlinks and ".." included) and confirm it's still inside the dist
+        # dir before ever serving it, or a path like "../../../../etc/passwd"
+        # would escape it. (realpath + a prefix check, the form static
+        # analysis recognizes; behavior is the same as an is_relative_to check.)
+        requested = os.path.realpath(os.path.join(_web_dist_root, full_path))
+        if (
+            full_path
+            and requested.startswith(_web_dist_root + os.sep)
+            and os.path.isfile(requested)
+        ):
+            return FileResponse(requested)
+        return FileResponse(os.path.join(_web_dist_root, "index.html"))

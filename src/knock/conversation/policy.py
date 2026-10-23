@@ -6,6 +6,7 @@ import re
 from pydantic import BaseModel, Field
 
 from knock.conversation.rules import RuleSet
+from knock.core.logsafe import log_safe
 from knock.core.session import ConversationContext
 
 logger = logging.getLogger(__name__)
@@ -275,7 +276,9 @@ class PolicyEngine:
     def apply_style(self, response: str) -> str:
         styled = response.strip()[:140]
         if _contains_unsafe_disclosure(styled):
-            logger.warning("Response flagged as an unsafe disclosure, suppressing: %r", styled)
+            logger.warning(
+                "Response flagged as an unsafe disclosure, suppressing: %s", log_safe(styled)
+            )
             return SAFE_RESPONSE_FALLBACK
         return styled
 
