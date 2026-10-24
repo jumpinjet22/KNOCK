@@ -41,12 +41,13 @@ def _scene_block(scene: SceneContext | None) -> str:
 # homeowner to arrive so they can let you in", "I will notify Jon").
 _FOOD_REPLY_OFF_POLICY = re.compile(
     r"\b(porch|doorstep|step|steps|leave|bring|drop|inside|let you in|come in|"
-    r"wait for|arrive|arrival|notify)\b",
+    r"wait for|hold|outside|arrive|arrived|arrival|notify)\b",
     re.IGNORECASE,
 )
 
 _FOOD_REPLY_EXPECTED = re.compile(
-    r"\b(?:moment|check on that|checking|pass that along|passing that along)\b", re.IGNORECASE
+    r"\b(?:moment|check on that|check with|checking|pass that along|passing that along)\b",
+    re.IGNORECASE,
 )
 
 
@@ -86,15 +87,16 @@ _INTENT_DESCRIPTIONS = {
         "anyone else"
     ),
     "delivery_signature_required": (
-        "a package delivery that requires a signature -- say you'll pass "
-        "that along for a signature; never confirm whether anyone is home "
-        "or will come sign right now, and don't say the delivery can't be "
-        "accepted or turn the driver away"
+        "a package delivery that requires a signature -- say something "
+        'like "Okay, give me a moment while I check with the homeowner '
+        'about the signature." Never promise that anyone will come sign '
+        "right now, and don't say the delivery can't be accepted or turn "
+        "the driver away"
     ),
     "food_delivery": (
         "a food delivery (pizza, takeout, DoorDash/Grubhub/Uber Eats, etc). "
-        'Say something like "Okay, give me a moment while I check on '
-        "that.\" -- unlike a package, food can't just be left at the "
+        'Say something like "Okay, give me a moment while I check with '
+        "the homeowner.\" -- unlike a package, food can't just be left at the "
         "door, so don't say to leave it by the door, and never tell them "
         "where to put or bring it (the porch, the step, anywhere), even "
         "if the camera shows one. Never confirm whether anyone "
