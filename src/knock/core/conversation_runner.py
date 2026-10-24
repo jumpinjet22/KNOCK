@@ -70,6 +70,11 @@ class ConversationHooks:
     """Used if `capture_scene`'s task hasn't finished within
     `scene_wait_seconds`. Ignored if `capture_scene` is None."""
 
+    confirm_visitor_present: Callable[[], Awaitable[bool]] | None = None
+    """Asked once, before the greeting, on a visit's first turn. False means
+    nobody is at the door (a ring-and-ditch): the loop returns None without
+    speaking or calling the orchestrator. None skips the check."""
+
     intercept_transcript: Callable[[str], Awaitable[bool]] | None = None
     """Called once, with the very first turn's transcript, before it is
     ever passed to Orchestrator.respond(). Returning True means the hook
@@ -119,6 +124,14 @@ async def run_conversation_loop(
 ) -> ResponseDecision | None:
     is_first_turn = state.turn_count == 0
     greeted_aloud = is_first_turn and hooks.speak is not None
+
+    if (
+        is_first_turn
+        and hooks.confirm_visitor_present is not None
+        and not await hooks.confirm_visitor_present()
+    ):
+        logger.info("No visitor at the door for %s; staying silent", visitor_event.source)
+        return None
 
     scene_task: asyncio.Task[tuple[SceneContext, bytes | None]] | None = (
         asyncio.create_task(hooks.capture_scene()) if hooks.capture_scene else None

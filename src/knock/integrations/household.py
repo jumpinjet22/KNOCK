@@ -262,6 +262,17 @@ class HouseholdNotifier:
         token = self.snapshot_store.put(snapshot)
         return f"{self.public_base_url.rstrip('/')}/api/snapshot/{token}"
 
+    async def notify_nobody_visible(self, device_id: str) -> None:
+        """The doorbell rang but nobody was in view (a ring-and-ditch): KNOCK
+        stays silent, and the household gets a quiet FYI with the photo."""
+        image_url = await self._build_snapshot_url(device_id)
+        await self._notify_household(
+            device_id,
+            "The doorbell rang, but nobody is visible at the door.",
+            category="fyi",
+            image_url=image_url,
+        )
+
     async def _on_escalate_notify(
         self,
         decision: ResponseDecision,

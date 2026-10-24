@@ -246,6 +246,40 @@ class VisitRunner:
             captured_at=datetime.now(UTC),
         )
 
+    async def _visitor_is_present(self, event: VisitEvent, look_device: str) -> bool:
+        """Is anyone actually at the door? Looks through a few snapshots; only
+        a clear "zero people" on every one says no. A person detection from
+        the camera, no snapshot, or any vision failure all say yes, so a
+        broken check never silences a real visitor.
+        """
+        if "person" in {str(t) for t in getattr(event, "smart_detect_types", ()) or ()}:
+            return True
+        config = self._host.config
+        attempts = max(1, int(config.visitor_check_attempts))
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(config.visitor_check_interval_seconds)
+            try:
+                snapshot = await self._host.snapshot(look_device)
+                if snapshot is None or self._host.vision_provider is None:
+                    return True
+                observation = await asyncio.to_thread(
+                    observe_scene, self._host.vision_provider, snapshot
+                )
+            except Exception as exc:  # noqa: BLE001 - never silence a visitor on an error
+                logger.warning("Visitor-present check failed for %s: %s", look_device, exc)
+                return True
+            count = observation.people_count if observation is not None else None
+            if count is None or count > 0:
+                return True
+        notify = getattr(self._host, "_notify_nobody_visible", None)
+        if notify is not None:
+            try:
+                await notify(look_device)
+            except Exception as exc:  # noqa: BLE001 - the notification is a bonus
+                logger.warning("Nobody-visible notification failed: %s", exc)
+        return False
+
     async def _capture_scene(
         self, event: VisitEvent, door: Door | None = None
     ) -> tuple[SceneContext, bytes | None]:
@@ -337,6 +371,12 @@ class VisitRunner:
                 else None
             ),
             capture_scene=lambda: self._capture_scene(event, door),
+            confirm_visitor_present=(
+                (lambda: self._visitor_is_present(event, look_device))
+                if getattr(self._host.config, "require_visitor_present", False) is True
+                and self._host.vision_provider is not None
+                else None
+            ),
             scene_fallback=lambda: self._detector_scene(event),
             intercept_transcript=self._systems_check_interceptor(look_device, door),
             before_speak=lambda d, ve: self._host._on_escalate_notify(d, ve, look_device, door),
