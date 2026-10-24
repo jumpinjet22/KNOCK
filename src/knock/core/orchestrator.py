@@ -56,6 +56,10 @@ def _food_reply_on_policy(text: str) -> bool:
     return bool(_FOOD_REPLY_EXPECTED.search(text)) and not _FOOD_REPLY_OFF_POLICY.search(text)
 
 
+# Said when the doorbell rang (or something was detected) but the listen
+# window caught no speech. The greeting already asked how it can help.
+SILENT_VISITOR_REPLY = "Sorry, I didn't hear anything. Could you tell me how I can help?"
+
 # Plain-English framing of each `classify_intent()` bucket, embedded in the
 # LLM prompt below so it understands the classifier's guess without needing
 # to know KNOCK's internal intent names.
@@ -637,6 +641,7 @@ class Orchestrator:
         *,
         suppress_greeting: bool = False,
         image: bytes | None = None,
+        silent_visitor: bool = False,
     ) -> ResponseDecision:
         # Speech only -- camera context (`event.scene`) never feeds the
         # deterministic policy/intent layers, only the LLM prompts below.
@@ -667,6 +672,19 @@ class Orchestrator:
                 safe=True,
                 escalate=False,
                 reason=decision.reason,
+                intent=last_intent,
+            )
+        elif silent_visitor:
+            # Nobody said anything, so `event.text` is only the bridge's
+            # placeholder ("Doorbell ring on <camera id>"). Classifying it
+            # produced nonsense replies and even read the camera id aloud;
+            # a fixed neutral prompt never touches the model or the text.
+            last_intent = "unknown"
+            response = ResponseDecision(
+                text=SILENT_VISITOR_REPLY,
+                safe=True,
+                escalate=False,
+                reason="normal",
                 intent=last_intent,
             )
         else:

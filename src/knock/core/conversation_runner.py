@@ -128,8 +128,12 @@ async def run_conversation_loop(
         assert hooks.speak is not None
         await hooks.speak(GREETING)
 
+    # Only when we actually listened and heard nothing: with no microphone
+    # the placeholder text is all there is, as before.
+    silent_first_turn = False
     if hooks.listen is not None:
         transcript = await hooks.listen()
+        silent_first_turn = not transcript
         if transcript:
             visitor_event = visitor_event.model_copy(update={"text": transcript})
             if hooks.intercept_transcript is not None and await hooks.intercept_transcript(
@@ -159,6 +163,7 @@ async def run_conversation_loop(
             audit_log=audit_log,
             suppress_greeting=greeted_aloud,
             image=snapshot,
+            **({"silent_visitor": True} if silent_first_turn and turn_index == 0 else {}),
         )
         session_store.save(state)
 
