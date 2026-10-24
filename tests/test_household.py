@@ -114,3 +114,35 @@ def test_set_down_action_speaks_the_set_down_phrase(tmp_path) -> None:
     asyncio.run(bridge.handle_notification_action("knock_set_down", "cam1"))
 
     assert spoken == [("cam1", "The homeowner says to find a safe spot to set it down. Thank you!")]
+
+
+def test_food_delivery_reply_that_breaks_policy_falls_back_to_canned() -> None:
+    from knock.conversation.responses import response_for
+    from knock.core.orchestrator import Orchestrator
+
+    for bad in (
+        "Please deliver your order directly to the porch.",
+        "I will wait for the homeowner to arrive so they can let you in.",
+        "I will notify Jon about your arrival.",
+    ):
+
+        class _LLM:
+            def __init__(self, reply: str) -> None:
+                self.reply = reply
+
+            def generate(self, prompt: str) -> str:
+                return self.reply
+
+        text = Orchestrator(llm_provider=_LLM(bad))._text_for_intent("food_delivery", "I have food")  # type: ignore[arg-type]
+        assert text == response_for("food_delivery")
+        assert "check on that" in text
+
+
+def test_food_delivery_reply_must_sound_like_checking_or_passing_along() -> None:
+    from knock.core.orchestrator import _food_reply_on_policy
+
+    assert _food_reply_on_policy("Okay, give me a moment while I check on that.")
+    assert _food_reply_on_policy("Thanks, I'll pass that along.")
+    assert not _food_reply_on_policy("Please wait patiently at the door for someone to answer.")
+    assert not _food_reply_on_policy("I'll check the camera feed and let you know.")
+    assert not _food_reply_on_policy("I cannot provide information about real-world locations.")

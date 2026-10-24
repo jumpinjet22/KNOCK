@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Any, NamedTuple
 
@@ -34,6 +35,27 @@ def _scene_block(scene: SceneContext | None) -> str:
     return f"{block}\n" if block else ""
 
 
+# A food-delivery reply must not send the driver anywhere with the food,
+# invite them in, or promise a specific person/arrival -- a small model
+# did all of these in live tests ("deliver it to the porch", "wait for the
+# homeowner to arrive so they can let you in", "I will notify Jon").
+_FOOD_REPLY_OFF_POLICY = re.compile(
+    r"\b(porch|doorstep|step|steps|leave|bring|drop|inside|let you in|come in|"
+    r"wait for|arrive|arrival|notify)\b",
+    re.IGNORECASE,
+)
+
+_FOOD_REPLY_EXPECTED = re.compile(
+    r"\b(?:moment|check on that|checking|pass that along|passing that along)\b", re.IGNORECASE
+)
+
+
+def _food_reply_on_policy(text: str) -> bool:
+    """A food-delivery reply must read as "one moment, checking" (or the
+    canned "pass that along") and carry none of the off-policy content."""
+    return bool(_FOOD_REPLY_EXPECTED.search(text)) and not _FOOD_REPLY_OFF_POLICY.search(text)
+
+
 # Plain-English framing of each `classify_intent()` bucket, embedded in the
 # LLM prompt below so it understands the classifier's guess without needing
 # to know KNOCK's internal intent names.
@@ -52,8 +74,8 @@ _INTENT_DESCRIPTIONS = {
     ),
     "food_delivery": (
         "a food delivery (pizza, takeout, DoorDash/Grubhub/Uber Eats, etc). "
-        'Say something like "Okay, give me a moment while I check with '
-        "the homeowner.\" -- unlike a package, food can't just be left at the "
+        'Say something like "Okay, give me a moment while I check on '
+        "that.\" -- unlike a package, food can't just be left at the "
         "door, so don't say to leave it by the door, and never tell them "
         "where to put or bring it (the porch, the step, anywhere), even "
         "if the camera shows one. Never confirm whether anyone "
@@ -851,6 +873,12 @@ class Orchestrator:
             logger.warning(
                 "Image-informed reply flagged as alarming/speculative, using canned: %r",
                 generated,
+            )
+            return response_for(intent)
+
+        if intent == "food_delivery" and not _food_reply_on_policy(generated):
+            logger.warning(
+                "Food-delivery reply broke policy, using canned: %r", log_safe(generated)
             )
             return response_for(intent)
 
