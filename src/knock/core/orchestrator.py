@@ -71,7 +71,7 @@ _CONFUSED_REPLY = re.compile(
 # ("please wait here as I check if he is available"), confirms the person
 # lives here and can be reached right now. Seen live on a person-lookup.
 _AVAILABILITY_LEAK = re.compile(
-    r"\bavailable\b|\bwait (?:here|there|outside)\b|\bstay (?:here|there)\b|"
+    r"\bavailable\b|\bwait (?:here|there|outside|near|by|at|around)\b|\bstay (?:here|there)\b|"
     r"\bcheck (?:if|whether) (?:he|she|they|\w+) (?:is|are)\b",
     re.IGNORECASE,
 )

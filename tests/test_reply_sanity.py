@@ -52,6 +52,7 @@ def test_normal_replies_are_untouched(good: str) -> None:
         "I can tell them you mentioned Jon, but please wait here as I check if he is available.",
         "Jon is available right now.",
         "Please wait outside while I see.",
+        "Please wait near your vehicle while I check with him.",
         "I'll check whether she is in.",
     ],
 )
