@@ -67,8 +67,18 @@ _CONFUSED_REPLY = re.compile(
 )
 
 
+# Telling the visitor a named person's availability, or to stand by for one
+# ("please wait here as I check if he is available"), confirms the person
+# lives here and can be reached right now. Seen live on a person-lookup.
+_AVAILABILITY_LEAK = re.compile(
+    r"\bavailable\b|\bwait (?:here|there|outside)\b|\bstay (?:here|there)\b|"
+    r"\bcheck (?:if|whether) (?:he|she|they|\w+) (?:is|are)\b",
+    re.IGNORECASE,
+)
+
+
 def _reply_is_confused(text: str) -> bool:
-    return bool(_CONFUSED_REPLY.search(text))
+    return bool(_CONFUSED_REPLY.search(text) or _AVAILABILITY_LEAK.search(text))
 
 
 # Said when the doorbell rang (or something was detected) but the listen

@@ -44,3 +44,19 @@ def test_normal_replies_are_untouched(good: str) -> None:
     assert not _reply_is_confused(good)
     orchestrator = Orchestrator(llm_provider=_LLM(good))  # type: ignore[arg-type]
     assert orchestrator._text_for_intent("delivery", "package") == good
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        "I can tell them you mentioned Jon, but please wait here as I check if he is available.",
+        "Jon is available right now.",
+        "Please wait outside while I see.",
+        "I'll check whether she is in.",
+    ],
+)
+def test_availability_replies_fall_back_to_the_canned_line(leak: str) -> None:
+    orchestrator = Orchestrator(llm_provider=_LLM(leak))  # type: ignore[arg-type]
+    assert orchestrator._text_for_intent("person_lookup", "Can I speak to Jon?") == (
+        response_for("person_lookup")
+    )
