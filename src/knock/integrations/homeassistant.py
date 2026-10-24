@@ -62,6 +62,9 @@ _BUTTON_DOMAINS = {"event", "button", "input_button"}
 # round-trip verbatim.
 KNOCK_ON_MY_WAY_ACTION = "knock_on_my_way"
 KNOCK_TURN_AWAY_ACTION = "knock_turn_away"
+# Third option on a food-delivery notification: nobody is coming to the
+# door, but the driver may set the food down somewhere sensible.
+KNOCK_SET_DOWN_ACTION = "knock_set_down"
 # A single-button acknowledgement (not an accept/reject pair like the two
 # above) -- used for a service_appointment notification, where there's no
 # "turn them away" decision to make (the technician is already expected),

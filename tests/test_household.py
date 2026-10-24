@@ -89,3 +89,28 @@ def test_a_failing_snapshot_still_sends_the_notification() -> None:
 
     notifier.notify.assert_called_once()
     assert notifier.notify.call_args.kwargs["image"] is None
+
+
+def test_set_down_action_speaks_the_set_down_phrase(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from knock.config import UnifiConfig
+    from knock.core.session_store import JSONFileSessionStore
+    from knock.integrations.unifi import UnifiBridge
+
+    bridge = UnifiBridge(
+        config=UnifiConfig(host="127.0.0.1", port=443, api_key="k", ring_chime_delay_seconds=0.0),
+        session_store=JSONFileSessionStore(tmp_path),
+        client=MagicMock(),
+    )
+    spoken: list[tuple[str, str]] = []
+
+    async def fake_speak(device_id: str, text: str) -> None:
+        spoken.append((device_id, text))
+
+    bridge.speak_to_visitor = fake_speak  # type: ignore[method-assign]
+
+    asyncio.run(bridge.handle_notification_action("knock_set_down", "cam1"))
+
+    assert spoken == [("cam1", "The homeowner says to find a safe spot to set it down. Thank you!")]

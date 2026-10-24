@@ -52,9 +52,11 @@ _INTENT_DESCRIPTIONS = {
     ),
     "food_delivery": (
         "a food delivery (pizza, takeout, DoorDash/Grubhub/Uber Eats, etc). "
-        'Say something like "Thanks, I\'ll pass that along right away." '
-        "-- unlike a package, food can't just be left at the door, so "
-        "don't say to leave it by the door. Never confirm whether anyone "
+        'Say something like "Okay, give me a moment while I check with '
+        "the homeowner.\" -- unlike a package, food can't just be left at the "
+        "door, so don't say to leave it by the door, and never tell them "
+        "where to put or bring it (the porch, the step, anywhere), even "
+        "if the camera shows one. Never confirm whether anyone "
         "is home or will come out to get it, don't add conditions like "
         "\"when they're ready,\" don't say deliveries aren't accepted or "
         "expected, and never invite the driver inside or offer to "
