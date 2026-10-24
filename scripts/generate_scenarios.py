@@ -54,6 +54,7 @@ import httpx
 from knock.config import OllamaConfig
 from knock.core.orchestrator import _LLM_CLASSIFIABLE_INTENTS
 from knock.core.scenario_descriptions import SCENARIO_DESCRIPTIONS
+from knock.core.scenario_filter import scenario_is_junk
 from knock.core.training_judge import classify_scenario_voice
 from knock.providers.llm.ollama import OllamaProvider
 
@@ -157,7 +158,7 @@ def generate_all_categories(
                 while len(collected[category]) < target and attempts < max_attempts:
                     attempts += 1
                     for line in generate_batch(provider, description, batch_size):
-                        if len(line.split()) < 3:
+                        if len(line.split()) < 3 or scenario_is_junk(line):
                             continue
                         key = line.lower()
                         if key in seen[category]:

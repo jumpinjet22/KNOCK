@@ -674,6 +674,8 @@ class Orchestrator:
         # deterministic policy/intent layers, only the LLM prompts below.
         decision = self.policy.evaluate(event.text)
         intent: str | None = None
+        raw_reply: str | None = None
+        replaced_by: str | None = None
         # Read before any state mutation below -- true only for a session's
         # very first call. No state at all (stateless/library use) never
         # greets, matching prior behavior exactly. `suppress_greeting` is for
@@ -741,13 +743,20 @@ class Orchestrator:
                     intent=last_intent,
                 )
             else:
-                response_text = self.policy.apply_style(
-                    self._text_for_intent(intent, event.text, event.scene, image=image)
+                trace: dict[str, str] = {}
+                generated_text = self._text_for_intent(
+                    intent, event.text, event.scene, image=image, trace=trace
                 )
+                response_text = self.policy.apply_style(generated_text)
+                if response_text == SAFE_RESPONSE_FALLBACK and generated_text != response_text:
+                    trace.setdefault("replaced_by", "policy")
                 if self.safety_check_provider is not None and self._llm_flags_as_unsafe(
                     response_text
                 ):
                     response_text = SAFE_RESPONSE_FALLBACK
+                    trace["replaced_by"] = "safety_check"
+                raw_reply = trace.get("raw")
+                replaced_by = trace.get("replaced_by")
                 response_text = _with_greeting(response_text, is_first_turn=is_first_turn)
                 response = ResponseDecision(
                     text=response_text,
@@ -784,6 +793,8 @@ class Orchestrator:
                 reason=response.reason,
                 intent=intent,
                 scene=event.scene,
+                raw_response_text=raw_reply,
+                replaced_by=replaced_by,
             )
         )
 
@@ -890,7 +901,13 @@ class Orchestrator:
         scene: SceneContext | None = None,
         *,
         image: bytes | None = None,
+        trace: dict[str, str] | None = None,
     ) -> str:
+        """The reply text for `intent`. `trace`, when given, is filled with
+        `raw` (the model's own words) and `replaced_by` (why they were not
+        used) for the audit log."""
+        if trace is None:
+            trace = {}
         if self.llm_provider is None:
             return response_for(intent)
 
@@ -909,7 +926,10 @@ class Orchestrator:
                 generated = self.llm_provider.generate(prompt).strip()
         except Exception as exc:  # noqa: BLE001 - best-effort, falls back below
             logger.warning("LLM response generation failed for intent %r: %s", intent, exc)
+            trace["replaced_by"] = "llm_error"
             return response_for(intent)
+
+        trace["raw"] = generated
 
         if with_image and contains_alarming_language(generated):
             # The brain saw the raw image with no vision backstop in
@@ -919,16 +939,19 @@ class Orchestrator:
                 "Image-informed reply flagged as alarming/speculative, using canned: %r",
                 generated,
             )
+            trace["replaced_by"] = "alarming"
             return response_for(intent)
 
         if _reply_is_confused(generated):
             logger.warning("Confused reply for %r, using canned: %r", intent, log_safe(generated))
+            trace["replaced_by"] = "confused"
             return response_for(intent)
 
         if intent == "food_delivery" and not _food_reply_on_policy(generated):
             logger.warning(
                 "Food-delivery reply broke policy, using canned: %r", log_safe(generated)
             )
+            trace["replaced_by"] = "food_policy"
             return response_for(intent)
 
         return generated or response_for(intent)
