@@ -2095,7 +2095,10 @@ def test_handle_event_falls_back_to_generic_text_when_transcript_is_empty(tmp_pa
     decision = asyncio.run(bridge.handle_event(_event()))
 
     assert decision is not None
-    assert "can't help" in decision.text.lower()
+    # Issue #50: a silent ring gets a fixed neutral prompt, never a reply
+    # classified from the placeholder text (or the camera id in it).
+    assert "didn't hear anything" in decision.text.lower()
+    assert "cam1" not in decision.text
 
 
 def test_unifi_config_rtsp_defaults() -> None:
