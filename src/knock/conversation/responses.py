@@ -8,7 +8,7 @@
 RESPONSES = {
     "delivery": "Thanks. You can leave the package by the door.",
     "delivery_signature_required": "Okay, I'll pass that along for a signature. Give me a sec.",
-    "food_delivery": "Thanks, I'll pass that along right away.",
+    "food_delivery": "Okay, give me a moment while I check on that right away.",
     "emergency": "If this is an emergency, call local emergency services now.",
     "religious_soliciting": "Thanks, but we're not interested in religious materials today.",
     "political_soliciting": (

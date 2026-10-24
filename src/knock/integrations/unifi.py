@@ -96,6 +96,7 @@ from knock.integrations.homeassistant import (
     KNOCK_COMING_TO_DOOR_ACTION,
     KNOCK_ON_MY_WAY_ACTION,
     KNOCK_PACKAGE_ACK_ACTION,
+    KNOCK_SET_DOWN_ACTION,
     KNOCK_TURN_AWAY_ACTION,
     HomeAssistantActionListener,
     HomeAssistantKnockListener,
@@ -140,6 +141,7 @@ _ERROR_SOUND = "error.wav"
 # at the door waiting to hear whether to stick around.
 _ON_MY_WAY_PHRASE = "Good news, the homeowner says they're on their way."
 _TURN_AWAY_PHRASE = "I'm sorry, but the homeowner isn't able to accept this right now."
+_SET_DOWN_PHRASE = "The homeowner says to find a safe spot to set it down. Thank you!"
 _COMING_TO_DOOR_PHRASE = "Good news, they'll be right at the door."
 
 # Upper bound on how long a reply waits for the scene capture (snapshot +
@@ -619,6 +621,8 @@ class UnifiBridge:
             await self.speak_to_visitor(device_id, _ON_MY_WAY_PHRASE)
         elif action_id == KNOCK_TURN_AWAY_ACTION:
             await self.speak_to_visitor(device_id, _TURN_AWAY_PHRASE)
+        elif action_id == KNOCK_SET_DOWN_ACTION:
+            await self.speak_to_visitor(device_id, _SET_DOWN_PHRASE)
         elif action_id == KNOCK_COMING_TO_DOOR_ACTION:
             await self.speak_to_visitor(device_id, _COMING_TO_DOOR_PHRASE)
         elif action_id == KNOCK_PACKAGE_ACK_ACTION:

@@ -1334,7 +1334,7 @@ def test_handle_event_notifies_home_assistant_on_a_food_delivery_with_action_but
     ha_notifier.notify.assert_called_once()
     actions = ha_notifier.notify.call_args.kwargs["actions"]
     titles = {action["title"] for action in actions}
-    assert titles == {"I'm on my way", "Turn them away"}
+    assert titles == {"I'm on my way", "Find a place to set it", "Turn them away"}
     assert ha_notifier.notify.call_args.kwargs["category"] == "approval"
 
 

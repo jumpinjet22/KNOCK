@@ -26,6 +26,7 @@ from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
     KNOCK_COMING_TO_DOOR_ACTION,
     KNOCK_ON_MY_WAY_ACTION,
+    KNOCK_SET_DOWN_ACTION,
     KNOCK_TURN_AWAY_ACTION,
     HomeAssistantNotifier,
     NotificationCategory,
@@ -85,7 +86,7 @@ class HouseholdNotifier:
         self._last_call_at: dict[str, float] = {}
         self._call_tasks: set[asyncio.Task[None]] = set()
 
-    def _approval_actions(self, device_id: str) -> list[dict[str, str]]:
+    def _approval_actions(self, device_id: str, *, set_down: bool = False) -> list[dict[str, str]]:
         """The "I'm on my way" / "Turn them away" button pair for a
         notification that needs a household decision, not just an FYI.
 
@@ -97,10 +98,14 @@ class HouseholdNotifier:
         """
         on_my_way = f"{KNOCK_ON_MY_WAY_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
         turn_away = f"{KNOCK_TURN_AWAY_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
-        return [
-            {"action": on_my_way, "title": "I'm on my way"},
-            {"action": turn_away, "title": "Turn them away"},
-        ]
+        actions = [{"action": on_my_way, "title": "I'm on my way"}]
+        if set_down:
+            # Food can't sit on a porch like a package, but the household
+            # may still be fine with the driver setting it somewhere safe.
+            set_down_id = f"{KNOCK_SET_DOWN_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
+            actions.append({"action": set_down_id, "title": "Find a place to set it"})
+        actions.append({"action": turn_away, "title": "Turn them away"})
+        return actions
 
     def _coming_to_door_action(self, device_id: str) -> list[dict[str, str]]:
         """A single acknowledgement button for a service_appointment
@@ -366,7 +371,7 @@ class HouseholdNotifier:
             await self._notify_household(
                 device_id,
                 summary,
-                actions=self._approval_actions(speak_device),
+                actions=self._approval_actions(speak_device, set_down=intent == "food_delivery"),
                 category="approval",
                 image_url=image_url,
                 door=door,
