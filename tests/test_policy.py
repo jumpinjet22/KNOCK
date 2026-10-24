@@ -346,3 +346,21 @@ def test_break_in_does_not_false_positive_on_taking_a_break() -> None:
     assert decision.allowed is True
     assert decision.reason == "normal"
     assert decision.flags == []
+
+
+def test_apply_style_catches_a_named_persons_return_time() -> None:
+    # Found live: "I will make sure to pass that along to Jon for you when
+    # he gets home" told the visitor Jon was away.
+    engine = PolicyEngine()
+    for phrase in [
+        "I will make sure to pass that along to Jon for you when he gets home.",
+        "She comes home later, I'll tell her you stopped by.",
+        "He comes back soon.",
+    ]:
+        assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
+
+
+def test_apply_style_still_allows_declining_to_say_when_anyone_is_back() -> None:
+    engine = PolicyEngine()
+    safe = "I can't say when anyone will be back, but I'll pass that along."
+    assert engine.apply_style(safe) == safe
