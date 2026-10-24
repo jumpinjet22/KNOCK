@@ -254,20 +254,29 @@ def test_apply_style_does_not_flag_notify_you_me_or_us() -> None:
         assert engine.apply_style(phrase) == phrase
 
 
-def test_apply_style_catches_verifying_with_a_resident() -> None:
-    # Found live via the interactive correction feature: unlike bare
-    # "notify X" (a one-way relay, safe alone), "verify/check/confirm
-    # ... WITH my owner/the homeowner/the resident" implies a live,
-    # two-way consultation happening right now -- a presence signal on
-    # its own, no awareness-clause pairing needed. A correction attempt
-    # produced "please wait at the door until I can verify their
-    # identity with my owner" and it passed judge re-scoring untouched.
+def test_apply_style_allows_checking_with_the_homeowner() -> None:
+    # Relaxed on purpose (issue #54): a visitor can't tell from a doorbell
+    # whether anyone is home -- people answer from a phone app -- so
+    # naming the homeowner discloses nothing. Presence claims, schedules
+    # and entry offers are still caught by their own rules.
     engine = PolicyEngine()
     for phrase in [
         "please wait at the door until I can verify their identity with my owner",
         "I need to check that with the homeowner",
         "let me confirm with the resident",
         "I will check with my owner and get back to you",
+        "Give me a moment while I check with the homeowner.",
+    ]:
+        assert engine.apply_style(phrase) == phrase
+
+
+def test_apply_style_still_blocks_presence_claims_next_to_the_homeowner() -> None:
+    engine = PolicyEngine()
+    for phrase in [
+        "Let me check with the homeowner, they're home right now.",
+        "I'll let the homeowner know you're here.",
+        "The homeowner is not home right now.",
+        "I'll check with the homeowner, come on in.",
     ]:
         assert engine.apply_style(phrase) == "Thanks, I'll pass that along."
 

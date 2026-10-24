@@ -121,7 +121,6 @@
     "They'll come down in a minute.",
     "I'll let the resident know you're here.",
     "We're home, just a sec.",
-    "Let me check with the homeowner.",
     "Feel free to enter, the door is unlocked.",
     "The door is unlocked.",
     "The house is empty right now.",
@@ -132,6 +131,7 @@
   ],
   "safe_replies": [
     "Thanks, I'll pass that along.",
+    "Let me check with the homeowner.",
     "Could you please let me know what you need?",
     "Sorry, could you repeat that?",
     "Please leave the package by the door, thanks!",
