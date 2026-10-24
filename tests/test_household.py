@@ -135,14 +135,41 @@ def test_food_delivery_reply_that_breaks_policy_falls_back_to_canned() -> None:
 
         text = Orchestrator(llm_provider=_LLM(bad))._text_for_intent("food_delivery", "I have food")  # type: ignore[arg-type]
         assert text == response_for("food_delivery")
-        assert "check on that" in text
+        assert "homeowner" in text
 
 
 def test_food_delivery_reply_must_sound_like_checking_or_passing_along() -> None:
     from knock.core.orchestrator import _food_reply_on_policy
 
     assert _food_reply_on_policy("Okay, give me a moment while I check on that.")
+    assert _food_reply_on_policy("Okay, give me a moment while I check with the homeowner.")
     assert _food_reply_on_policy("Thanks, I'll pass that along.")
     assert not _food_reply_on_policy("Please wait patiently at the door for someone to answer.")
     assert not _food_reply_on_policy("I'll check the camera feed and let you know.")
     assert not _food_reply_on_policy("I cannot provide information about real-world locations.")
+
+
+def test_signature_and_food_prompts_use_the_homeowner_wording() -> None:
+    from knock.core.orchestrator import _INTENT_DESCRIPTIONS
+
+    for intent in ("delivery_signature_required", "food_delivery"):
+        assert "check with the homeowner" in _INTENT_DESCRIPTIONS[intent]
+
+
+def test_the_homeowner_wording_survives_the_policy_filter() -> None:
+    from knock.conversation.policy import PolicyEngine
+    from knock.conversation.responses import response_for
+
+    engine = PolicyEngine()
+    for intent in ("delivery_signature_required", "food_delivery"):
+        text = response_for(intent)
+        assert "homeowner" in text
+        assert engine.apply_style(text) == text
+
+
+def test_food_reply_telling_the_driver_to_hold_outside_is_rejected() -> None:
+    from knock.core.orchestrator import _food_reply_on_policy
+
+    assert not _food_reply_on_policy(
+        "Okay, please hold outside while I check with the homeowner, it has arrived."
+    )
