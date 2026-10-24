@@ -56,6 +56,21 @@ def _food_reply_on_policy(text: str) -> bool:
     return bool(_FOOD_REPLY_EXPECTED.search(text)) and not _FOOD_REPLY_OFF_POLICY.search(text)
 
 
+# Replies that talk to the wrong person ("while I notify you"), refuse as an
+# assistant ("I cannot provide information"), or claim abilities KNOCK does
+# not have ("check the camera feed"). Seen in real production visits; any of
+# them falls back to the intent's canned line.
+_CONFUSED_REPLY = re.compile(
+    r"\b(?:notify you|i cannot provide|i can't provide|i'm unable to provide|"
+    r"as an ai|language model|camera feed|real-world)\b|\bi (?:cannot|can't) answer the door\b",
+    re.IGNORECASE,
+)
+
+
+def _reply_is_confused(text: str) -> bool:
+    return bool(_CONFUSED_REPLY.search(text))
+
+
 # Said when the doorbell rang (or something was detected) but the listen
 # window caught no speech. The greeting already asked how it can help.
 SILENT_VISITOR_REPLY = "Sorry, I didn't hear anything. Could you tell me how I can help?"
@@ -892,6 +907,10 @@ class Orchestrator:
                 "Image-informed reply flagged as alarming/speculative, using canned: %r",
                 generated,
             )
+            return response_for(intent)
+
+        if _reply_is_confused(generated):
+            logger.warning("Confused reply for %r, using canned: %r", intent, log_safe(generated))
             return response_for(intent)
 
         if intent == "food_delivery" and not _food_reply_on_policy(generated):
