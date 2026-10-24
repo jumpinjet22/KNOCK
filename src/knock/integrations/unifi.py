@@ -473,6 +473,9 @@ class UnifiBridge:
     def _call_tasks(self) -> set[asyncio.Task[None]]:
         return self.household._call_tasks
 
+    async def _notify_nobody_visible(self, device_id: str) -> None:
+        await self.household.notify_nobody_visible(device_id)
+
     async def _notify_household(
         self,
         device_id: str,

@@ -547,6 +547,14 @@ class UnifiConfig(BaseModel):
     # applied for an actual `ring` (see UnifiBridge.handle_event); a silent
     # smart-detect trigger has no chime to wait out.
     ring_chime_delay_seconds: float = 2.0
+    # Delivery drivers often ring and leave. When on, KNOCK looks at the door
+    # before it speaks and stays silent (just notifying the household) if no
+    # one is there. Off by default so nothing changes until it is enabled.
+    require_visitor_present: bool = False
+    # How many snapshots to look through, and how long between them, before
+    # deciding nobody is there (a visitor may be standing off to the side).
+    visitor_check_attempts: int = 3
+    visitor_check_interval_seconds: float = 1.5
     # Below this RMS loudness, captured audio is treated as silence and
     # never sent to the STT provider -- Whisper (like most STT models) will
     # confidently hallucinate *something* from near-silent audio rather
@@ -635,6 +643,13 @@ class UnifiConfig(BaseModel):
             ring_chime_delay_seconds=float(
                 os.environ.get("KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", "2.0")
             ),
+            require_visitor_present=_bool(
+                os.environ.get("KNOCK_UNIFI_REQUIRE_VISITOR_PRESENT", "false")
+            ),
+            visitor_check_attempts=int(os.environ.get("KNOCK_UNIFI_VISITOR_CHECK_ATTEMPTS", "3")),
+            visitor_check_interval_seconds=float(
+                os.environ.get("KNOCK_UNIFI_VISITOR_CHECK_INTERVAL_SECONDS", "1.5")
+            ),
             silence_rms_threshold=float(
                 os.environ.get("KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", "60.0")
             ),
@@ -684,6 +699,19 @@ class UnifiConfig(BaseModel):
             listen_seconds=_resolve("KNOCK_UNIFI_LISTEN_SECONDS", s, "listen_seconds", 10.0, float),
             ring_chime_delay_seconds=_resolve(
                 "KNOCK_UNIFI_RING_CHIME_DELAY_SECONDS", s, "ring_chime_delay_seconds", 2.0, float
+            ),
+            require_visitor_present=_resolve(
+                "KNOCK_UNIFI_REQUIRE_VISITOR_PRESENT", s, "require_visitor_present", False, _bool
+            ),
+            visitor_check_attempts=_resolve(
+                "KNOCK_UNIFI_VISITOR_CHECK_ATTEMPTS", s, "visitor_check_attempts", 3, int
+            ),
+            visitor_check_interval_seconds=_resolve(
+                "KNOCK_UNIFI_VISITOR_CHECK_INTERVAL_SECONDS",
+                s,
+                "visitor_check_interval_seconds",
+                1.5,
+                float,
             ),
             silence_rms_threshold=_resolve(
                 "KNOCK_UNIFI_SILENCE_RMS_THRESHOLD", s, "silence_rms_threshold", 60.0, float
