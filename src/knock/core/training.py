@@ -233,16 +233,31 @@ def build_training_records(entry: AuditEntry, review: TrainingReview) -> list[Tr
 
 
 def export_training_jsonl(
-    audit_log: JSONLAuditLog, review_store: TrainingReviewStore, *, limit: int = 10000
+    audit_log: JSONLAuditLog,
+    review_store: TrainingReviewStore,
+    *,
+    limit: int = 10000,
+    drop_replaced: bool = False,
 ) -> str:
-    """Every approved entry's training records, one JSON object per line."""
+    """Every approved entry's training records, one JSON object per line.
+
+    `drop_replaced` drops the reply record of any entry whose reply a KNOCK
+    filter swapped for a fixed fallback line (`AuditEntry.replaced_by`), so a
+    model isn't taught the filter's output as if it were the teacher's own
+    answer. Its intent-classification record is kept.
+    """
     reviews = review_store.all()
     lines: list[str] = []
     for entry in audit_log.recent(limit=limit):
         review = reviews.get(example_key(entry))
         if review is None or review.status != "approved":
             continue
-        lines.extend(record.model_dump_json() for record in build_training_records(entry, review))
+        records = build_training_records(entry, review)
+        if drop_replaced and entry.replaced_by is not None:
+            # The intent label is still good; only the reply text is the
+            # filter's, not the model's.
+            records = [record for record in records if record.task == "classification"]
+        lines.extend(record.model_dump_json() for record in records)
     return "".join(f"{line}\n" for line in lines)
 
 

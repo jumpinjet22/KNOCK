@@ -51,9 +51,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--limit", type=int, default=10000)
+    parser.add_argument(
+        "--keep-replaced",
+        action="store_true",
+        help="also export replies a KNOCK filter replaced with a fixed fallback line "
+        "(dropped by default so the model learns the teacher's words, not the filter's)",
+    )
     args = parser.parse_args()
 
-    exported = export_training_jsonl(JSONLAuditLog(), TrainingReviewStore(), limit=args.limit)
+    exported = export_training_jsonl(
+        JSONLAuditLog(),
+        TrainingReviewStore(),
+        limit=args.limit,
+        drop_replaced=not args.keep_replaced,
+    )
     records = convert(exported)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

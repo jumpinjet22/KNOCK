@@ -35,6 +35,14 @@ class AuditEntry(BaseModel):
     reason: str
     intent: str | None = None
     scene: SceneContext | None = None
+    raw_response_text: str | None = None
+    """What the language model said before any KNOCK rewrite (None when no
+    model produced a reply). Lets training data tell a teacher's own words
+    from a fixed fallback line a filter swapped in."""
+    replaced_by: str | None = None
+    """Why `response_text` is not the model's own reply: "llm_error",
+    "alarming", "confused", "food_policy", "policy" or "safety_check".
+    None means the visitor heard the model's reply (greeting aside)."""
 
 
 class AuditLog(Protocol):
