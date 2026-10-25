@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import time
 from collections import Counter, defaultdict
@@ -50,6 +51,7 @@ from knock.config import OllamaConfig
 from knock.core.audit import JSONLAuditLog
 from knock.core.events import VisitorEvent
 from knock.core.orchestrator import Orchestrator
+from knock.core.synthetic_scenes import sample_scene
 from knock.providers.llm.ollama import OllamaProvider
 
 
@@ -84,17 +86,24 @@ def run_model(
     timeout: float,
     repeats: int,
     audit_log: JSONLAuditLog,
+    with_scenes: bool = False,
+    rng: random.Random | None = None,
 ) -> list[dict[str, object]]:
     provider = OllamaProvider(
         config=OllamaConfig(host=host, port=port, model=model, timeout=timeout)
     )
     orchestrator = Orchestrator(llm_provider=provider, audit_log=audit_log)
     results: list[dict[str, object]] = []
+    rng = rng or random.Random()
     try:
         for i, scenario in enumerate(scenarios):
             for rep in range(repeats):
                 t0 = time.monotonic()
-                event = VisitorEvent(text=scenario, timestamp=datetime.now(UTC))
+                event = VisitorEvent(
+                    text=scenario,
+                    timestamp=datetime.now(UTC),
+                    scene=sample_scene(rng) if with_scenes else None,
+                )
                 decision = orchestrator.respond(event)
                 elapsed = time.monotonic() - t0
                 print(
@@ -176,6 +185,13 @@ def main() -> int:
         "--audit-log", type=Path, default=None, help="override the default audit.jsonl path"
     )
     parser.add_argument(
+        "--with-scenes",
+        action="store_true",
+        help="attach a random synthetic camera scene to each call (incl. empty-frame and "
+        "injected-sign-text cases) so training inputs match production prompts",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="seed for --with-scenes")
+    parser.add_argument(
         "--list-models",
         action="store_true",
         help="list models pulled on the target Ollama server and exit",
@@ -210,6 +226,8 @@ def main() -> int:
                 timeout=args.ollama_timeout,
                 repeats=args.repeats,
                 audit_log=audit_log,
+                with_scenes=args.with_scenes,
+                rng=random.Random(args.seed),
             )
         )
 
