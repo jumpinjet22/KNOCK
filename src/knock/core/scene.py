@@ -42,6 +42,20 @@ class PackageLabel(BaseModel):
     tracking_number: str | None = None
     recipient_name: str | None = None
 
+    def headline(self) -> str | None:
+        """E.g. "UPS package for Jon (tracking ...6784)"; None when no carrier
+        was legible -- a recipient or number alone doesn't say enough to
+        lead a notification with.
+        """
+        if not self.carrier:
+            return None
+        parts = [self.carrier, "package"]
+        if self.recipient_name:
+            parts.append(f"for {self.recipient_name}")
+        if self.tracking_number:
+            parts.append(f"(tracking ...{self.tracking_number[-4:]})")
+        return " ".join(parts)
+
 
 class SceneObservation(BaseModel):
     """What a vision model reported seeing in one snapshot.

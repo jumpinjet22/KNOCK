@@ -17,7 +17,7 @@ import knock.integrations.package_alerts as package_alerts_module
 import knock.integrations.unifi as unifi_module
 from knock.config import UnifiConfig
 from knock.core.package_log import JSONLPackageLog
-from knock.core.scene import SceneObservation
+from knock.core.scene import PackageLabel, SceneObservation
 from knock.core.session_store import JSONFileSessionStore
 from knock.core.snapshot_store import SnapshotStore
 from knock.integrations.package_alerts import record_rtsp_clip
@@ -44,6 +44,24 @@ class _Vision:
     def observe(self, image: bytes) -> SceneObservation:
         self.looks += 1
         return self._observations.pop(0) if len(self._observations) > 1 else self._observations[0]
+
+
+class _LabelVision(_Vision):
+    """A vision model that can also read shipping labels."""
+
+    def __init__(self, label: PackageLabel | Exception | None, *observations) -> None:
+        super().__init__(*(observations or (_THERE,)))
+        self._label = label
+        self.label_images: list[bytes] = []
+
+    def read_package_label(self, image: bytes) -> PackageLabel | None:
+        self.label_images.append(image)
+        if isinstance(self._label, Exception):
+            raise self._label
+        return self._label
+
+
+_UPS = PackageLabel(carrier="UPS", recipient_name="Jon", tracking_number="1Z999AA10123456784")
 
 
 def _event(kind: str, event_id: str) -> SimpleNamespace:
@@ -120,6 +138,83 @@ async def _settle() -> None:
 @pytest.fixture(autouse=True)
 def _no_recheck_delay(monkeypatch) -> None:
     monkeypatch.setattr(package_alerts_module, "_REMOVAL_RECHECK_SECONDS", 0.0)
+
+
+# -- the shipping label --------------------------------------------------------------
+
+
+def test_the_alert_leads_with_the_label_read_off_its_own_photo(tmp_path) -> None:
+    vision = _LabelVision(_UPS)
+    h = _Harness(tmp_path, vision=vision)
+
+    asyncio.run(h.deliver())
+
+    assert h.messages() == [
+        "A UPS package for Jon (tracking ...6784) was detected at the door (camera: cam1)."
+    ]
+    assert vision.label_images == [b"package-lens"]
+    image_url = h.notifier.notify.call_args.kwargs["image"]
+    assert h.snapshots.take(image_url.rsplit("/", 1)[1]) == b"package-lens"
+    # One package-camera fetch serves both the photo and the label.
+    assert h.client.get_public_api_camera_snapshot.await_count == 1
+
+
+def test_a_carrier_starting_with_a_vowel_gets_an(tmp_path) -> None:
+    h = _Harness(tmp_path, vision=_LabelVision(PackageLabel(carrier="Amazon")))
+
+    asyncio.run(h.deliver())
+
+    assert h.messages() == ["An Amazon package was detected at the door (camera: cam1)."]
+
+
+@pytest.mark.parametrize(
+    "label",
+    [None, PackageLabel(recipient_name="Jon"), RuntimeError("ollama down")],
+    ids=["nothing-legible", "no-carrier", "read-failed"],
+)
+def test_without_a_usable_label_the_alert_is_unchanged(tmp_path, label) -> None:
+    h = _Harness(tmp_path, vision=_LabelVision(label))
+
+    asyncio.run(h.deliver())
+
+    assert h.messages() == ["A package was detected at the door (camera: cam1)."]
+    assert h.notifier.notify.call_args.kwargs["image"] is not None
+    assert h.kinds() == ["detected", "notified"]
+
+
+def test_a_failed_package_snapshot_still_sends_the_alert(tmp_path) -> None:
+    h = _Harness(tmp_path, vision=_LabelVision(_UPS))
+    h.client.get_public_api_camera_snapshot.side_effect = RuntimeError("camera offline")
+
+    asyncio.run(h.deliver())
+
+    assert h.messages() == ["A package was detected at the door (camera: cam1)."]
+    assert h.notifier.notify.call_args.kwargs["image"] is None
+
+
+def test_reminders_and_removals_name_the_labelled_package(tmp_path) -> None:
+    h = _Harness(
+        tmp_path,
+        vision=_LabelVision(_UPS, _THERE, _GONE),
+        package_reminder_hours=1e-6,
+        package_clip_seconds=0,
+    )
+
+    async def scenario() -> None:
+        await h.deliver()
+        await _settle()
+
+    asyncio.run(scenario())
+
+    assert h.kinds() == ["detected", "notified", "reminded", "removed"]
+    reminder, removal = h.messages()[1:]
+    assert reminder.startswith(
+        "Reminder: a UPS package for Jon (tracking ...6784) has been at the door"
+    )
+    assert removal == (
+        "A UPS package for Jon (tracking ...6784) is no longer at the door, and nobody"
+        " marked it as received (camera: cam1)."
+    )
 
 
 # -- reminders ---------------------------------------------------------------------

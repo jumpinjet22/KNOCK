@@ -9,7 +9,9 @@ Lifecycle of one package, per camera:
 1. **Detected.** Protect's own package smart-detect fires. Never a
    conversation -- there's nobody to talk to.
 2. **Notified.** A "package"-category notification with the package-camera
-   photo and a "Got it" button. Held back while a visitor is still at the
+   photo and a "Got it" button -- led by the shipping label ("A UPS package
+   for Jon (tracking ...6784) was left at the door") when a vision provider
+   can read one off that photo. Held back while a visitor is still at the
    door (a running conversation, or an open person detection on that
    camera) and sent the moment they walk away.
 3. **Pending** until someone taps "Got it". While pending:
@@ -48,12 +50,13 @@ from uiprotect import EventChange
 
 from knock.config import UnifiConfig
 from knock.core.package_log import PackageEvent, PackageEventKind
+from knock.core.scene import PackageLabel
 from knock.integrations.homeassistant import (
     ACTION_DEVICE_ID_SEP,
     KNOCK_PACKAGE_ACK_ACTION,
     package_notification_tag,
 )
-from knock.providers.vision.base import observe_scene
+from knock.providers.vision.base import observe_scene, read_package_label
 
 if TYPE_CHECKING:
     from knock.integrations.unifi import UnifiBridge
@@ -140,6 +143,8 @@ class _PendingPackage:
     """A notified package nobody has tapped "Got it" on yet."""
 
     notified_at: float
+    # What the shipping label said, if it was legible when first notified.
+    label: PackageLabel | None = None
     reminders_sent: int = 0
     # Main-camera stills of whoever has come by since the last removal check.
     evidence: list[bytes] = field(default_factory=list)
@@ -151,6 +156,17 @@ class _PendingPackage:
     # A removal check is already looking -- a person ENDED and a
     # conversation ending can both signal the same departure.
     checking: bool = False
+
+
+def _package_noun(label: PackageLabel | None) -> str:
+    """E.g. "a UPS package for Jon (tracking ...6784)", "an Amazon package" or
+    just "a package". Carrier names are said letter by letter (UPS, USPS)
+    or as words, so "an" goes only before A/E/I/O.
+    """
+    headline = label.headline() if label is not None else None
+    if not headline:
+        return "a package"
+    return f"{'an' if headline[0].upper() in 'AEIO' else 'a'} {headline}"
 
 
 class PackageAlerts:
@@ -269,15 +285,42 @@ class PackageAlerts:
         await self._send_alert(device_id, left_by_visitor=True)
 
     async def _send_alert(self, device_id: str, *, left_by_visitor: bool) -> None:
+        image_url, label = await self._photo_and_label(device_id)
+        what = _package_noun(label)
+        what = what[0].upper() + what[1:]
         message = (
-            f"A package was left at the door (camera: {device_id})."
+            f"{what} was left at the door (camera: {device_id})."
             if left_by_visitor
-            else f"A package was detected at the door (camera: {device_id})."
+            else f"{what} was detected at the door (camera: {device_id})."
         )
-        image_url = await self._bridge._build_snapshot_url(device_id, package=True)
         await self._notify(device_id, message, image_url)
         self._record(device_id, "notified")
-        self._start_pending(device_id)
+        self._start_pending(device_id, label)
+
+    async def _photo_and_label(self, device_id: str) -> tuple[str | None, PackageLabel | None]:
+        """The package-camera photo's link, plus the shipping label read off
+        that same photo when there's a vision provider. Without one this is
+        just `_build_snapshot_url`; with one, any failure only costs the
+        label (or the photo), never the alert.
+        """
+        vision_provider = self._bridge.vision_provider
+        if vision_provider is None:
+            return await self._bridge._build_snapshot_url(device_id, package=True), None
+        try:
+            snapshot = await self._bridge.client.get_public_api_camera_snapshot(
+                device_id, package=True
+            )
+        except Exception as exc:  # noqa: BLE001 - photo and label are best-effort
+            logger.info("Package-camera snapshot for %s failed: %s", device_id, exc)
+            return None, None
+        if snapshot is None:
+            return None, None
+        try:
+            label = await asyncio.to_thread(read_package_label, vision_provider, snapshot)
+        except Exception as exc:  # noqa: BLE001 - the label is a bonus
+            logger.info("Package label read for %s failed: %s", device_id, exc)
+            label = None
+        return self._bridge._snapshot_url_for(snapshot), label
 
     async def _notify(self, device_id: str, message: str, image_url: str | None) -> None:
         ack = f"{KNOCK_PACKAGE_ACK_ACTION}{ACTION_DEVICE_ID_SEP}{device_id}"
@@ -292,13 +335,13 @@ class PackageAlerts:
 
     # -- pending: reminders + removal watch --------------------------------------
 
-    def _start_pending(self, device_id: str) -> None:
+    def _start_pending(self, device_id: str, label: PackageLabel | None = None) -> None:
         # A second box before the first was acknowledged keeps one pending
         # record per camera, matching the one notification per camera.
         previous = self._pending.pop(device_id, None)
         if previous is not None:
             self._discard(previous)
-        pending = _PendingPackage(notified_at=time.monotonic())
+        pending = _PendingPackage(notified_at=time.monotonic(), label=label)
         self._pending[device_id] = pending
         if self._config.package_reminder_hours > 0:
             pending.reminder_task = self._spawn(self._remind(device_id, pending))
@@ -327,9 +370,9 @@ class PackageAlerts:
             pending.reminders_sent += 1
             hours = (time.monotonic() - pending.notified_at) / 3600
             message = (
-                f"Reminder: a package has been at the door for about {hours:.0f} hour"
-                f"{'' if round(hours) == 1 else 's'} and hasn't been marked as received "
-                f"(camera: {device_id})."
+                f"Reminder: {_package_noun(pending.label)} has been at the door for about"
+                f" {hours:.0f} hour{'' if round(hours) == 1 else 's'} and hasn't been marked as"
+                f" received (camera: {device_id})."
             )
             image_url = await self._bridge._build_snapshot_url(device_id, package=True)
             await self._notify(device_id, message, image_url)
@@ -432,9 +475,10 @@ class PackageAlerts:
 
         photo = pending.evidence[0] if pending.evidence else after
         image_url = self._bridge._snapshot_url_for(photo) if photo is not None else None
+        what = _package_noun(pending.label)
         message = (
-            "A package is no longer at the door, and nobody marked it as received"
-            f" (camera: {device_id})."
+            f"{what[0].upper()}{what[1:]} is no longer at the door, and nobody marked it as"
+            f" received (camera: {device_id})."
         )
         if pending.evidence:
             message += " The photo shows who came by."
