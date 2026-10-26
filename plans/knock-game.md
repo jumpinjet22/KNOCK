@@ -1,8 +1,10 @@
 # Plan: a public daily game that crowd-reviews KNOCK training data
 
-**Status:** design only. Nothing here is built yet. The game lives in its own
-repository; this file is kept in KNOCK because the export/import contract
-(section 7) is KNOCK's side of the deal.
+**Status:** Phase 0 is built (section 7). The game itself lives in
+`jumpinjet22/Dorman-the-training-game`. This file is kept in KNOCK because
+the export/import contract (section 7) is KNOCK's side of the deal. The
+frontend is server-rendered HTML from the Rust API (askama + a little
+vanilla JS), not a separate TypeScript app.
 
 Working title: **"Who's At The Door?"** (rename freely).
 
@@ -167,10 +169,18 @@ in memory.
 
 ## 7. KNOCK side: the export/import contract
 
-**`scripts/export_game_batch.py`** (new)
+Both scripts exist, with tests in `tests/test_game_batch_scripts.py`. Their
+docstrings are the format spec (`knock-game-batch` v1 and
+`knock-game-consensus` v1).
+
+**`scripts/export_game_batch.py`**
 - `--audit-log PATH` is required. It refuses
-  `~/.local/share/knock/audit.jsonl` and anything that isn't explicitly
-  marked synthetic.
+  `~/.local/share/knock/audit.jsonl`. "Marked synthetic" means the log has
+  the `<stem>.manifest.jsonl` that `generate_training_data.py` writes, and
+  only entries whose key is in that manifest are exported.
+- Pair items are keyed `pair:<keyA>:<keyB>`. Their answer is one reply's key
+  or `both_bad`. Entries with a judge voice veto, and replies a filter
+  replaced, are left out.
 - Emits `batch.json`: for each entry, `knock_key` (= `example_key()`),
   visitor text, scene description, generator intent, the candidate replies
   for pair items, and the judge scores. Gold items are taken from entries
@@ -178,14 +188,17 @@ in memory.
 - It contains no timestamps, no camera/door IDs, no names, nothing from
   real config.
 
-**`scripts/import_game_consensus.py`** (new)
+**`scripts/import_game_consensus.py`**
 - Reads `consensus-<date>.json` from the game.
 - `settled` items: writes a `TrainingReview` (`approved`, with
   `intent_override` when the crowd disagreed with the generator) and a
   `comment` noting crowd share and weight.
 - `disputed` items: left `pending` with a comment, so they show up on the
   Training page's existing needs-attention queue for you.
-- It never overwrites a review a human already made.
+- A settled pair approves the winning reply. A `both_bad` verdict is
+  handled like a dispute.
+- It never overwrites a review a human already made, and it only writes
+  keys that exist in the `--audit-log` it is given.
 
 ## 8. Public-facing obligations
 
