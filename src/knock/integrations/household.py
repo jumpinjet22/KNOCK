@@ -371,14 +371,7 @@ class HouseholdNotifier:
                 if visitor_event.scene is not None and visitor_event.scene.observation is not None
                 else None
             )
-            summary = details.summary
-            if label is not None and label.carrier:
-                parts = [label.carrier, "package"]
-                if label.recipient_name:
-                    parts.append(f"for {label.recipient_name}")
-                if label.tracking_number:
-                    parts.append(f"(tracking ...{label.tracking_number[-4:]})")
-                summary = " ".join(parts)
+            summary = (label.headline() if label is not None else None) or details.summary
             await self._notify_household(
                 device_id,
                 summary,
