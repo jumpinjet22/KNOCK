@@ -85,6 +85,11 @@ SCENARIO_DESCRIPTIONS: dict[str, str] = {
         "emergency -- someone lingering, peering in windows, casing the "
         "property, making a vague threat, or acting evasive"
     ),
+    "not_addressed": (
+        "overheard speech near the door that is not directed at the doorbell "
+        "or whoever answers -- one side of a phone call, a remark to a "
+        "companion, a parent talking to a child, muttering to themselves"
+    ),
     "unknown": (
         "vague, off-topic, or small-talk things a visitor might say that "
         "don't fit any specific category -- idle chatter, an unrelated "
