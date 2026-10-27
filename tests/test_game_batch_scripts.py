@@ -154,6 +154,35 @@ def test_no_metadata_leaks_into_the_batch(tmp_path, monkeypatch) -> None:
     assert item["scene"] == "A person holding a box; visible text: 'FRAGILE'"
 
 
+def test_the_scene_line_does_not_repeat_the_summary() -> None:
+    def line(**observed: object) -> str | None:
+        return export.scene_for_players(
+            SceneContext(observation=SceneObservation.model_validate(observed))
+        )
+
+    assert (
+        line(summary="A person holding a pizza bag.", carrying=["pizza bag"])
+        == "A person holding a pizza bag"
+    )
+    assert (
+        line(
+            summary="A courier in a UPS uniform with a box",
+            carrying=["Box", "clipboard"],
+            uniform_or_logo="ups",
+            vehicle="van",
+        )
+        == "A courier in a UPS uniform with a box; carrying clipboard; van nearby"
+    )
+    assert line(summary="An empty porch, nobody in frame", people_count=0) == (
+        "An empty porch, nobody in frame"
+    )
+    # Whole phrases only: "bag" isn't already said by "baggage".
+    assert line(summary="A person with baggage", carrying=["bag"]) == (
+        "A person with baggage; carrying bag"
+    )
+    assert line(carrying=["flowers"], visible_text="  ") == "carrying flowers"
+
+
 # -- export: item building ---------------------------------------------------
 
 

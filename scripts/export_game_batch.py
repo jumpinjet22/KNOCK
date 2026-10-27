@@ -42,6 +42,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -99,26 +100,38 @@ def synthetic_keys(audit_log_path: Path) -> set[str]:
     return keys
 
 
+def _adds_to(summary: str, detail: str | None) -> bool:
+    """Whether `detail` says something the summary doesn't already: set, and
+    not already in the summary as a whole phrase."""
+    if not detail or not detail.strip():
+        return False
+    pattern = rf"\b{re.escape(detail.strip())}\b"
+    return re.search(pattern, summary, re.IGNORECASE) is None
+
+
 def scene_for_players(scene: SceneContext | None) -> str | None:
     """What the camera saw, as one short line a player can read. Leaves out
-    the camera name, zones and capture time on purpose.
+    the camera name, zones and capture time on purpose, and any detail the
+    summary already mentions ("holding a pizza bag; carrying a pizza bag").
     """
     if scene is None:
         return None
     parts: list[str] = []
     obs = scene.observation
     if obs is not None:
-        if obs.summary:
-            parts.append(obs.summary.rstrip("."))
-        if obs.people_count == 0:
+        summary = obs.summary.strip()
+        if summary:
+            parts.append(summary.rstrip("."))
+        if obs.people_count == 0 and _adds_to(summary, "nobody in frame"):
             parts.append("nobody in frame")
-        if obs.carrying:
-            parts.append("carrying " + ", ".join(obs.carrying))
-        if obs.uniform_or_logo:
+        carrying = [thing for thing in obs.carrying if _adds_to(summary, thing)]
+        if carrying:
+            parts.append("carrying " + ", ".join(carrying))
+        if _adds_to(summary, obs.uniform_or_logo):
             parts.append(f"wearing {obs.uniform_or_logo}")
-        if obs.vehicle:
+        if _adds_to(summary, obs.vehicle):
             parts.append(f"{obs.vehicle} nearby")
-        if obs.visible_text:
+        if _adds_to(summary, obs.visible_text):
             parts.append(f"visible text: '{obs.visible_text}'")
     elif scene.detected_labels:
         parts.append("camera detected: " + ", ".join(scene.detected_labels))
