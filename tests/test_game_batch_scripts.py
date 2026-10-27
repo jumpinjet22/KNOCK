@@ -218,6 +218,58 @@ def test_builds_intent_and_pair_items_with_gold_from_human_reviews(tmp_path, mon
     )
 
 
+def _gold_and_plain_log(tmp_path) -> tuple[AuditEntry, AuditEntry]:
+    gold = _entry(1, "Package for you", "Thanks, please leave it on the porch.")
+    plain = _entry(2, "Is Mark here?", "He isn't available right now.", intent="person_lookup")
+    _write_log(tmp_path, [gold, plain])
+    reviews = TrainingReviewStore(tmp_path / "reviews.json")
+    reviews.set(example_key(gold), TrainingReview(status="approved", intent_override="delivery"))
+    return gold, plain
+
+
+def test_explanations_are_attached_by_key(tmp_path, monkeypatch) -> None:
+    gold, plain = _gold_and_plain_log(tmp_path)
+    notes = tmp_path / "notes.json"
+    notes.write_text(
+        json.dumps(
+            {example_key(gold): "Cue: a package.", example_key(plain): "Cue: names a person."}
+        )
+    )
+
+    code, batch = _run_export(tmp_path, monkeypatch, "--explanations", str(notes))
+
+    assert code == 0
+    by_key = {i["knock_key"]: i for i in batch["items"] if i["mode"] == "intent"}
+    assert by_key[example_key(gold)]["explanation"] == "Cue: a package."
+    assert by_key[example_key(plain)]["explanation"] == "Cue: names a person."
+
+
+def test_explanations_that_would_reveal_gold_are_refused(tmp_path, monkeypatch) -> None:
+    gold, _ = _gold_and_plain_log(tmp_path)
+    notes = tmp_path / "notes.json"
+    notes.write_text(json.dumps({example_key(gold): "Cue: a package."}))  # gold only
+
+    code, _ = _run_export(tmp_path, monkeypatch, "--explanations", str(notes))
+
+    assert code == 2
+
+
+def test_overlong_explanations_are_refused(tmp_path, monkeypatch) -> None:
+    gold, plain = _gold_and_plain_log(tmp_path)
+    notes = tmp_path / "notes.json"
+    notes.write_text(json.dumps({example_key(gold): "x" * 401, example_key(plain): "ok"}))
+
+    code, _ = _run_export(tmp_path, monkeypatch, "--explanations", str(notes))
+
+    assert code == 2
+
+
+def test_no_explanations_flag_means_no_explanation_field(tmp_path, monkeypatch) -> None:
+    _gold_and_plain_log(tmp_path)
+    _, batch = _run_export(tmp_path, monkeypatch)
+    assert all("explanation" not in i for i in batch["items"])
+
+
 def test_skips_vetoed_unclassified_and_filter_replaced_entries(tmp_path, monkeypatch) -> None:
     resident = _entry(1, "We're not interested, thanks", "Okay!")
     blocked = _entry(2, "Is anyone home?", "I can't help with that.", intent=None)

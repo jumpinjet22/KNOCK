@@ -20,7 +20,7 @@ the internet. It only ever reads a synthetic audit log:
 Usage:
     python scripts/export_game_batch.py --audit-log PATH --out batch.json \\
         [--reviews PATH] [--metadata-store PATH] [--batch NAME] \\
-        [--max-pairs-per-line 3]
+        [--max-pairs-per-line 3] [--explanations PATH]
 
 Format (`"format": "knock-game-batch", "version": 1`), one object per item:
 
@@ -31,7 +31,8 @@ Format (`"format": "knock-game-batch", "version": 1`), one object per item:
                   "replies": [{"knock_key", "text", "judge"}, {...}]}
 
 An intent item's answer is an intent name; a pair item's answer is one
-reply's `knock_key` or "both_bad". `gold_answer` is set only where a human
+reply's `knock_key` or "both_bad". An item may also carry an optional
+`explanation` (see `--explanations`). `gold_answer` is set only where a human
 already decided (an approved review for intent items; one reply approved and
 the other rejected for pair items).
 """
@@ -62,6 +63,8 @@ BATCH_FORMAT = "knock-game-batch"
 BATCH_VERSION = 1
 PRODUCTION_AUDIT_LOG = Path.home() / ".local" / "share" / "knock" / "audit.jsonl"
 _MAX_SCENE_CHARS = 200
+_MAX_EXPLANATION_CHARS = 400  # the game refuses anything longer
+_MAX_COVERAGE_GAP = 0.25  # the game refuses batches that exceed this too
 
 
 class ExportRefused(Exception):
@@ -163,6 +166,45 @@ def _usable(entry: AuditEntry, judge: AggregatedJudgeResult | None) -> bool:
     return not (judge is not None and judge.voice_veto)
 
 
+def load_explanations(path: Path) -> dict[str, str]:
+    """A hand-written `{knock_key: explanation}` file. Shown to a player only
+    after they vote, so write what the visitor's words point to, not "the
+    answer is X" for an item nobody has decided yet.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+    ):
+        raise ExportRefused(f"{path} must be a JSON object of knock_key -> explanation text")
+    too_long = [k for k, v in data.items() if len(v) > _MAX_EXPLANATION_CHARS]
+    if too_long:
+        raise ExportRefused(
+            f"explanations over {_MAX_EXPLANATION_CHARS} characters: {', '.join(too_long)}"
+        )
+    return {k: v.strip() for k, v in data.items() if v.strip()}
+
+
+def attach_explanations(items: list[dict[str, object]], explanations: dict[str, str]) -> None:
+    """Adds `explanation` to matching items. Refuses a result where it's much
+    commoner on gold items than on the rest (or the reverse): players could
+    then pick out the cards with a known answer by spotting an explanation.
+    """
+    for item in items:
+        text = explanations.get(str(item["knock_key"]))
+        if text:
+            item["explanation"] = text
+    gold = [i for i in items if i["gold_answer"] is not None]
+    other = [i for i in items if i["gold_answer"] is None]
+    if not gold or not other:
+        return
+    share = lambda group: sum("explanation" in i for i in group) / len(group)  # noqa: E731
+    if abs(share(gold) - share(other)) > _MAX_COVERAGE_GAP:
+        raise ExportRefused(
+            f"explanations cover {share(gold):.0%} of gold items but {share(other):.0%} of "
+            "the rest; that would reveal which cards are gold. Explain both alike, or neither."
+        )
+
+
 def build_batch(
     entries: list[AuditEntry],
     allowed_keys: set[str],
@@ -171,6 +213,7 @@ def build_batch(
     *,
     batch_name: str | None = None,
     max_pairs_per_line: int = 3,
+    explanations: dict[str, str] | None = None,
 ) -> tuple[dict[str, object], int]:
     """The batch document, plus how many entries were skipped for not being
     in the manifest.
@@ -251,6 +294,9 @@ def build_batch(
                 }
             )
 
+    if explanations:
+        attach_explanations(items, explanations)
+
     if batch_name is None:
         digest = hashlib.sha256("|".join(str(i["knock_key"]) for i in items).encode("utf-8"))
         batch_name = digest.hexdigest()[:12]
@@ -274,6 +320,12 @@ def main() -> int:
     parser.add_argument("--metadata-store", type=Path, default=None)
     parser.add_argument("--batch", default=None, help="batch name (default: a content hash)")
     parser.add_argument("--max-pairs-per-line", type=int, default=3)
+    parser.add_argument(
+        "--explanations",
+        type=Path,
+        default=None,
+        help="JSON {knock_key: explanation}; shown to players after they vote",
+    )
     args = parser.parse_args()
 
     try:
@@ -292,14 +344,20 @@ def main() -> int:
         for key, meta in TrainingMetadataStore(args.metadata_store).all().items()
         if meta.judge is not None
     }
-    batch, skipped = build_batch(
-        entries,
-        allowed,
-        reviews,
-        judges,
-        batch_name=args.batch,
-        max_pairs_per_line=args.max_pairs_per_line,
-    )
+    try:
+        explanations = load_explanations(args.explanations) if args.explanations else None
+        batch, skipped = build_batch(
+            entries,
+            allowed,
+            reviews,
+            judges,
+            batch_name=args.batch,
+            max_pairs_per_line=args.max_pairs_per_line,
+            explanations=explanations,
+        )
+    except ExportRefused as exc:
+        print(f"Refusing: {exc}", file=sys.stderr)
+        return 2
     args.out.write_text(json.dumps(batch, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     items = batch["items"]
     assert isinstance(items, list)
